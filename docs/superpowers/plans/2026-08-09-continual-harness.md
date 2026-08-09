@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build two project-scoped Claude Code skills — `refine` (continual harness over ρ, G, K, M) and `horizon` (goal + gate + bounded continuation) — backed by three tested Python modules.
+**Goal:** Build two project-scoped Claude Code skills — `refine` (continual harness over ρ, G, K, M) and `horizon` (goal + gate + bounded continuation) — backed by five tested Python modules.
 
-**Architecture:** The mechanical core lives in `.claude/harness/bin/` as small, single-responsibility Python modules with pytest coverage: `tree_hash.py` (deterministic change detection), `goal.py` (goal state CRUD), `refine_log.py` (changelog + rollback). The two `SKILL.md` files are thin instruction layers that call these modules rather than re-deriving logic inline — that is what makes the risky behavior testable instead of vibes-based.
+**Architecture:** The mechanical core lives in `.claude/harness/bin/` as small, single-responsibility Python modules with pytest coverage: `paths.py` (location resolution), `tree_hash.py` (deterministic change detection), `goal.py` (goal state CRUD), `refine_log.py` (changelog + rollback), `gate.py` (gate execution and skip decision). The two `SKILL.md` files are thin instruction layers that call these modules rather than re-deriving logic inline — that is what makes the risky behavior testable instead of vibes-based.
 
 **Tech Stack:** Python 3.14 (stdlib only — no runtime dependencies), pytest via `uv run --with pytest` (no venv, no install step), git, markdown skills.
 
@@ -28,12 +28,14 @@
 | `.claude/harness/bin/tree_hash.py` | Deterministic change detection (§5.2.1) |
 | `.claude/harness/bin/goal.py` | Goal state create/load/checkpoint/complete (§5.1, §5.5) |
 | `.claude/harness/bin/refine_log.py` | Changelog append + undo (§4.2 step 6, §6) |
+| `.claude/harness/bin/gate.py` | Gate execution, skip decision, unrunnable detection (§5.2.1, §6) |
 | `.claude/skills/horizon/SKILL.md` | Goal/gate/continuation instructions (§5) |
 | `.claude/skills/refine/SKILL.md` | Harvest/route/propose instructions (§4) |
 | `tests/test_tree_hash.py` | T8 + unit coverage |
-| `tests/test_goal.py` | T4/T6 mechanics + §6 error handling |
+| `tests/test_goal.py` | Budget/completion contracts + §6 error handling |
 | `tests/test_refine_log.py` | T7 rollback |
-| `docs/superpowers/acceptance.md` | T1–T3, T5, T9, T10 acceptance procedures |
+| `tests/test_gate.py` | T4, T5, T6 |
+| `docs/superpowers/acceptance.md` | T1–T3, T9, T10 acceptance procedures |
 
 ---
 
@@ -864,7 +866,7 @@ Expected: 6 passed
 - [ ] **Step 5: Run the whole suite**
 
 Run: `uv run --with pytest pytest tests/ -v`
-Expected: 24 passed
+Expected: 43 passed (35 existing + 8 new)
 
 - [ ] **Step 6: Commit**
 
@@ -878,9 +880,256 @@ Two-phase record/commit so a failed edit leaves no undoable entry."
 
 ---
 
-### Task 4: The `horizon` skill
+### Task 4: Gate execution
 
-Implements §5 in full. Delivers acceptance tests T4, T5, T6, T10.
+Implements §5.2 step 4, §5.2.1, and the §6 unrunnable-gate row. Delivers T4, T5, T6 as automated tests.
+
+**Files:**
+- Create: `.claude/harness/bin/gate.py`
+- Test: `tests/test_gate.py`
+
+**Interfaces:**
+- Consumes: `tree_hash.changed/compute` (Task 1), `goal.create/load/checkpoint` (Task 2).
+- Produces:
+  - `gate.last_hash(state: dict) -> str | None`
+  - `gate.run_gate(state: dict, timeout: int = 900) -> tuple[str, str]` — returns `(result, output)` where result is `"pass" | "fail" | "skipped"`
+  - `gate.GateUnrunnable` — raised when the command cannot execute at all
+  - `gate.MAX_OUTPUT: int = 4000`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/test_gate.py`:
+
+```python
+import sys
+from pathlib import Path
+
+import pytest
+
+BIN = Path(__file__).resolve().parents[1] / ".claude" / "harness" / "bin"
+sys.path.insert(0, str(BIN))
+
+import gate  # noqa: E402
+import goal  # noqa: E402
+import tree_hash  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def isolated_goals(tmp_path, monkeypatch):
+    d = tmp_path / "goals"
+    d.mkdir()
+    monkeypatch.setattr(goal.paths, "goals_dir", lambda: d)
+    return d
+
+
+def _goal(repo: Path, gate_value: str, kind: str = "command"):
+    return goal.create(
+        goal="toy goal", cwd=str(repo), gate_kind=kind,
+        gate_value=gate_value, max_turns=5, watch_paths=[str(repo)],
+    )
+
+
+def _repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "proj"
+    repo.mkdir()
+    (repo / "a.txt").write_text("start")
+    return repo
+
+
+def test_skips_when_tree_unchanged(tmp_path):
+    """T5: an unchanged tree cannot produce a different gate result."""
+    repo = _repo(tmp_path)
+    state = _goal(repo, "exit 1")
+    h = tree_hash.compute(repo, [str(repo)])
+    goal.checkpoint(state["slug"], "did", "next", h, "fail", "")
+
+    assert gate.run_gate(goal.load(state["slug"])) == ("skipped", "")
+
+
+def test_runs_when_tree_changed(tmp_path):
+    repo = _repo(tmp_path)
+    state = _goal(repo, "exit 1")
+    goal.checkpoint(state["slug"], "did", "next", "stale-hash", "fail", "")
+
+    result, _ = gate.run_gate(goal.load(state["slug"]))
+    assert result == "fail"
+
+
+def test_runs_on_first_attempt_with_no_checkpoints(tmp_path):
+    repo = _repo(tmp_path)
+    state = _goal(repo, "exit 0")
+    assert gate.run_gate(state)[0] == "pass"
+
+
+def test_fails_then_passes_on_third_attempt(tmp_path):
+    """T4: the loop terminates exactly when the gate starts passing."""
+    repo = _repo(tmp_path)
+    script = repo / "gate.sh"
+    script.write_text(
+        "#!/bin/sh\n"
+        "n=$(cat n 2>/dev/null || echo 0)\n"
+        "n=$((n+1))\n"
+        "echo $n > n\n"
+        "[ $n -ge 3 ] && exit 0\n"
+        "exit 1\n"
+    )
+    script.chmod(0o755)
+
+    state = _goal(repo, "./gate.sh")
+    results = []
+    for i in range(3):
+        current = goal.load(state["slug"])
+        result, output = gate.run_gate(current)
+        goal.checkpoint(
+            state["slug"], f"attempt {i}", "retry",
+            tree_hash.compute(repo, [str(repo)]), result, output,
+        )
+        results.append(result)
+
+    assert results == ["fail", "fail", "pass"]
+
+
+def test_unrunnable_command_raises(tmp_path):
+    """Spec 6: an unrunnable gate is a broken goal, not work still to do.
+    Returning 'fail' here would burn the whole turn budget on a typo."""
+    repo = _repo(tmp_path)
+    state = _goal(repo, "definitely-not-a-real-command-xyz")
+    with pytest.raises(gate.GateUnrunnable):
+        gate.run_gate(state)
+
+
+def test_timeout_raises_unrunnable(tmp_path):
+    repo = _repo(tmp_path)
+    state = _goal(repo, "sleep 30")
+    with pytest.raises(gate.GateUnrunnable):
+        gate.run_gate(state, timeout=1)
+
+
+def test_output_is_bounded(tmp_path):
+    repo = _repo(tmp_path)
+    state = _goal(repo, "python3 -c \"print('E' * 20000)\"; exit 1")
+    result, output = gate.run_gate(state)
+    assert result == "fail"
+    assert len(output) <= gate.MAX_OUTPUT
+
+
+def test_coverage_gate_is_rejected(tmp_path):
+    """Coverage gates are judged by a fresh subagent, not by subprocess."""
+    repo = _repo(tmp_path)
+    state = _goal(repo, "every claim has a source", kind="coverage")
+    with pytest.raises(ValueError):
+        gate.run_gate(state)
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `uv run --with pytest pytest tests/test_gate.py -v`
+Expected: collection error — `ModuleNotFoundError: No module named 'gate'`
+
+- [ ] **Step 3: Write the implementation**
+
+Create `.claude/harness/bin/gate.py`:
+
+```python
+"""Gate execution for horizon (spec §5.2 step 4, §5.2.1, §6).
+
+Separated from the skill markdown so the loop's decision logic is unit
+tested once rather than re-derived in prose on every run.
+"""
+
+import subprocess
+
+import tree_hash
+
+MAX_OUTPUT = 4000
+DEFAULT_TIMEOUT = 900
+SHELL_NOT_FOUND = 127
+
+
+class GateUnrunnable(Exception):
+    """The gate command could not execute at all.
+
+    Distinct from a failing gate. An unrunnable gate is a broken goal — a
+    typo, a missing tool — and must stop the loop. A failing gate is work
+    still to do and must continue it. Conflating them spends the entire
+    turn budget re-running a command that was never going to run.
+    """
+
+
+def last_hash(state: dict) -> str | None:
+    """The tree_hash recorded by the most recent checkpoint, if any."""
+    checkpoints = state.get("checkpoints") or []
+    return checkpoints[-1]["tree_hash"] if checkpoints else None
+
+
+def run_gate(state: dict, timeout: int = DEFAULT_TIMEOUT) -> tuple[str, str]:
+    """Run the goal's gate. Returns (result, output).
+
+    result is "pass", "fail", or "skipped". Skipping happens only when the
+    tree is provably unchanged since the last checkpoint — see tree_hash,
+    where every uncertain path reports changed.
+    """
+    if state["gate"]["kind"] != "command":
+        raise ValueError(
+            "run_gate handles command gates only; a coverage gate is judged "
+            "by a fresh subagent that did not do the work"
+        )
+
+    if not tree_hash.changed(state["cwd"], state.get("watch_paths"), last_hash(state)):
+        return "skipped", ""
+
+    command = state["gate"]["value"]
+    try:
+        proc = subprocess.run(
+            command, shell=True, cwd=state["cwd"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise GateUnrunnable(f"gate timed out after {timeout}s: {command}") from e
+    except OSError as e:
+        raise GateUnrunnable(f"gate could not execute: {command}: {e}") from e
+
+    if proc.returncode == SHELL_NOT_FOUND:
+        raise GateUnrunnable(
+            f"gate command not found (exit 127): {command}. "
+            f"stderr: {proc.stderr.strip()[:200]}"
+        )
+
+    output = (proc.stdout + proc.stderr)[-MAX_OUTPUT:]
+    return ("pass" if proc.returncode == 0 else "fail"), output
+```
+
+Note on exit 127: POSIX shells reserve it for "command not found", so it
+is the reliable signal here. A gate that legitimately exits 127 would be
+misread as unrunnable — an acceptable trade, since stopping on a
+suspicious gate is the conservative direction.
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `uv run --with pytest pytest tests/test_gate.py -v`
+Expected: 8 passed
+
+- [ ] **Step 5: Run the whole suite**
+
+Run: `uv run --with pytest pytest tests/ -v`
+Expected: 43 passed (35 existing + 8 new)
+
+- [ ] **Step 6: Commit**
+
+```bash
+cd "/Users/deeps/Documents/NEW STUFF/fun "
+git add .claude/harness/bin/gate.py tests/test_gate.py
+git commit -m "feat(harness): gate execution with skip and unrunnable handling
+
+Automates T4/T5/T6. Distinguishes an unrunnable gate (broken goal, stop)
+from a failing gate (work to do, continue)."
+```
+
+---
+
+### Task 5: The `horizon` skill
+
+Implements §5 in full. Delivers acceptance test T10.
 
 **Files:**
 - Create: `.claude/skills/horizon/SKILL.md`
@@ -967,24 +1216,19 @@ false skip is a correctness bug, a false run costs seconds. On any doubt,
 run it.
 
 ```python
-import subprocess
+import gate
 
-prev = state["checkpoints"][-1]["tree_hash"] if state["checkpoints"] else None
-if not tree_hash.changed(state["cwd"], state["watch_paths"], prev):
-    result, output = "skipped", ""
-else:
-    proc = subprocess.run(
-        state["gate"]["value"], shell=True, cwd=state["cwd"],
-        capture_output=True, text=True, timeout=900,
-    )
-    output = (proc.stdout + proc.stderr)[-4000:]
-    result = "pass" if proc.returncode == 0 else "fail"
+try:
+    result, output = gate.run_gate(state)   # "pass" | "fail" | "skipped"
+except gate.GateUnrunnable as e:
+    # A broken goal, not work still to do. Stop and report the exact cause.
+    goal.abandon(state["slug"], f"gate unrunnable: {e}")
+    raise
 ```
 
-If the gate command cannot run at all (`FileNotFoundError`, non-zero
-setup, timeout), stop the loop and report the exact failure. Do not treat
-an unrunnable gate as a failing gate — the first is a broken goal, the
-second is work still to do.
+`run_gate` owns the skip decision, the subprocess, output bounding, and
+the unrunnable-vs-failing distinction — all unit tested in
+`tests/test_gate.py`. Do not reimplement any of it inline.
 
 For a `coverage` gate, dispatch a **fresh subagent that did not do the
 work** to judge it. Self-grading is the weakest link in any autonomous
@@ -1004,24 +1248,31 @@ Then: `goal.checkpoint(slug, did, next_action, h, result, output)`
 
 ## Subagents
 
-Store role and briefing, never a durable handle:
+Store role and briefing, never a durable handle, via `goal.add_subagent`
+— never write the goal state file directly. Any lower-level write path
+(e.g. `state["subagents"].append(...)` + `goal._save(state)`) bypasses
+the terminal-state guard and would silently persist bookkeeping onto a
+goal that already completed or was abandoned — this was Task 5's
+Critical review finding, closed by adding this function:
 
 ```python
-state["subagents"].append({
-    "role": "auth-reviewer", "name": "<agent name>",
-    "brief": "<full task description, sufficient to respawn cold>",
-    "last_seen_turn": state["used"]["turns"], "session": "<session id>",
-})
+goal.add_subagent(
+    slug, role="auth-reviewer", name="<agent name>",
+    brief="<full task description, sufficient to respawn cold>",
+)
 ```
+
+`add_subagent(slug, role, name, brief, last_seen_turn=None)` reloads
+state itself, raises `goal.GoalClosed` if the goal isn't `"active"`,
+bounds `brief`, defaults `last_seen_turn` to the goal's current turn
+count if omitted, appends the entry, and saves.
 
 - **Within a session:** address a live agent by name via `SendMessage`
   instead of respawning it cold.
-- **After a restart:** treat every entry as dead. `ListAgents` is scoped
-  to in-process subagents, so persisted handles do not resolve. Respawn
-  from `brief` plus the relevant checkpoints.
-
-Never attempt `SendMessage` against an entry whose `last_seen_turn`
-predates the current session.
+- **After a restart:** treat every entry as dead, no exceptions. Respawn
+  from `brief` plus the relevant checkpoints. Agent-listing tools are
+  scoped to in-process subagents, so a persisted handle does not resolve
+  after a restart.
 
 ## Relationship to other skills
 
@@ -1045,39 +1296,13 @@ Create `docs/superpowers/acceptance.md`:
 # Acceptance tests
 
 Unit-tested behavior lives in `tests/` and runs with
-`uv run --with pytest pytest tests/ -v`. The tests below exercise skill
-*behavior*, which cannot be asserted in pytest — they are run by invoking
-the skill and inspecting artifacts. Each states its pass criterion.
+`uv run --with pytest pytest tests/ -v`. **T4, T5, T6, T7, and T8 are
+automated there** — see `tests/test_gate.py`, `tests/test_goal.py`,
+`tests/test_refine_log.py`, `tests/test_tree_hash.py`.
 
-## T4 — horizon gate loop
-
-Fixture:
-
-```bash
-cd "$(mktemp -d)" && git init -q
-printf '#!/bin/sh\nn=$(cat n 2>/dev/null || echo 0)\nn=$((n+1))\necho $n > n\n[ $n -ge 3 ] && exit 0 || exit 1\n' > gate.sh
-chmod +x gate.sh
-```
-
-Run `/horizon "make the gate pass" --gate "./gate.sh" --max-turns 5`.
-
-**Pass:** stops on the third attempt, `status: complete`, and the report
-cites the gate output as evidence.
-
-## T5 — gate skip on unchanged tree
-
-Continue a goal without modifying any file.
-
-**Pass:** the checkpoint records `gate: "skipped"` and the gate command
-did not execute.
-
-## T6 — budget honesty
-
-Gate that never passes, `--max-turns 3`.
-
-**Pass:** stops at 3 turns, `status` stays `active`, the report names what
-is undone, and it does **not** claim success. `goal.complete` raises
-`GateNotPassed` if attempted.
+The tests below exercise skill *behavior*, which cannot be asserted in
+pytest — they are run by invoking the skill and inspecting artifacts.
+Each states its pass criterion.
 
 ## T1 — refine routing
 
@@ -1122,15 +1347,18 @@ Expected: file exists, frontmatter shows `name: horizon`.
 
 Restart Claude Code in this directory and confirm `horizon` appears in the available-skills list.
 
-- [ ] **Step 4: Run acceptance test T4**
+- [ ] **Step 4: Verify the skill calls gate.run_gate rather than reimplementing it**
 
-Follow `docs/superpowers/acceptance.md` T4 exactly. Record the result.
-Expected: stops on attempt 3 with `status: complete`.
+Run: `grep -n "subprocess" .claude/skills/horizon/SKILL.md || echo "OK: no inline subprocess"`
+Expected: `OK: no inline subprocess`. The loop's decision logic lives in
+`gate.py` where it is tested; the skill must call it.
 
-- [ ] **Step 5: Run acceptance tests T5 and T6**
+- [ ] **Step 5: Run acceptance test T10**
 
-Expected: T5 records `gate: "skipped"`; T6 stops at 3 turns without
-claiming success.
+Follow `docs/superpowers/acceptance.md` T10: populate `subagents` in a
+goal, resume in a fresh session.
+Expected: entries treated as dead and respawned from `brief` plus
+checkpoints; no `SendMessage` against a stale handle.
 
 - [ ] **Step 6: Commit**
 
@@ -1145,7 +1373,7 @@ gate; refuses to report exhausted budget as success."
 
 ---
 
-### Task 5: The `refine` skill
+### Task 6: The `refine` skill
 
 Implements §4 in full. Delivers acceptance tests T1, T2, T3, T9.
 
@@ -1319,7 +1547,7 @@ tests; T9 conforms to the memory contract.
 
 Run `/refine --undo` after T1, then:
 Run: `uv run --with pytest pytest tests/ -v && git status --short`
-Expected: 24 passed; the T1 memory file is gone; `CHANGELOG.md` carries a
+Expected: 43 passed; the T1 memory file is gone; `CHANGELOG.md` carries a
 `REVERTED` line.
 
 - [ ] **Step 6: Commit**
@@ -1335,7 +1563,7 @@ gate, and binding to the existing memory contract."
 
 ---
 
-### Task 6: Promotion readiness
+### Task 7: Promotion readiness
 
 Implements §8. Produces the evidence needed to decide whether to promote to user scope.
 
@@ -1350,7 +1578,7 @@ Implements §8. Produces the evidence needed to decide whether to promote to use
 - [ ] **Step 1: Run the full unit suite**
 
 Run: `uv run --with pytest pytest tests/ -v`
-Expected: 24 passed.
+Expected: 43 passed.
 
 - [ ] **Step 2: Record every acceptance result**
 
@@ -1376,12 +1604,20 @@ every future session.
 
 - [ ] **Step 4: Verify no writes escaped the project**
 
-Run:
+Check for the specific artifacts promotion would create, not for general
+mtime activity — Claude Code writes to `~/.claude/` continuously (logs,
+history, daemon state), so an mtime sweep returns noise and proves
+nothing.
+
 ```bash
-find ~/.claude -newermt "2026-08-09" -not -path "*/projects/*" -not -path "*/plugins/*" -type f 2>/dev/null | head
+test ! -e ~/.claude/skills/refine   && echo "OK: no global refine skill"
+test ! -e ~/.claude/skills/horizon  && echo "OK: no global horizon skill"
+test ! -e ~/.claude/harness         && echo "OK: no global harness dir"
+grep -c "harness" ~/.claude/CLAUDE.md 2>/dev/null || echo "OK: global CLAUDE.md untouched"
 ```
-Expected: no harness files listed. Nothing outside this project should
-have been modified before promotion is approved.
+
+Expected: all four OK lines. Nothing outside this project should have
+been modified before promotion is approved.
 
 - [ ] **Step 5: Commit**
 
@@ -1411,11 +1647,11 @@ designed to avoid.
 | §4.3 Guardrails G1–G4 | 5, acceptance T3 |
 | §4.4 Anti-patterns | 5 |
 | §5.1 State schema | 2 |
-| §5.2 The loop | 4 |
-| §5.2.1 tree_hash / skip rule | 1, acceptance T5 |
-| §5.3 Gate kinds | 2 (validation), 4 (usage) |
-| §5.4 Fan-out / subagents | 4, acceptance T10 |
-| §5.5 Completion contract | 2, acceptance T6 |
-| §6 Error handling | 1, 2, 3 |
-| §7 Tests T1–T10 | 1 (T8), 3 (T7), 4 (T4/T5/T6/T10), 5 (T1/T2/T3/T9) |
-| §8 Promotion | 6 |
+| §5.2 The loop | 4, 5 |
+| §5.2.1 tree_hash / skip rule | 1, 4 (T5) |
+| §5.3 Gate kinds | 2 (validation), 4 (execution), 5 (usage) |
+| §5.4 Fan-out / subagents | 5, acceptance T10 |
+| §5.5 Completion contract | 2 (T6) |
+| §6 Error handling | 1, 2, 3, 4 |
+| §7 Tests T1–T10 | 1 (T8), 2 (T6), 3 (T7), 4 (T4/T5), 5 (T10), 6 (T1/T2/T3/T9) |
+| §8 Promotion | 7 |
