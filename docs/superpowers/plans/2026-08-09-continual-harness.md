@@ -866,7 +866,7 @@ Expected: 6 passed
 - [ ] **Step 5: Run the whole suite**
 
 Run: `uv run --with pytest pytest tests/ -v`
-Expected: 32 passed
+Expected: 43 passed (35 existing + 8 new)
 
 - [ ] **Step 6: Commit**
 
@@ -1112,7 +1112,7 @@ Expected: 8 passed
 - [ ] **Step 5: Run the whole suite**
 
 Run: `uv run --with pytest pytest tests/ -v`
-Expected: 32 passed
+Expected: 43 passed (35 existing + 8 new)
 
 - [ ] **Step 6: Commit**
 
@@ -1540,7 +1540,7 @@ tests; T9 conforms to the memory contract.
 
 Run `/refine --undo` after T1, then:
 Run: `uv run --with pytest pytest tests/ -v && git status --short`
-Expected: 32 passed; the T1 memory file is gone; `CHANGELOG.md` carries a
+Expected: 43 passed; the T1 memory file is gone; `CHANGELOG.md` carries a
 `REVERTED` line.
 
 - [ ] **Step 6: Commit**
