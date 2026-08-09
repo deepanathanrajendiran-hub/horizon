@@ -1571,7 +1571,7 @@ Implements §8. Produces the evidence needed to decide whether to promote to use
 - [ ] **Step 1: Run the full unit suite**
 
 Run: `uv run --with pytest pytest tests/ -v`
-Expected: 32 passed.
+Expected: 43 passed.
 
 - [ ] **Step 2: Record every acceptance result**
 
