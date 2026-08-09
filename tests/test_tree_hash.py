@@ -142,6 +142,35 @@ def test_compute_refuses_to_guess_when_subtree_unreadable(tmp_path):
         os.chmod(locked, 0o755)
 
 
+def test_compute_raises_when_watch_root_unstattable(tmp_path):
+    """IMPORTANT 4: pre-fix, _walk_entries() used root.exists(), which
+    swallows any OSError (not just ENOENT) and returns False -- so an
+    unstattable watch ROOT (distinct from Task 1's unreadable-subtree fix)
+    produced a stable MISSING sentinel. Two consecutive computes would then
+    agree, changed() would report False, and the gate would be skipped
+    forever. The fix must let genuine permission-denied errors on the root
+    itself propagate, not collapse to MISSING.
+
+    Removing read/execute from the watch root's PARENT (not the root
+    itself) makes root.stat() raise PermissionError while leaving the root
+    directory's own permissions untouched -- this isolates the root-level
+    failure from Task 1's already-fixed child-subtree failure.
+    """
+    repo = _repo(tmp_path)
+    locked_parent = tmp_path / "locked_parent"
+    locked_parent.mkdir()
+    watch_root = locked_parent / "watched"
+    watch_root.mkdir()
+    (watch_root / "f.txt").write_text("v1")
+
+    os.chmod(locked_parent, 0o000)
+    try:
+        with pytest.raises(OSError):
+            tree_hash.compute(repo, [str(watch_root)])
+    finally:
+        os.chmod(locked_parent, 0o755)
+
+
 def test_non_git_directory_uses_walk_only(tmp_path):
     plain = tmp_path / "plain"
     plain.mkdir()

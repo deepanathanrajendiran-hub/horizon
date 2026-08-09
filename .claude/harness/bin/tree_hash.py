@@ -15,6 +15,7 @@ seconds. Every failure path in this module reports "changed".
 
 import hashlib
 import os
+import stat
 import subprocess
 from pathlib import Path
 
@@ -45,11 +46,12 @@ def _reraise(err: OSError) -> None:
 
 def _walk_entries(root: Path) -> list[str]:
     """One line per file: path, mtime_ns, size. Sorted for determinism."""
-    if not root.exists():
+    try:
+        root_stat = root.stat()
+    except FileNotFoundError:
         return [f"{root}\x00MISSING"]
-    if root.is_file():
-        st = root.stat()
-        return [f"{root}\x00{st.st_mtime_ns}\x00{st.st_size}"]
+    if stat.S_ISREG(root_stat.st_mode):
+        return [f"{root}\x00{root_stat.st_mtime_ns}\x00{root_stat.st_size}"]
 
     entries: list[str] = []
     for dirpath, dirnames, filenames in os.walk(root, onerror=_reraise):
