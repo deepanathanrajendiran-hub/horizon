@@ -137,7 +137,12 @@ except gate.CoverageGate:
     # reply becomes result ("pass" or "fail" — never "skipped", coverage
     # gates always get a fresh judgment) and output (its reasoning,
     # bounded to a few thousand characters).
-    result, output = "pass", "<subagent verdict + reasoning>"  # placeholder for the real Agent call
+    #
+    # A placeholder in a verification path must never be the passing
+    # value: an agent running this verbatim without dispatching the judge
+    # would otherwise auto-complete every coverage goal on a fabricated
+    # verdict, silently. Fail loud instead.
+    raise NotImplementedError("dispatch the judge subagent here")
 except gate.GateUnrunnable as e:
     # A broken goal, not work still to do: command not found (exit 127),
     # not executable (exit 126), or it timed out. Stop — do not retry
