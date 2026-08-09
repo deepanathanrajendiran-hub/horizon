@@ -170,3 +170,28 @@ def abandon(slug: str, reason: str) -> dict:
     state["abandoned_reason"] = reason
     state["abandoned_at"] = _now()
     return _save(state)
+
+
+def add_subagent(slug: str, role: str, name: str, brief: str,
+                  last_seen_turn: int | None = None) -> dict:
+    """Append a subagent entry, guarded the same way as every other mutator.
+
+    Writing to the state file any other way (e.g. reaching for the
+    private save helper directly) skips this terminal-state guard,
+    letting bookkeeping for a subagent silently land on a goal that
+    already completed or was abandoned.
+    """
+    state = load(slug)
+    if state["status"] != "active":
+        raise GoalClosed(
+            f"cannot add subagent: goal status is {state['status']!r}, not active"
+        )
+    if last_seen_turn is None:
+        last_seen_turn = state["used"]["turns"]
+    state["subagents"].append({
+        "role": role,
+        "name": name,
+        "brief": _bounded(brief),
+        "last_seen_turn": last_seen_turn,
+    })
+    return _save(state)

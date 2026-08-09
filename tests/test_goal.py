@@ -185,3 +185,44 @@ def test_abandon_after_abandon_raises_goal_closed():
         goal.abandon(state["slug"], "second reason")
     reloaded = goal.load(state["slug"])
     assert reloaded["abandoned_reason"] == "first reason"
+
+def test_add_subagent_after_complete_raises_goal_closed(isolated_goals):
+    """add_subagent must be guarded the same as checkpoint/complete/abandon:
+    bookkeeping for a subagent must not silently land on a closed goal."""
+    state = _make()
+    goal.checkpoint(state["slug"], "fixed it", "none", "h1", "pass", "ok")
+    goal.complete(state["slug"], "ok")
+    path = isolated_goals / f"{state['slug']}.json"
+    before = path.read_text()
+    with pytest.raises(goal.GoalClosed):
+        goal.add_subagent(state["slug"], "auth-reviewer", "auth-reviewer-1", "brief")
+    assert path.read_text() == before
+    reloaded = goal.load(state["slug"])
+    assert reloaded["subagents"] == []
+
+
+def test_add_subagent_appends_and_persists():
+    state = _make()
+    goal.add_subagent(state["slug"], "auth-reviewer", "auth-reviewer-1",
+                       "review the auth module", last_seen_turn=0)
+    reloaded = goal.load(state["slug"])
+    assert reloaded["subagents"] == [{
+        "role": "auth-reviewer",
+        "name": "auth-reviewer-1",
+        "brief": "review the auth module",
+        "last_seen_turn": 0,
+    }]
+
+    # default last_seen_turn falls back to the goal's current turn count
+    goal.checkpoint(state["slug"], "did", "next", "h1", "fail")
+    goal.add_subagent(state["slug"], "second-reviewer", "second-reviewer-1", "brief 2")
+    reloaded = goal.load(state["slug"])
+    assert reloaded["subagents"][1]["last_seen_turn"] == 1
+
+
+def test_add_subagent_bounds_oversized_brief():
+    state = _make()
+    goal.add_subagent(state["slug"], "role", "name", "B" * 10000)
+    stored = goal.load(state["slug"])["subagents"][0]["brief"]
+    assert len(stored) <= goal.MAX_GATE_OUTPUT + 32
+    assert "truncated" in stored

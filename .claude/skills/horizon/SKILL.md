@@ -127,14 +127,17 @@ try:
 except gate.CoverageGate:
     # run_gate raises this unconditionally for gate_kind == "coverage",
     # before it even looks at tree_hash — coverage gates have no skip
-    # path; every checkpoint gets a fresh judgment. Dispatch a FRESH
-    # subagent that did NOT do the work to judge the coverage criterion
-    # (state["gate"]["value"]) against what actually happened this turn.
-    # Self-grading is the weakest link in any autonomous loop,  and an
-    # agent that graded its own research will pass itself. The subagent's
-    # verdict becomes result ("pass" or "fail" — never "skipped") and
-    # output (its reasoning, bounded to a few thousand characters).
-    result, output = "pass", "<subagent verdict + reasoning>"  # placeholder
+    # path; every checkpoint gets a fresh judgment. Dispatch via the
+    # Agent tool (any subagent_type other than "fork", so it starts with
+    # no memory of this goal's work) with a prompt containing the
+    # coverage criterion (state["gate"]["value"]) plus what actually
+    # happened this turn — never a summary written by the agent that did
+    # the work. Self-grading is the weakest link in any autonomous loop,
+    # and an agent that graded its own research will pass itself. Its
+    # reply becomes result ("pass" or "fail" — never "skipped", coverage
+    # gates always get a fresh judgment) and output (its reasoning,
+    # bounded to a few thousand characters).
+    result, output = "pass", "<subagent verdict + reasoning>"  # placeholder for the real Agent call
 except gate.GateUnrunnable as e:
     # A broken goal, not work still to do: command not found (exit 127),
     # not executable (exit 126), or it timed out. Stop — do not retry
@@ -211,49 +214,57 @@ still needs a real next increment.
 | `goal.complete` | `GateNotPassed` | last checkpoint's gate isn't `"pass"` | don't call complete yet; budget exhaustion is not success |
 | `gate.run_gate` | `CoverageGate` | gate kind is `"coverage"` | dispatch a fresh subagent (Step 4) |
 | `gate.run_gate` | `GateUnrunnable` | exit 126 (not executable), exit 127 (not found), or timeout | `goal.abandon` and stop; this is a broken goal, not work left to do |
+| `goal.add_subagent` | `GoalClosed` | goal status is not `"active"` | same as `checkpoint`/`complete`/`abandon`: reload and report the real status |
 
 ## Subagents
 
-Store role and briefing, never a durable handle, in `state["subagents"]`:
+Store role and briefing, never a durable handle, via `goal.add_subagent`
+— **never write the goal state file directly.** Any lower-level write
+path bypasses the terminal-state guard and would silently persist
+bookkeeping onto a goal that already completed or was abandoned.
+`add_subagent` is guarded the same way `checkpoint`/`complete`/`abandon`
+are:
 
 ```python
-state = goal.load(slug)
-state["subagents"].append({
-    "role": "auth-reviewer", "name": "<agent name>",
-    "brief": "<full task description, sufficient to respawn cold>",
-    "last_seen_turn": state["used"]["turns"], "session": "<session id>",
-})
-goal._save(state)
+goal.add_subagent(
+    slug, role="auth-reviewer", name="auth-reviewer-1",
+    brief="Review the auth module for OWASP top-10 issues; "
+          "report findings with file:line citations.",
+)
 ```
 
-**Known gap, called out explicitly:** `goal.py` exports no public
-function to persist a state mutation outside of `create`/`checkpoint`/
-`complete`/`abandon`, and none of those four touch `subagents`. `_save`
-is the only mechanism that writes an arbitrary mutated state dict to
-disk, and while it's private by naming convention, it is the sanctioned
-way to do this — the test suite reaches for the identical pattern
-(`goal._save(state)`) in `tests/test_goal.py::
-test_budget_exhausted_at_max_minutes` for the same reason: a mutation
-`checkpoint`/`complete`/`abandon` don't cover. If a future revision of
-`goal.py` adds a public setter for `subagents`, switch to it.
+`add_subagent(slug, role, name, brief, last_seen_turn=None)` reloads
+state itself (like `checkpoint`, it takes `slug`, not an in-memory
+`state`), raises `goal.GoalClosed` if the goal isn't `"active"`, bounds
+`brief` the same way `checkpoint` bounds gate output, defaults
+`last_seen_turn` to the goal's current turn count if omitted, appends the
+entry, and saves. Call it any time after Step 1 — it does not need to be
+sequenced with a checkpoint call.
 
-If you just checkpointed this turn, append to the state `checkpoint`
-returned rather than reloading:
+Dispatch the subagent itself via the `Agent` tool, using the same `brief`
+text for both the prompt and the recorded entry, and give it the `name`
+you recorded so it can be addressed later:
 
 ```python
-state = goal.checkpoint(slug, did, next_action, h, result, output)
-state["subagents"].append({...})
-goal._save(state)
+# Agent(subagent_type="general-purpose", name="auth-reviewer-1",
+#       prompt="Review the auth module for OWASP top-10 issues; "
+#              "report findings with file:line citations.")
 ```
 
 - **Within a session:** address a live agent by name via `SendMessage`
   instead of respawning it cold.
-- **After a restart:** treat every entry as dead. Agent-listing tools are
+- **After a restart:** treat every entry as dead, no exceptions. Respawn
+  from `brief` plus the relevant checkpoints. Agent-listing tools are
   scoped to in-process subagents, so a persisted handle does not resolve
-  after a restart. Respawn from `brief` plus the relevant checkpoints.
+  after a restart — and nothing under `.claude/harness/` records which
+  turn a session began at, so there is no way to compute staleness more
+  precisely than "this is a new session."
 
-Never attempt `SendMessage` against an entry whose `last_seen_turn`
-predates the current session.
+  This deliberately deviates from the design spec, whose `subagents`
+  schema listed a `session` field for staleness detection: it is dropped
+  here because nothing populates it from a real source, so a rule built
+  on it could never actually be checked. `last_seen_turn` is kept as a
+  plain record of when the entry was made, not as a staleness signal.
 
 ## Relationship to other skills
 
