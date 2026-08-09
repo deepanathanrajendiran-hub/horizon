@@ -1,0 +1,285 @@
+---
+name: horizon
+description: Use when a task needs to survive across turns or sessions - long research sweeps, multi-step refactors, "keep working until X passes". Establishes a goal with a verification gate, checkpoints after every increment, and continues under a bounded budget until the gate passes.
+---
+
+# Horizon: goal, gate, bounded continuation
+
+Long-horizon work fails for one reason: state lives in context, and
+context ends. This skill moves state to disk after every increment, using
+three modules at `.claude/harness/bin/` — `goal.py` (goal state),
+`gate.py` (gate execution), `tree_hash.py` (change detection). The skill
+calls these modules; it does not reimplement their logic. If a step below
+can't be done by calling one of them, stop and say so rather than
+inventing an inline substitute.
+
+## Setup
+
+Every invocation is a `python3 -c` one-liner (or an equivalent inline
+Python block) run from the project root. Quote the path — the project
+directory name ends in a space.
+
+```bash
+cd "/Users/deeps/Documents/NEW STUFF/fun " && python3 -c "
+import sys; sys.path.insert(0, '.claude/harness/bin')
+import goal, gate, tree_hash
+print('modules load OK')
+"
+```
+
+`goal.py` has no function to list goals. To find an existing slug, list
+the state directory directly:
+
+```bash
+ls "/Users/deeps/Documents/NEW STUFF/fun "/.claude/harness/goals/*.json 2>/dev/null || echo "no goals yet"
+```
+
+To load one: `goal.load(slug)`. It raises **`goal.GoalStateError`** if the
+file is missing, unreadable, not a JSON object, or missing any of the
+required keys (`slug, goal, cwd, gate, watch_paths, budget, used, status,
+checkpoints, subagents`). Never guess a goal's state around this error —
+report it and ask whether to fix the file or start a fresh goal.
+`goal.GoalClosed` (raised by the mutators below) is a **subclass** of
+`GoalStateError`, so a bare `except goal.GoalStateError` also catches it;
+catch `GoalClosed` first if you need to tell the two apart.
+
+## Step 1 — Establish the goal
+
+Never start without a gate. A loop with no termination criterion is an
+infinite loop, and `goal.create` enforces this itself: it raises
+**`goal.GateRequired`** if `gate_value` is missing or blank, or if
+`gate_kind` is anything other than `"command"` or `"coverage"`.
+
+Gate kinds:
+- `command` — a shell command that must exit 0 (`npm test`, `pytest -q`).
+  Judged mechanically by `gate.run_gate`.
+- `coverage` — a written completeness criterion for research goals, e.g.
+  "every claim carries a source; no sub-question left unanswered". Judged
+  by a freshly spawned subagent (Step 4) — never mechanically.
+
+If the user gave no gate, propose one and get explicit confirmation
+before calling `create`.
+
+```python
+state = goal.create(
+    goal="<the objective>",
+    cwd="<absolute path>",
+    gate_kind="command",
+    gate_value="npm run check",
+    max_turns=20,
+    watch_paths=["<output dir>"],   # narrow this for research goals
+)
+slug = state["slug"]
+```
+
+`create` writes `.claude/harness/goals/<slug>.json` and returns the new
+state: `status: "active"`, `used: {"turns": 0, ...}`, `checkpoints: []`,
+`subagents: []`.
+
+## Step 2 — Work one increment
+
+Reload state fresh at the top of every turn — never carry an in-memory
+`state` object across a turn boundary:
+
+```python
+state = goal.load(slug)
+```
+
+Do the smallest unit of real work that moves toward the goal. Not the
+whole thing. The loop is what makes progress, not any single turn.
+
+## Step 3 — Hash the tree, before anything else touches it
+
+Immediately after the increment, and **before calling `gate.run_gate`**:
+
+```python
+h = tree_hash.compute(state["cwd"], state["watch_paths"])
+```
+
+**This ordering is load-bearing.** `h` must be the hash of the tree the
+gate is *about to evaluate* — not whatever the tree looks like after the
+gate has already run. Compute it now, hold onto it, and pass this exact
+value to `goal.checkpoint` in Step 5. Do not recompute it afterward and
+use that instead.
+
+Why it matters: a gate command can itself write into the watched tree —
+a counter file, a coverage report, a build artifact. If you compute the
+hash *after* `run_gate` returns, the hash captures that write. On the
+*next* turn, `run_gate`'s skip check compares the current tree to the
+hash recorded in the previous checkpoint; if nothing else touched the
+tree between that checkpoint and this call, the comparison reports
+"unchanged" and the gate is silently skipped — even though it should run
+again. This is not hypothetical: `tests/test_gate.py::
+test_fails_then_passes_on_third_attempt` guards exactly this. Its gate
+script writes its own attempt counter into the watched repo as a side
+effect; the test hashes *before* calling `run_gate` for the reason
+above, and its comment spells out that hashing after collapses the
+intended `fail → fail → pass` sequence into `fail → skipped → skipped`.
+
+## Step 4 — Run the gate
+
+One call site handles both gate kinds — do not branch on `gate["kind"]`
+yourself first; let `run_gate` tell you what it needs via the exception:
+
+```python
+try:
+    result, output = gate.run_gate(state)   # "pass" | "fail" | "skipped"
+except gate.CoverageGate:
+    # run_gate raises this unconditionally for gate_kind == "coverage",
+    # before it even looks at tree_hash — coverage gates have no skip
+    # path; every checkpoint gets a fresh judgment. Dispatch a FRESH
+    # subagent that did NOT do the work to judge the coverage criterion
+    # (state["gate"]["value"]) against what actually happened this turn.
+    # Self-grading is the weakest link in any autonomous loop,  and an
+    # agent that graded its own research will pass itself. The subagent's
+    # verdict becomes result ("pass" or "fail" — never "skipped") and
+    # output (its reasoning, bounded to a few thousand characters).
+    result, output = "pass", "<subagent verdict + reasoning>"  # placeholder
+except gate.GateUnrunnable as e:
+    # A broken goal, not work still to do: command not found (exit 127),
+    # not executable (exit 126), or it timed out. Stop — do not retry
+    # blindly, that burns the whole turn budget on a command that was
+    # never going to run. Report the exact cause from `e`.
+    goal.abandon(slug, f"gate unrunnable: {e}")
+    raise
+```
+
+`gate.CoverageGate` is deliberately **not** a `ValueError` — catch it by
+name. `run_gate` owns the skip decision, spawning the gate command,
+output bounding (`gate.MAX_OUTPUT` = 4000 chars), and the
+unrunnable-vs-failing distinction, all unit tested in
+`tests/test_gate.py`. Do not reimplement any of it inline.
+
+## Step 5 — Checkpoint
+
+Record what happened using the hash from Step 3 — not a freshly computed
+one — and the result from Step 4:
+
+```python
+state = goal.checkpoint(slug, did, next_action, h, result, output)
+```
+
+Write `did` and `next_action` in plain language for a stranger: `next` is
+read by a future session that has none of your current context.
+`checkpoint` reloads state from disk itself (it takes `slug`, not your
+in-memory `state`), appends the checkpoint, increments `used.turns`, and
+returns the fresh saved state — reassign `state` to it.
+
+`checkpoint` raises **`goal.GoalClosed`** if the goal's status is not
+`"active"` (already `"complete"` or `"abandoned"`). In the normal loop
+this shouldn't happen — Step 6 stops the loop once status leaves
+`"active"` — but if it does (a stale slug, a concurrent process), do not
+assume the checkpoint landed: catch it, reload, and report the real
+status.
+
+## Step 6 — Continue or stop
+
+```python
+if result == "pass":
+    done = goal.complete(slug, output)
+    # report success with `output` (the gate evidence) attached
+elif goal.budget_exhausted(state):
+    # stop. report honestly: what is done, what is not, what the next
+    # action would be. Never describe an exhausted budget as success.
+    pass
+else:
+    # result was "fail" or "skipped" and budget remains — feed the
+    # bounded output back as the next increment's input. Return to Step 2.
+    pass
+```
+
+`goal.complete(slug, output)` raises **`goal.GateNotPassed`** unless the
+*last checkpoint's* `gate` field is exactly `"pass"` — so it will refuse
+if called after a fail, a skip, or on a goal with no checkpoints. It
+raises **`goal.GoalClosed`** if the goal is already complete or
+abandoned. Budget exhaustion never bypasses this: if the last gate result
+is not `"pass"`, `complete` refuses regardless of `budget_exhausted`.
+
+Note that `"fail"` and `"skipped"` are handled identically here: a skip
+means the tree didn't change since the last attempt, which is not
+evidence of progress either — it still counts against the budget and
+still needs a real next increment.
+
+## Errors at a glance
+
+| Call | Exception | Meaning | Action |
+|---|---|---|---|
+| `goal.create` | `GateRequired` | no/blank gate, or bad `gate_kind` | fix the call; never create a gate-less goal |
+| `goal.load` | `GoalStateError` | file missing, unreadable, not an object, or missing required keys | report; do not guess state |
+| `goal.checkpoint` / `complete` / `abandon` | `GoalClosed` (subclass of `GoalStateError`) | goal status is not `"active"` | reload and report the real status |
+| `goal.checkpoint` | `ValueError` | `gate_result` not one of `pass/fail/skipped` | fix the caller — this is a bug in the skill's own call, not a runtime condition to handle |
+| `goal.complete` | `GateNotPassed` | last checkpoint's gate isn't `"pass"` | don't call complete yet; budget exhaustion is not success |
+| `gate.run_gate` | `CoverageGate` | gate kind is `"coverage"` | dispatch a fresh subagent (Step 4) |
+| `gate.run_gate` | `GateUnrunnable` | exit 126 (not executable), exit 127 (not found), or timeout | `goal.abandon` and stop; this is a broken goal, not work left to do |
+
+## Subagents
+
+Store role and briefing, never a durable handle, in `state["subagents"]`:
+
+```python
+state = goal.load(slug)
+state["subagents"].append({
+    "role": "auth-reviewer", "name": "<agent name>",
+    "brief": "<full task description, sufficient to respawn cold>",
+    "last_seen_turn": state["used"]["turns"], "session": "<session id>",
+})
+goal._save(state)
+```
+
+**Known gap, called out explicitly:** `goal.py` exports no public
+function to persist a state mutation outside of `create`/`checkpoint`/
+`complete`/`abandon`, and none of those four touch `subagents`. `_save`
+is the only mechanism that writes an arbitrary mutated state dict to
+disk, and while it's private by naming convention, it is the sanctioned
+way to do this — the test suite reaches for the identical pattern
+(`goal._save(state)`) in `tests/test_goal.py::
+test_budget_exhausted_at_max_minutes` for the same reason: a mutation
+`checkpoint`/`complete`/`abandon` don't cover. If a future revision of
+`goal.py` adds a public setter for `subagents`, switch to it.
+
+If you just checkpointed this turn, append to the state `checkpoint`
+returned rather than reloading:
+
+```python
+state = goal.checkpoint(slug, did, next_action, h, result, output)
+state["subagents"].append({...})
+goal._save(state)
+```
+
+- **Within a session:** address a live agent by name via `SendMessage`
+  instead of respawning it cold.
+- **After a restart:** treat every entry as dead. Agent-listing tools are
+  scoped to in-process subagents, so a persisted handle does not resolve
+  after a restart. Respawn from `brief` plus the relevant checkpoints.
+
+Never attempt `SendMessage` against an entry whose `last_seen_turn`
+predates the current session.
+
+## Relationship to other skills
+
+This is the outer loop. It re-enters `superpowers:executing-plans` and
+`superpowers:verification-before-completion` rather than replacing them,
+and defers to `superpowers:brainstorming` / `writing-plans` for deciding
+*what* to build.
+
+## Resuming
+
+```bash
+cd "/Users/deeps/Documents/NEW STUFF/fun " && python3 -c "
+import sys, json; sys.path.insert(0, '.claude/harness/bin')
+import goal
+state = goal.load('<slug>')
+print('status:', state['status'])
+print('turns used:', state['used']['turns'], '/', state['budget']['max_turns'])
+for cp in state['checkpoints'][-3:]:
+    print(cp['turn'], cp['gate'], '-', cp['next'])
+"
+```
+
+This restores the goal, the budget spent, and the last `next` action. If
+`goal.load` raises `GoalStateError`, the slug is wrong or the file is
+damaged — do not fabricate a fresh goal under the same slug; report it.
+Read the last three checkpoints before acting — they are the context you
+no longer have. If `state["subagents"]` is non-empty, every entry is dead
+per the restart rule above; respawn from `brief` only if the goal
+actually still needs that line of work.
