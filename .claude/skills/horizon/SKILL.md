@@ -93,7 +93,17 @@ whole thing. The loop is what makes progress, not any single turn.
 Immediately after the increment, and **before calling `gate.run_gate`**:
 
 ```python
-h = tree_hash.compute(state["cwd"], state["watch_paths"])
+try:
+    h = tree_hash.compute(state["cwd"], state["watch_paths"])
+except Exception:
+    # tree_hash.changed() absorbs this same condition into its doubt-path
+    # (spec §5.2.1) -- an unreadable watched tree must not kill the turn
+    # here, after the increment's work already landed on disk but before
+    # the checkpoint recording it. Dying here would tell a resuming
+    # session to redo work that's already done. "unknown" can never equal
+    # a real hash, so the next turn's changed() cannot match it and will
+    # correctly run the gate again instead of skipping.
+    h = "unknown"
 ```
 
 **This ordering is load-bearing.** `h` must be the hash of the tree the
@@ -220,6 +230,7 @@ still needs a real next increment.
 | `gate.run_gate` | `CoverageGate` | gate kind is `"coverage"` | dispatch a fresh subagent (Step 4) |
 | `gate.run_gate` | `GateUnrunnable` | exit 126 (not executable), exit 127 (not found), or timeout | `goal.abandon` and stop; this is a broken goal, not work left to do |
 | `goal.add_subagent` | `GoalClosed` | goal status is not `"active"` | same as `checkpoint`/`complete`/`abandon`: reload and report the real status |
+| `tree_hash.compute` (Step 3) | any `Exception` | watched tree unreadable — same condition `tree_hash.changed()` absorbs per spec §5.2.1 | do not let it kill the turn; catch it and checkpoint with the sentinel hash `"unknown"` so the increment's work already on disk is still recorded, and the next turn's `changed()` cannot mistake `"unknown"` for a match |
 
 ## Subagents
 
