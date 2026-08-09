@@ -123,5 +123,46 @@ def test_coverage_gate_is_rejected(tmp_path):
     """Coverage gates are judged by a fresh subagent, not by subprocess."""
     repo = _repo(tmp_path)
     state = _goal(repo, "every claim has a source", kind="coverage")
-    with pytest.raises(ValueError):
+    with pytest.raises(gate.CoverageGate):
         gate.run_gate(state)
+
+
+def test_coverage_gate_exception_is_not_a_value_error(tmp_path):
+    """CoverageGate must be distinct from ValueError, or a coincidental
+    ValueError anywhere else in the call chain would be swallowed by the
+    same handler and silently misrouted as ordinary coverage handling."""
+    assert not issubclass(gate.CoverageGate, ValueError)
+
+
+def test_permission_denied_raises_unrunnable(tmp_path):
+    """Exit 126 (found but not executable) is a broken goal too — a script
+    checked out of git or unpacked from a tarball without the execute bit
+    is far more common than a 127 typo, and must not be treated as 'fail'
+    (work still to do), which would burn the whole turn budget re-running
+    a command that will deterministically 126 forever."""
+    repo = _repo(tmp_path)
+    script = repo / "noexec.sh"
+    script.write_text("#!/bin/sh\necho hi\n")
+    script.chmod(0o644)  # deliberately not executable
+
+    state = _goal(repo, "./noexec.sh")
+    with pytest.raises(gate.GateUnrunnable):
+        gate.run_gate(state)
+
+
+def test_timeout_kills_process_group(tmp_path):
+    """A timed-out gate must not leave grandchildren running. Background a
+    child that sleeps briefly then writes a sentinel file; if the process
+    group survives the timeout, the sentinel appears after we return."""
+    import time
+
+    repo = _repo(tmp_path)
+    sentinel = repo / "sentinel"
+    command = f'sh -c \'sleep 3 && touch "{sentinel}" & wait\''
+    state = _goal(repo, command)
+
+    with pytest.raises(gate.GateUnrunnable):
+        gate.run_gate(state, timeout=1)
+
+    time.sleep(4)  # past the backgrounded sleep's delay
+    assert not sentinel.exists()
