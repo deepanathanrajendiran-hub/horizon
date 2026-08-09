@@ -1248,24 +1248,31 @@ Then: `goal.checkpoint(slug, did, next_action, h, result, output)`
 
 ## Subagents
 
-Store role and briefing, never a durable handle:
+Store role and briefing, never a durable handle, via `goal.add_subagent`
+— never write the goal state file directly. Any lower-level write path
+(e.g. `state["subagents"].append(...)` + `goal._save(state)`) bypasses
+the terminal-state guard and would silently persist bookkeeping onto a
+goal that already completed or was abandoned — this was Task 5's
+Critical review finding, closed by adding this function:
 
 ```python
-state["subagents"].append({
-    "role": "auth-reviewer", "name": "<agent name>",
-    "brief": "<full task description, sufficient to respawn cold>",
-    "last_seen_turn": state["used"]["turns"], "session": "<session id>",
-})
+goal.add_subagent(
+    slug, role="auth-reviewer", name="<agent name>",
+    brief="<full task description, sufficient to respawn cold>",
+)
 ```
+
+`add_subagent(slug, role, name, brief, last_seen_turn=None)` reloads
+state itself, raises `goal.GoalClosed` if the goal isn't `"active"`,
+bounds `brief`, defaults `last_seen_turn` to the goal's current turn
+count if omitted, appends the entry, and saves.
 
 - **Within a session:** address a live agent by name via `SendMessage`
   instead of respawning it cold.
-- **After a restart:** treat every entry as dead. `ListAgents` is scoped
-  to in-process subagents, so persisted handles do not resolve. Respawn
-  from `brief` plus the relevant checkpoints.
-
-Never attempt `SendMessage` against an entry whose `last_seen_turn`
-predates the current session.
+- **After a restart:** treat every entry as dead, no exceptions. Respawn
+  from `brief` plus the relevant checkpoints. Agent-listing tools are
+  scoped to in-process subagents, so a persisted handle does not resolve
+  after a restart.
 
 ## Relationship to other skills
 
