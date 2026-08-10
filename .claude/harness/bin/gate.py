@@ -97,3 +97,29 @@ def run_gate(state: dict, timeout: int = DEFAULT_TIMEOUT) -> tuple[str, str]:
 
     output = (stdout + stderr)[-MAX_OUTPUT:]
     return ("pass" if proc.returncode == 0 else "fail"), output
+
+
+def run_gate_at(state: dict, timeout: int = DEFAULT_TIMEOUT) -> tuple[str, str, str]:
+    """`run_gate`, plus the tree hash the gate was actually evaluated against.
+
+    A checkpoint must record the state the gate *judged*, not the state left
+    behind after it ran. Getting that backwards makes the next turn see an
+    unchanged tree and skip — turning fail/fail/pass into
+    fail/skipped/skipped. That ordering bug shipped once in this project's
+    own test suite precisely because `run_gate` returned no hash and left the
+    timing to the caller's discipline.
+
+    Returns (result, output, evaluated_hash). Pass `evaluated_hash` straight
+    to `goal.checkpoint()` — never recompute it after the gate has run.
+
+    On an unreadable watch tree the hash cannot be computed; rather than
+    losing the checkpoint entirely, the sentinel `"unknown"` is returned. It
+    can never equal a real digest, so the next turn is guaranteed to run the
+    gate rather than skip.
+    """
+    try:
+        evaluated = tree_hash.compute(state["cwd"], state.get("watch_paths"))
+    except Exception:
+        evaluated = "unknown"
+    result, output = run_gate(state, timeout=timeout)
+    return result, output, evaluated

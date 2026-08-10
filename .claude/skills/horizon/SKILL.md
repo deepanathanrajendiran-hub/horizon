@@ -15,23 +15,37 @@ inventing an inline substitute.
 
 ## Setup
 
-Every invocation is a `python3 -c` one-liner (or an equivalent inline
-Python block) run from the project root. Quote the path — the project
-directory name ends in a space.
+Every invocation is an inline Python block. It finds the harness modules
+at runtime rather than hardcoding a path: nearest `.claude/harness/bin`
+walking up from the working directory, falling back to
+`~/.claude/harness/bin` for a promoted install. Never hardcode a project
+path here — a skill promoted to `~/.claude/skills/` is shared by every
+project, and a baked-in path would send another project's goals, ledger
+and undo entries into whichever project the path happened to name.
 
 ```bash
-cd "/Users/deeps/Documents/NEW STUFF/fun " && python3 -c "
-import sys; sys.path.insert(0, '.claude/harness/bin')
-import goal, gate, tree_hash
-print('modules load OK')
-"
+python3 - <<'PY'
+import sys, pathlib
+_c = pathlib.Path.cwd().resolve()
+_bin = next((c / ".claude/harness/bin" for c in (_c, *_c.parents)
+             if (c / ".claude/harness/bin").is_dir()),
+            pathlib.Path.home() / ".claude/harness/bin")
+sys.path.insert(0, str(_bin))
+import goal, gate, tree_hash, paths
+print('modules load OK, harness at', paths.harness_root())
+PY
 ```
+
+`paths.harness_root()` resolves per project the same way, so goal state
+and the changelog always belong to the project being worked on, never to
+wherever the modules happen to live.
 
 `goal.py` has no function to list goals. To find an existing slug, list
 the state directory directly:
 
 ```bash
-ls "/Users/deeps/Documents/NEW STUFF/fun "/.claude/harness/goals/*.json 2>/dev/null || echo "no goals yet"
+ls "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"/.claude/harness/goals/*.json \
+  2>/dev/null || echo "no goals yet"
 ```
 
 To load one: `goal.load(slug)`. It raises **`goal.GoalStateError`** if the
@@ -88,23 +102,31 @@ state = goal.load(slug)
 Do the smallest unit of real work that moves toward the goal. Not the
 whole thing. The loop is what makes progress, not any single turn.
 
-## Step 3 — Hash the tree, before anything else touches it
+## Step 3 — Run the gate and capture the hash it judged
 
-Immediately after the increment, and **before calling `gate.run_gate`**:
+Use `gate.run_gate_at`, which hashes the tree and then runs the gate,
+returning both. It exists so this ordering cannot be got wrong by a
+caller:
 
 ```python
-try:
-    h = tree_hash.compute(state["cwd"], state["watch_paths"])
-except Exception:
-    # tree_hash.changed() absorbs this same condition into its doubt-path
-    # (spec §5.2.1) -- an unreadable watched tree must not kill the turn
-    # here, after the increment's work already landed on disk but before
-    # the checkpoint recording it. Dying here would tell a resuming
-    # session to redo work that's already done. "unknown" can never equal
-    # a real hash, so the next turn's changed() cannot match it and will
-    # correctly run the gate again instead of skipping.
-    h = "unknown"
+result, output, h = gate.run_gate_at(state)   # result: "pass"|"fail"|"skipped"
 ```
+
+`h` is the hash of the tree the gate *actually evaluated*. Pass this exact
+value to `goal.checkpoint` in Step 5. Do not recompute it afterward — see
+the reasoning below for what that breaks.
+
+If the watched tree is unreadable, `run_gate_at` returns the sentinel
+`"unknown"` rather than raising, so the turn still checkpoints. An
+unreadable tree must not kill the turn *after* the increment's work has
+landed on disk but *before* the record of it — that would tell a resuming
+session to redo work already done. `"unknown"` can never equal a real
+digest, so the next turn is guaranteed to run the gate rather than skip.
+
+The older two-call form (`tree_hash.compute` then `gate.run_gate`) still
+works and appears in `tests/test_gate.py`, but prefer `run_gate_at`: the
+single call is what makes the ordering structural instead of a discipline
+you have to remember.
 
 **This ordering is load-bearing.** `h` must be the hash of the tree the
 gate is *about to evaluate* — not whatever the tree looks like after the
@@ -133,7 +155,7 @@ yourself first; let `run_gate` tell you what it needs via the exception:
 
 ```python
 try:
-    result, output = gate.run_gate(state)   # "pass" | "fail" | "skipped"
+    result, output, h = gate.run_gate_at(state)  # "pass" | "fail" | "skipped"
 except gate.CoverageGate:
     # run_gate raises this unconditionally for gate_kind == "coverage",
     # before it even looks at tree_hash — coverage gates have no skip
@@ -292,15 +314,21 @@ and defers to `superpowers:brainstorming` / `writing-plans` for deciding
 ## Resuming
 
 ```bash
-cd "/Users/deeps/Documents/NEW STUFF/fun " && python3 -c "
-import sys, json; sys.path.insert(0, '.claude/harness/bin')
+python3 - <<'PY'
+import sys, pathlib
+_c = pathlib.Path.cwd().resolve()
+_bin = next((c / ".claude/harness/bin" for c in (_c, *_c.parents)
+             if (c / ".claude/harness/bin").is_dir()),
+            pathlib.Path.home() / ".claude/harness/bin")
+sys.path.insert(0, str(_bin))
+import json
 import goal
 state = goal.load('<slug>')
 print('status:', state['status'])
 print('turns used:', state['used']['turns'], '/', state['budget']['max_turns'])
 for cp in state['checkpoints'][-3:]:
     print(cp['turn'], cp['gate'], '-', cp['next'])
-"
+PY
 ```
 
 This restores the goal, the budget spent, and the last `next` action. If

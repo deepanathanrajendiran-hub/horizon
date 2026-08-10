@@ -6,6 +6,7 @@ a /loop firing. Nothing here trusts in-memory state.
 """
 
 import json
+import os
 import re
 from datetime import datetime, timezone
 
@@ -49,7 +50,26 @@ def _bounded(text: str) -> str:
 
 def slugify(text: str) -> str:
     s = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
-    return s[:SLUG_MAX].strip("-")
+    s = s[:SLUG_MAX].strip("-")
+    # An all-punctuation goal ("???") reduces to nothing, which would name
+    # the state file ".json" — hidden, and shared by every such goal.
+    return s or "goal"
+
+
+def _unique_slug(base: str) -> str:
+    """`base`, or `base-2`, `base-3`... — whichever is free.
+
+    Two goals with the same title must not share a state file: the second
+    `create()` would silently overwrite the first, destroying its
+    checkpoints and its record of what had already been done.
+    """
+    d = paths.goals_dir()
+    if not (d / f"{base}.json").exists():
+        return base
+    n = 2
+    while (d / f"{base}-{n}.json").exists():
+        n += 1
+    return f"{base}-{n}"
 
 
 def _path(slug: str):
@@ -57,7 +77,23 @@ def _path(slug: str):
 
 
 def _save(state: dict) -> dict:
-    _path(state["slug"]).write_text(json.dumps(state, indent=2) + "\n")
+    """Write the state file atomically.
+
+    The checkpoints are the only thing that lets a future session resume, so
+    a torn write loses the goal. Write beside the target and rename over it:
+    POSIX rename is atomic, so the file is either entirely the old state or
+    entirely the new one, never half of each.
+    """
+    target = _path(state["slug"])
+    tmp = target.parent / f".{target.name}.tmp-{os.getpid()}"
+    try:
+        tmp.write_text(json.dumps(state, indent=2) + "\n")
+        os.replace(tmp, target)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
     return state
 
 
@@ -72,7 +108,7 @@ def create(goal, cwd, gate_kind, gate_value,
         raise GateRequired(f"gate_kind must be 'command' or 'coverage', got {gate_kind!r}")
 
     state = {
-        "slug": slugify(goal),
+        "slug": _unique_slug(slugify(goal)),
         "goal": goal,
         "cwd": str(cwd),
         "gate": {"kind": gate_kind, "value": gate_value},

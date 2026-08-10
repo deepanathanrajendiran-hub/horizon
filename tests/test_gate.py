@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -117,6 +118,11 @@ def test_output_is_bounded(tmp_path):
     result, output = gate.run_gate(state)
     assert result == "fail"
     assert len(output) <= gate.MAX_OUTPUT
+    # Bounded is not enough: a head- or middle-truncating implementation
+    # would also pass a length-only assertion, while inverting the contract.
+    # A failing gate puts its actionable diagnosis at the END, so keeping the
+    # head is keeping the useless part.
+    assert output.rstrip().endswith("E"), "truncation dropped the tail"
 
 
 def test_coverage_gate_is_rejected(tmp_path):
@@ -166,3 +172,33 @@ def test_timeout_kills_process_group(tmp_path):
 
     time.sleep(4)  # past the backgrounded sleep's delay
     assert not sentinel.exists()
+
+
+def test_run_gate_at_returns_the_hash_it_evaluated(tmp_path):
+    """The caller must checkpoint the tree the gate JUDGED. run_gate_at
+    returns it so caller-side timing cannot be got wrong -- the ordering bug
+    that shipped in this suite's own T4 test."""
+    repo = _repo(tmp_path)
+    state = _goal(repo, "true")
+    expected = tree_hash.compute(str(repo), [str(repo)])
+
+    result, output, evaluated = gate.run_gate_at(state)
+
+    assert result == "pass"
+    assert evaluated == expected, "returned hash is not the pre-gate tree state"
+
+
+def test_run_gate_at_uses_a_sentinel_when_the_tree_is_unreadable(tmp_path):
+    """An unreadable watch tree must not lose the checkpoint. "unknown" can
+    never equal a real digest, so the next turn is guaranteed to run."""
+    repo = _repo(tmp_path)
+    locked = repo / "locked"
+    locked.mkdir()
+    state = _goal(repo, "true")
+    os.chmod(locked, 0o000)
+    try:
+        result, _, evaluated = gate.run_gate_at(state)
+        assert evaluated == "unknown"
+        assert tree_hash.changed(str(repo), [str(repo)], evaluated) is True
+    finally:
+        os.chmod(locked, 0o755)

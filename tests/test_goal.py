@@ -226,3 +226,38 @@ def test_add_subagent_bounds_oversized_brief():
     stored = goal.load(state["slug"])["subagents"][0]["brief"]
     assert len(stored) <= goal.MAX_GATE_OUTPUT + 32
     assert "truncated" in stored
+
+
+def test_slugify_never_produces_an_empty_slug():
+    """An all-punctuation goal would otherwise name the file ".json" --
+    hidden, and shared by every other such goal."""
+    assert goal.slugify("???") == "goal"
+    assert goal.slugify("!!! ???") == "goal"
+
+
+def test_two_goals_with_the_same_title_do_not_collide(isolated_goals):
+    """The second create() must not overwrite the first's checkpoints."""
+    a = _make(goal="Fix the login bug")
+    goal.checkpoint(a["slug"], "did work in A", "next", "h1", "fail", "")
+    b = _make(goal="Fix the login bug")
+
+    assert a["slug"] != b["slug"], "second goal reused the first's state file"
+    assert goal.load(a["slug"])["checkpoints"][0]["did"] == "did work in A"
+    assert goal.load(b["slug"])["checkpoints"] == []
+
+
+def test_save_is_atomic(isolated_goals, monkeypatch):
+    """A failure mid-write must leave the previous state intact, not a
+    truncated file -- the checkpoints are the only thing that lets a future
+    session resume."""
+    st = _make()
+    goal.checkpoint(st["slug"], "real work", "next", "h1", "fail", "")
+    before = (isolated_goals / f"{st['slug']}.json").read_text()
+
+    monkeypatch.setattr(goal.os, "replace",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("boom")))
+    with pytest.raises(OSError):
+        goal.checkpoint(st["slug"], "doomed", "next", "h2", "fail", "")
+
+    assert (isolated_goals / f"{st['slug']}.json").read_text() == before
+    assert not list(isolated_goals.glob(".*tmp*")), "temp file left behind"

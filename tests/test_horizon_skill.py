@@ -42,7 +42,7 @@ def test_step4_coverage_placeholder_raises_not_implemented():
         GateUnrunnable = _FakeGateUnrunnable
 
         @staticmethod
-        def run_gate(state):
+        def run_gate_at(state):
             raise _FakeCoverageGate("coverage gate dispatched")
 
     class fake_goal:
@@ -61,47 +61,62 @@ def test_step4_coverage_placeholder_raises_not_implemented():
     assert namespace.get("result") != "pass"
 
 
-def test_step3_survives_unreadable_watch_tree():
-    """IMPORTANT 6: tree_hash.changed() absorbs an unreadable watched tree
-    into its doubt-path (spec §5.2.1), but Step 3 called bare
-    tree_hash.compute(), which raises on the same condition. That would
-    kill the turn after the increment's work landed on disk but before the
-    checkpoint recording it -- a resumed session would be told to redo
-    completed work. Step 3 must catch the exception and fall back to the
-    sentinel hash "unknown", which can never equal a future real hash, so
-    the next turn's changed() cannot mistake it for "unchanged"."""
+def test_step3_calls_run_gate_at_and_binds_the_returned_hash():
+    """Step 3 must take its hash FROM the gate call, not compute one itself.
+
+    The two-call form (tree_hash.compute, then gate.run_gate) leaves the
+    ordering to the caller's discipline, and getting it backwards turns
+    fail/fail/pass into fail/skipped/skipped -- a bug that shipped once in
+    this project's own T4 test. run_gate_at returns the hash it actually
+    evaluated so the ordering is structural. This guards against anyone
+    reintroducing the split form in the skill text.
+    """
     snippet = _extract_fenced_block(
-        "## Step 3 — Hash the tree, before anything else touches it"
+        "## Step 3 — Run the gate and capture the hash it judged"
     )
 
     class fake_tree_hash:
         @staticmethod
         def compute(cwd, watch_paths):
-            raise OSError("simulated: watch root unstattable")
+            raise AssertionError("Step 3 recomputed the hash instead of using run_gate_at's")
+
+    class fake_gate:
+        CoverageGate = _FakeCoverageGate
+        GateUnrunnable = _FakeGateUnrunnable
+
+        @staticmethod
+        def run_gate_at(state):
+            return "fail", "gate output", "hash-the-gate-judged"
 
     namespace = {
+        "gate": fake_gate,
         "tree_hash": fake_tree_hash,
         "state": {"cwd": "/x", "watch_paths": ["/x"]},
     }
+    exec(compile(snippet, "<horizon Step 3>", "exec"), namespace)
+
+    assert namespace["h"] == "hash-the-gate-judged"
+    assert namespace["result"] == "fail"
+
+
+def test_step3_sentinel_survives_an_unreadable_tree():
+    """An unreadable watched tree must not kill the turn after the
+    increment's work has landed on disk but before the checkpoint recording
+    it -- a resumed session would be told to redo completed work. The
+    sentinel can never equal a real digest, so the next turn runs the gate
+    rather than skipping."""
+    snippet = _extract_fenced_block(
+        "## Step 3 — Run the gate and capture the hash it judged"
+    )
+
+    class fake_gate:
+        CoverageGate = _FakeCoverageGate
+        GateUnrunnable = _FakeGateUnrunnable
+
+        @staticmethod
+        def run_gate_at(state):
+            return "fail", "", "unknown"   # what run_gate_at yields on an unreadable tree
+
+    namespace = {"gate": fake_gate, "state": {"cwd": "/x", "watch_paths": ["/x"]}}
     exec(compile(snippet, "<horizon Step 3>", "exec"), namespace)
     assert namespace["h"] == "unknown"
-
-
-def test_step3_still_uses_the_real_hash_on_success():
-    """Sanity: the try/except must not mask a healthy compute() -- the
-    real hash must still flow through to `h` when nothing fails."""
-    snippet = _extract_fenced_block(
-        "## Step 3 — Hash the tree, before anything else touches it"
-    )
-
-    class fake_tree_hash:
-        @staticmethod
-        def compute(cwd, watch_paths):
-            return "real-hash-abc123"
-
-    namespace = {
-        "tree_hash": fake_tree_hash,
-        "state": {"cwd": "/x", "watch_paths": ["/x"]},
-    }
-    exec(compile(snippet, "<horizon Step 3>", "exec"), namespace)
-    assert namespace["h"] == "real-hash-abc123"
