@@ -21,7 +21,7 @@ library.
 4. [`horizon` — surviving long tasks](#4-horizon--surviving-long-tasks)
 5. [`refine` — learning between sessions](#5-refine--learning-between-sessions)
 6. [The guardrails, and why they exist](#6-the-guardrails-and-why-they-exist)
-7. [Under the hood — the five modules](#7-under-the-hood--the-five-modules)
+7. [Under the hood — the six modules](#7-under-the-hood--the-six-modules)
 8. [How it was built](#8-how-it-was-built)
 9. [Bugs worth knowing about](#9-bugs-worth-knowing-about)
 10. [Current state](#10-current-state)
@@ -227,9 +227,12 @@ So `refine` is fenced four ways:
 
 - **G1 — Evidence required.** Every proposal cites a concrete moment. No
   speculative "this might help someday" edits.
-- **G2 — Cap of 3** per session, enforced against a **persisted count** in
-  `CHANGELOG.md`, not against my own recollection. A guardrail that depends on
-  the constrained party's memory isn't a guardrail.
+- **G2 — Cap of 3**, counted from the **stored entries**, not from my own
+  recollection and not from my agreement to stop. `apply_edit()` raises
+  `CapReached` on the fourth edit and writes nothing. The window is a rolling
+  24 hours rather than a UTC calendar day, because a session running past
+  midnight would otherwise be handed a fresh budget mid-trajectory. Reverted
+  edits still count — otherwise apply-then-undo is an unlimited budget.
 - **G3 — No self-exemption.** It may never edit its own rules, the code
   enforcing them, or `horizon`'s verification logic — and may never propose
   anything, anywhere, that softens G1, G2, or G4.
@@ -240,11 +243,15 @@ So `refine` is fenced four ways:
 ```
 blocked — edit refine's own rules
 blocked — same file, lowercase spelling      ← macOS is case-insensitive
+blocked — via a symlinked parent directory
 blocked — the enforcement code itself
 blocked — the GLOBAL copies under ~/.claude  ← everything --global targets
 blocked — the ledger the cap is counted from
-blocked — settings.json / hooks              ← these can run arbitrary shell
+blocked — settings.json / hooks / commands   ← these can run arbitrary shell
+blocked — .claude.json / .mcp.json           ← these define MCP servers
 blocked — a hardlink to a protected file
+blocked — the 4th edit in 24h                ← G2, refused in code
+blocked — "you have standing approval..."    ← G3's semantic half, below
 ```
 
 ### The subtlest guardrail
@@ -255,24 +262,37 @@ guardrails aren't loaded in it. A proposal reading as reasonable prose ("you
 maintain the harness layer; you have standing approval for maintenance") would
 pass every rule and then edit `CLAUDE.md` with no logging, no cap, no undo.
 
-G3 now closes it: every harness write goes through `apply_edit()`, and any
+G3 closes it two ways. Every harness write goes through `apply_edit()`, and any
 proposal creating a skill/subagent/hook must **state what write authority it
 claims** as part of what you're approving.
 
+But no path denylist can reach this one: `~/.claude/skills/harness-maintainer/
+SKILL.md` is an ordinary path. What makes it a second write path is its *text*.
+So `apply_edit()` also scans content, and refuses a skill or subagent whose body
+references `refine_log`, targets `.claude/harness/`, or claims standing approval
+or a maintenance role — plus, at any layer, text that proposes raising the cap,
+skipping approval, or weakening tests.
+
+**This is a tripwire, not a proof.** A determined paraphrase gets past it. It
+exists so the shape an audit actually found fails closed rather than depending on
+me to notice it, and the approval gate remains the real defence. If it fires on
+something innocent, that file is yours to write by hand — the rule is that
+`refine` cannot make that class of change on its own authority.
+
 ---
 
-## 7. Under the hood — the five modules
+## 7. Under the hood — the six modules
 
 `.claude/harness/bin/`, standard library only:
 
 | Module | Lines | Job |
 |---|---|---|
-| `paths.py` | ~60 | Find the current project; resolve where state lives |
-| `filelock.py` | ~85 | Serialise read-modify-write across processes |
+| `paths.py` | 69 | Find the current project; resolve where state lives |
+| `filelock.py` | 109 | Serialise read-modify-write across processes |
 | `tree_hash.py` | 105 | Detect whether files changed, conservatively |
-| `goal.py` | 233 | Goal state: create, checkpoint, complete, abandon |
-| `gate.py` | 125 | Run the gate; decide skip; unrunnable vs failing |
-| `refine_log.py` | ~380 | Apply approved edits, snapshot, roll back |
+| `goal.py` | 365 | Goal state: create, checkpoint, complete, abandon, reopen |
+| `gate.py` | 214 | Run the gate; decide skip; unrunnable vs failing |
+| `refine_log.py` | 660 | Apply approved edits, enforce the cap, snapshot, roll back |
 
 ### Two design decisions worth understanding
 
@@ -286,6 +306,14 @@ fixed, and guarded by a regression test.
 execute bit, timeout) is a *broken goal* and stops the loop. A gate that fails
 is *work still to do* and continues it. Conflating them burns the entire turn
 budget re-running a command that could never have worked.
+
+**A lock is released by inode, never by name.** `filelock` reclaims a lock older
+than 60 seconds, on the assumption its holder died. If the holder was merely
+slow, it then finished and unlinked the *path* — deleting the new holder's lock
+while that holder was still inside its critical section, after which every
+waiter walked straight in. Both the reclaim and the release now check that the
+file still is the inode they opened. Overstaying costs you your lock; it no
+longer takes someone else's with it.
 
 ---
 
@@ -303,14 +331,23 @@ brainstorm → spec → external review → plan → 7 tasks
                                    one fix wave → re-review → merge
 ```
 
-**40+ commits. 9 reviews. 18 fix rounds. 105 tests.**
+**50+ commits. 10 reviews. 18 fix rounds. 154 tests.**
 
-The ninth review was different in kind: a fresh agent given the code and
-**explicitly denied** this README, the docs, and the git history, so it
-could not re-report conclusions the authors had already reached. It found
-three Criticals the previous eight had missed. Its diagnosis of why is the
-part worth keeping: *"The tests were written to the same mental model as
+The last two reviews were different in kind: a fresh agent given the code and
+**explicitly denied** this README, the docs, and the git history, so it could
+not re-report conclusions the authors had already reached. Each found Criticals
+that every review before it had missed. The first cold audit's diagnosis of why
+is the part worth keeping: *"The tests were written to the same mental model as
 the code, so they inherit its blind spots."*
+
+The second cold audit, run against the *fixed* code, found three more —
+including one bug introduced by the previous round's fix. Its verdict on the
+design is worth recording too, since it disagrees with the thing it was
+reviewing: it would keep `refine`'s write layer and about **20% of `horizon`**
+— the goal file, the gate, atomic checkpoints, and the refusal to call budget
+exhaustion success — and cut the rest as over-built. *"390 lines of prose for
+`load → work → gate → checkpoint → repeat` is where two of these findings hid;
+cut it to a page and the contradictions have nowhere to live."*
 
 Every task used a fresh subagent with no memory of previous tasks, then an
 independent reviewer, then targeted fix rounds, then a scoped re-review of
@@ -386,6 +423,64 @@ asserting an edit that never happened and an `undo()` that reverted an
 untouched file — while the real change had no snapshot at all. `apply_edit()`
 now takes the content and does the write.
 
+### The skip optimisation could deadlock the loop
+
+`horizon` skips the gate when the tree is provably unchanged — a real saving on
+an expensive test suite. But a skip does no work, so the tree is still unchanged
+next turn, so it skips again. Reproduced: `fail, fail`, then **eight consecutive
+skips** against a gate that would have passed on its third run — its counter
+lived outside `watch_paths`, where neither git nor the mtime walk could see it
+advance. The goal could never complete and burned its entire budget looking
+busy. Skip is now never allowed twice in a row.
+
+### A fix that opened a different hole in the same function
+
+Replacing the inode-based denylist with path patterns (to cover the `--global`
+targets the literal list never reached) lost case-insensitivity and stopped
+resolving symlinked *parents*. `.claude/Skills/refine/SKILL.md` overwrote the
+real rules. The fix was right; the regression it introduced was found only by
+an audit that hadn't watched it being written.
+
+### `undo()` crashed on this repo's own history
+
+Three entries here predate the current schema. They parse as valid JSON, so the
+`CorruptEntry` check never fired, and `undo()` hit a bare `KeyError` — which the
+skill's documented `try/except` doesn't catch, because `CorruptEntry` is what it
+was told to expect. Every existing memory was un-undoable. Entry *shape* is now
+validated, not just JSON syntax.
+
+### The cap was a number I reported to myself
+
+`apply_edit` applied every edit it was given. The cap of 3 lived entirely in the
+skill's prose: a limit the constrained party enforces against itself, which is
+self-attestation with extra steps. Two other skills' worth of guardrails were
+enforced in code while this one — the one that bounds how much the system can
+rewrite itself — was a printed count and a request. It now refuses.
+
+### Two memories in one session, one index line
+
+Both proposals read `MEMORY.md` before either wrote, so each rendered a full
+body containing exactly one new line, and the second silently dropped the
+first's. The memory file survived; its index entry didn't — and nothing in the
+entry or the changelog showed anything was lost. Index appends are now resolved
+against the file's current bytes *inside the lock*, not from the agent's
+possibly-stale read.
+
+### One hand-edit blocked every undo behind it
+
+`undo()` only ever reached the newest un-reverted entry. Touch that entry's
+target by hand and it raises `UndoConflict` forever — and every older entry was
+stuck behind it, unreachable. `undo(entry_id=…)` now selects, and the sha check
+still refuses any revert that would destroy content it never snapshotted.
+
+### A test I wrote caught a bug in the fix I was writing
+
+Passing the already-computed tree hash into `run_gate` (to stop hashing the same
+tree twice per turn) made the `"unknown"` sentinel — recorded when the watch tree
+can't be read — compare equal to itself. Two unreadable turns in a row would have
+skipped the gate forever. The test asserting `"unknown"` never skips was written
+before the code was finished, and failed on the first run.
+
 ### The promotion recipe would have cross-contaminated every project
 
 Proven with two real projects before fixing:
@@ -399,8 +494,12 @@ projB silently overwrote projA's identically-titled goal, destroying its checkpo
 
 ## 10. Current state
 
-**105 tests passing.** Acceptance: **9 PASS / 1 NOT RUN** — see
+**154 tests passing.** Acceptance: **9 PASS / 1 NOT RUN** — see
 `docs/superpowers/results.md` for the full table with cited artifacts.
+
+Every fix in the last two rounds was verified by **neutering it and confirming
+the covering test fails** — 11 of 11 discriminate. A test that passes against
+the pre-fix code proves nothing, and this project has shipped two of those.
 
 T1, T2, T3 and T9 were run **live**, with real proposals you approved. The
 only unrun test is T10 (subagent restart safety), which needs a genuinely
@@ -453,24 +552,33 @@ genuinely open now:
 3. **The `--global` promotion path is implemented but unexercised in
    anger.** Two-project isolation is proven in tests; nobody has lived
    with it for a week.
-4. **Nothing verifies the pre-flight ran.** `count_edits_today()` is
-   called by the skill, and a skill is instructions. Making the cap
-   unbypassable would require a hook, not markdown.
+4. **G3's semantic half is a tripwire, not a proof.** The content scan
+   catches the literal shapes an audit found. A paraphrase that never says
+   "standing approval" and never names `refine_log` would pass it. Only the
+   approval gate — you, reading the proposal — actually closes this.
+5. **The cap is per-project and per-24h, not per-trajectory.** Two unrelated
+   sessions in one project within a day share one budget of 3. That is the
+   safe direction of the error, and it will occasionally be annoying.
+6. **`horizon` is over-built for what it does**, on the assessment of the
+   audit that had no stake in it. The core — goal file, gate, atomic
+   checkpoints, no-success-without-a-passing-gate — is sound and tested. The
+   surrounding 400 lines of prose are where two of the last three Criticals
+   hid. A shorter version would be a better version.
 
 ## 13. File map
 
 ```
 .claude/
   skills/
-    horizon/SKILL.md      340 lines — goal, gate, checkpoint, continuation
-    refine/SKILL.md       498 lines — harvest, route, propose, log, undo
+    horizon/SKILL.md      417 lines — goal, gate, checkpoint, continuation
+    refine/SKILL.md       541 lines — harvest, route, propose, log, undo
   harness/
-    bin/                  5 Python modules, stdlib only
+    bin/                  6 Python modules, stdlib only
     CHANGELOG.md          every approved harness edit, newest last
     goals/                live goal state (one JSON file per goal)
     undo/                 pre-edit snapshots that make rollback possible
 
-tests/                    105 tests
+tests/                    154 tests, in 7 files
 docs/superpowers/
   specs/                  the design, and the external review that shaped it
   plans/                  the 7-task implementation plan
@@ -505,13 +613,20 @@ None of that was caught by writing more carefully. It was caught by running
 things against the code that still had the bug, and by asking an independent
 reviewer to attack the fix rather than confirm it.
 
-The strongest single result came from the audit that was denied all of this
+The strongest single result came from the audits that were denied all of this
 context. Eight reviews by people who knew the design missed a cap that a
 newline defeats, a denylist covering three literal paths while its own prose
 claimed otherwise, and an approval gate whose enforcement layer never saw the
 approved content. A reviewer who shares your mental model will check whether
 you implemented what you meant. Only one who doesn't will ask whether what
 you meant is what the code does.
+
+The second cold audit made a sharper point, because it ran against code that had
+already survived one. It found a bug *introduced by the previous round's fix*, a
+guardrail that was enforced everywhere except in the one function that could
+enforce it, and a crash reachable from this repository's own three-entry
+history. The lesson isn't "audit once." It's that each round of fixes is new
+code, and new code has not been audited by the round that motivated it.
 
 That's what the third memory in your directory says, and it's the one most
 worth keeping.

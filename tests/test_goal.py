@@ -307,3 +307,56 @@ def test_bounded_keeps_the_tail_like_gate_does(isolated_goals):
     stored = goal.load(st["slug"])["checkpoints"][0]["gate_output"]
     assert stored.endswith("THE-VERDICT")
     assert len(stored) <= goal.MAX_GATE_OUTPUT + 32
+
+
+# ------------------------------------------------------------ reopen (I6/M4)
+
+def test_reopen_returns_an_abandoned_goal_to_active():
+    """Abandonment was terminal, so a goal abandoned by mistake could only
+    be replaced by a new one that started with no checkpoints — the record
+    of what had been done was still on disk and no longer reachable."""
+    st = _make()
+    goal.checkpoint(st["slug"], "did some work", "next", "h", "fail", "")
+    goal.abandon(st["slug"], "blocked on a missing credential")
+
+    goal.reopen(st["slug"], "the credential arrived")
+    state = goal.load(st["slug"])
+    assert state["status"] == "active"
+    assert len(state["checkpoints"]) == 1, "reopening lost the work record"
+    assert state["reopen_history"][0]["was_abandoned_for"] == "blocked on a missing credential"
+
+    goal.checkpoint(st["slug"], "more work", "next", "h2", "pass", "ok")
+    assert goal.load(st["slug"])["used"]["turns"] == 2
+
+
+def test_reopen_refuses_a_completed_goal():
+    """A completed goal has a passing gate on record; reopening would let
+    that evidence stand for later work it never judged."""
+    st = _make()
+    goal.checkpoint(st["slug"], "did", "next", "h", "pass", "ok")
+    goal.complete(st["slug"], "ok")
+    with pytest.raises(goal.GoalClosed):
+        goal.reopen(st["slug"], "one more thing")
+
+
+def test_reopen_does_not_silently_refresh_the_budget():
+    st = _make(max_turns=1)
+    goal.checkpoint(st["slug"], "did", "next", "h", "fail", "")
+    goal.abandon(st["slug"], "out of turns")
+
+    goal.reopen(st["slug"], "worth another look")
+    assert goal.budget_exhausted(goal.load(st["slug"])) is True
+
+    goal.abandon(st["slug"], "again")
+    goal.reopen(st["slug"], "grant more", extra_turns=2)
+    assert goal.budget_exhausted(goal.load(st["slug"])) is False
+    assert goal.load(st["slug"])["budget"]["max_turns"] == 3
+
+
+def test_reopen_rejects_a_budget_grant_that_cannot_bound():
+    st = _make()
+    goal.abandon(st["slug"], "r")
+    with pytest.raises(goal.BudgetInvalid):
+        goal.reopen(st["slug"], "r", extra_turns=0)
+    with pytest.raises(goal.BudgetInvalid):
+        goal.reopen(st["slug"], "r", extra_turns=True)

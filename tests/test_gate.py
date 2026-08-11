@@ -276,3 +276,42 @@ def test_skip_is_never_absorbing(tmp_path):
     assert not any(a == "skipped" and b == "skipped"
                    for a, b in zip(results, results[1:])), \
         f"two consecutive skips — skip is absorbing again: {results}"
+
+
+def test_run_gate_at_hashes_the_tree_once(tmp_path, monkeypatch):
+    """run_gate_at hashed the tree to record what the gate judged, and
+    run_gate hashed the same tree again to decide whether to skip: two full
+    walks per turn, of which one was pure waste."""
+    repo = _repo(tmp_path)
+    state = _goal(repo, "exit 1")
+    goal.checkpoint(state["slug"], "did", "next", "stale-hash", "fail", "")
+
+    calls = []
+    real = tree_hash.compute
+    monkeypatch.setattr(tree_hash, "compute",
+                        lambda *a, **kw: (calls.append(1), real(*a, **kw))[1])
+
+    result, _, evaluated = gate.run_gate_at(goal.load(state["slug"]))
+    assert result == "fail"
+    assert len(calls) == 1, f"tree hashed {len(calls)} times in one turn"
+    assert evaluated != "stale-hash"
+
+
+def test_a_precomputed_hash_still_skips_an_unchanged_tree(tmp_path):
+    """The optimisation must not cost the skip: same decision, one walk."""
+    repo = _repo(tmp_path)
+    state = _goal(repo, "exit 1")
+    h = tree_hash.compute(repo, [str(repo)])
+    goal.checkpoint(state["slug"], "did", "next", h, "fail", "")
+
+    assert gate.run_gate_at(goal.load(state["slug"]))[0] == "skipped"
+
+
+def test_an_unknown_hash_never_skips(tmp_path):
+    """"unknown" is the sentinel for an unreadable watch tree; it must never
+    compare equal to a real digest, or a hashing failure would skip forever."""
+    repo = _repo(tmp_path)
+    state = _goal(repo, "exit 1")
+    goal.checkpoint(state["slug"], "did", "next", "unknown", "fail", "")
+
+    assert gate.run_gate(goal.load(state["slug"]), current_hash="unknown")[0] == "fail"

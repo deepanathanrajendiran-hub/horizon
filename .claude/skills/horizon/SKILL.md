@@ -291,6 +291,30 @@ means the tree didn't change since the last attempt, which is not
 evidence of progress either — it still counts against the budget and
 still needs a real next increment.
 
+## Reopening an abandoned goal
+
+Abandonment is not the end of the record. A goal abandoned for a blocker
+that later cleared — a missing credential, a dependency that landed — can
+be returned to `"active"` with its checkpoints intact:
+
+```python
+goal.reopen(slug, "the credential arrived", extra_turns=5)
+```
+
+Only from `"abandoned"`. A completed goal keeps a passing gate on record,
+and reopening it would let that evidence stand for later work it never
+judged — start a new goal instead (`goal.GoalClosed` if you try).
+
+**The budget is not refreshed implicitly.** A goal abandoned at its turn
+limit reopens still exhausted, and the very next `budget_exhausted` check
+stops the loop again. That is deliberate: how much more the goal is worth
+is the user's decision, not a side effect of reopening. `extra_turns`
+raises the ceiling; `extra_minutes` replaces the wall-clock allowance and
+restarts it from now, since the original window has usually long elapsed.
+Without `goal.reopen`, the only way forward was a new goal that started
+with no checkpoints — the record of what had already been done stayed on
+disk and became unreachable.
+
 ## Errors at a glance
 
 | Call | Exception | Meaning | Action |
@@ -303,6 +327,8 @@ still needs a real next increment.
 | `gate.run_gate` | `CoverageGate` | gate kind is `"coverage"` | dispatch a fresh subagent (Step 4) |
 | `gate.run_gate` | `GateUnrunnable` | exit 126 (not executable), exit 127 (not found), or timeout | `goal.abandon` and stop; this is a broken goal, not work left to do |
 | `goal.add_subagent` | `GoalClosed` | goal status is not `"active"` | same as `checkpoint`/`complete`/`abandon`: reload and report the real status |
+| `goal.reopen` | `GoalClosed` | the goal is `"active"` or `"complete"`, not `"abandoned"` | only an abandoned goal reopens; for a completed one, start a new goal |
+| `goal.reopen` | `BudgetInvalid` | `extra_turns`/`extra_minutes` is not a positive integer | fix the call; a grant that cannot bound is the same bug `create` rejects |
 | `tree_hash.compute` (Step 3) | any `Exception` | watched tree unreadable — same condition `tree_hash.changed()` absorbs per spec §5.2.1 | do not let it kill the turn; catch it and checkpoint with the sentinel hash `"unknown"` so the increment's work already on disk is still recorded, and the next turn's `changed()` cannot mistake `"unknown"` for a match |
 
 ## Subagents

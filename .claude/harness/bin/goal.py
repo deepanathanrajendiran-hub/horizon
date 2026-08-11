@@ -273,6 +273,56 @@ def _abandon_locked(slug: str, reason: str) -> dict:
     return _save(state)
 
 
+def _reopen_locked(slug: str, reason: str,
+                   extra_turns: int | None = None,
+                   extra_minutes: int | None = None) -> dict:
+    """Return an abandoned goal to active — the inverse `abandon()` lacked.
+
+    Abandonment was terminal, so a goal abandoned by mistake, or one
+    abandoned for a blocker that later cleared, could only be replaced by
+    a new goal that started with no checkpoints: the record of what had
+    already been done was still on disk and no longer reachable.
+
+    Only from `abandoned`. A completed goal has a passing gate on record,
+    and reopening it would let that evidence stand for later work it never
+    judged — start a new goal instead.
+
+    Budget is not refreshed implicitly. A goal abandoned at its turn limit
+    reopens still exhausted, which is correct: the caller has to say how
+    much more it is worth. `extra_turns` raises the turn ceiling;
+    `extra_minutes` replaces the wall-clock allowance and restarts it from
+    now, since the original window has usually long since elapsed.
+    """
+    for name_, value in (("extra_turns", extra_turns),
+                         ("extra_minutes", extra_minutes)):
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise BudgetInvalid(f"{name_} must be a positive integer or None, got {value!r}")
+
+    state = load(slug)
+    if state["status"] != "abandoned":
+        raise GoalClosed(
+            f"cannot reopen: goal status is {state['status']!r}, not abandoned"
+        )
+    state["status"] = "active"
+    now = _now()
+    state.setdefault("reopen_history", []).append({
+        "at": now,
+        "reason": reason,
+        "was_abandoned_for": state.pop("abandoned_reason", ""),
+        "extra_turns": extra_turns,
+        "extra_minutes": extra_minutes,
+    })
+    state.pop("abandoned_at", None)
+    if extra_turns is not None and state["budget"].get("max_turns") is not None:
+        state["budget"]["max_turns"] += extra_turns
+    if extra_minutes is not None:
+        state["budget"]["max_minutes"] = extra_minutes
+        state["used"]["started"] = now
+    return _save(state)
+
+
 def _add_subagent_locked(slug: str, role: str, name: str, brief: str,
                   last_seen_turn: int | None = None) -> dict:
     """Append a subagent entry, guarded the same way as every other mutator.
@@ -311,4 +361,5 @@ def _with_lock(fn):
 # reason checkpoint() is.
 complete = _with_lock(_complete_locked)
 abandon = _with_lock(_abandon_locked)
+reopen = _with_lock(_reopen_locked)
 add_subagent = _with_lock(_add_subagent_locked)

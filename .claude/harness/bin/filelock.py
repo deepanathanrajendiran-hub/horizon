@@ -14,6 +14,16 @@ across threads.
 Stale locks are reclaimed by age rather than by checking whether the
 holder is alive: a pid check is wrong across containers and mount
 namespaces, where a pid may be reused or invisible.
+
+Reclaiming a stale lock is where the naive version collapsed rather than
+degrading. A slow holder A is declared stale, B unlinks A's lock file and
+creates its own — and then A finishes and unlinks the *path*, deleting
+B's lock while B still believes it holds it. From there every waiter
+walks straight in. Both the reclaim and the release therefore check
+**inode identity**, not the path: a lock file is only ever removed by the
+process whose open descriptor still refers to that exact inode. A holder
+that overstays loses its lock, which is the documented consequence of
+being stale; it can no longer take someone else's down with it.
 """
 
 import errno
@@ -50,14 +60,11 @@ def locked(target: Path, timeout: float = 10.0):
             break
         except FileExistsError:
             try:
-                age = time.time() - lock_path.stat().st_mtime
+                st = lock_path.stat()
             except FileNotFoundError:
                 continue                      # released between the two calls
-            if age > STALE_AFTER:
-                try:
-                    lock_path.unlink()        # abandoned by a killed process
-                except FileNotFoundError:
-                    pass
+            if time.time() - st.st_mtime > STALE_AFTER:
+                _unlink_if_inode(lock_path, st.st_ino)
                 continue
             if time.monotonic() > deadline:
                 raise LockTimeout(
@@ -72,15 +79,31 @@ def locked(target: Path, timeout: float = 10.0):
                 return
             raise
 
+    # The descriptor stays open for the whole critical section purely so
+    # release can fstat it: it is the only handle on *our* inode that
+    # survives someone else reclaiming the path.
+    ino = os.fstat(fd).st_ino
     try:
         os.write(fd, str(os.getpid()).encode())
-        os.close(fd)
-        fd = None
         yield
     finally:
-        if fd is not None:
-            os.close(fd)
-        try:
+        os.close(fd)
+        _unlink_if_inode(lock_path, ino)
+
+
+def _unlink_if_inode(lock_path: Path, ino: int) -> None:
+    """Remove `lock_path` only while it still names inode `ino`.
+
+    Between the stat that judged a lock stale (or the work that held it)
+    and this unlink, another process may have reclaimed the path and
+    created a *new* lock file there. Unlinking by name would delete that
+    one — releasing a lock the caller does not hold, which is worse than
+    never locking, because the new holder is still acting as if it does.
+    """
+    try:
+        if lock_path.stat().st_ino == ino:
             lock_path.unlink()
-        except FileNotFoundError:
-            pass
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass

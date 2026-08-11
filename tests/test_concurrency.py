@@ -68,10 +68,13 @@ def test_concurrent_apply_edits_all_get_a_snapshot(tmp_path):
     targets = tmp_path / "targets"
     targets.mkdir()
 
+    # override_cap: G2 would otherwise refuse all but the first three, which
+    # is the correct behaviour and the subject of its own test. What is under
+    # test here is that every edit that DOES apply keeps its own snapshot.
     _run_workers(f"""
         import refine_log
         refine_log.apply_edit("M", [({str(targets)!r} + f"/w{{WORKER}}.md", f"content {{WORKER}}")],
-                              f"rationale {{WORKER}}", "evidence")
+                              f"rationale {{WORKER}}", "evidence", override_cap=True)
     """, state_dir)
 
     entries = [json.loads(p.read_text()) for p in state_dir.glob("[0-9]*.json")]

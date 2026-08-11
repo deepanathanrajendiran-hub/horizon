@@ -21,6 +21,12 @@ DEFAULT_TIMEOUT = 480
 SHELL_NOT_FOUND = 127
 SHELL_NOT_EXECUTABLE = 126
 
+# Recorded when the watch tree cannot be hashed. It must never compare
+# equal to anything, including itself: two unreadable turns in a row would
+# otherwise look like an unchanged tree and skip the gate, which is the
+# one direction this module may not fail in.
+UNKNOWN_HASH = "unknown"
+
 
 class GateUnrunnable(Exception):
     """The gate command could not execute at all.
@@ -85,7 +91,8 @@ def _reap_orphans(state: dict) -> list[int]:
     return killed
 
 
-def run_gate(state: dict, timeout: int = DEFAULT_TIMEOUT) -> tuple[str, str]:
+def run_gate(state: dict, timeout: int = DEFAULT_TIMEOUT,
+             current_hash: str | None = None) -> tuple[str, str]:
     """Run the goal's gate. Returns (result, output).
 
     result is "pass", "fail", or "skipped". Skipping happens only when the
@@ -101,6 +108,12 @@ def run_gate(state: dict, timeout: int = DEFAULT_TIMEOUT) -> tuple[str, str]:
     advancing. One forced run breaks the cycle, which costs a single gate
     invocation and matches this module's stated asymmetry: a false skip is
     a correctness bug, a false run costs seconds.
+
+    `current_hash` lets a caller that has already hashed the tree — which
+    `run_gate_at` must, to record what the gate judged — pass that result
+    in rather than paying for a second full walk of the same tree in the
+    same turn. Anything unequal to the last checkpoint's hash, including
+    the `"unknown"` sentinel, runs the gate.
     """
     if state["gate"]["kind"] != "command":
         raise CoverageGate(
@@ -110,9 +123,17 @@ def run_gate(state: dict, timeout: int = DEFAULT_TIMEOUT) -> tuple[str, str]:
 
     checkpoints = state.get("checkpoints") or []
     skipped_last_turn = bool(checkpoints) and checkpoints[-1].get("gate") == "skipped"
-    if (not skipped_last_turn
-            and not tree_hash.changed(state["cwd"], state.get("watch_paths"), last_hash(state))):
-        return "skipped", ""
+    if not skipped_last_turn:
+        previous = last_hash(state)
+        if current_hash is None:
+            unchanged = not tree_hash.changed(
+                state["cwd"], state.get("watch_paths"), previous)
+        else:
+            unchanged = (bool(previous)
+                         and UNKNOWN_HASH not in (previous, current_hash)
+                         and current_hash == previous)
+        if unchanged:
+            return "skipped", ""
 
     command = state["gate"]["value"]
     try:
@@ -178,13 +199,16 @@ def run_gate_at(state: dict, timeout: int = DEFAULT_TIMEOUT) -> tuple[str, str, 
     to `goal.checkpoint()` — never recompute it after the gate has run.
 
     On an unreadable watch tree the hash cannot be computed; rather than
-    losing the checkpoint entirely, the sentinel `"unknown"` is returned. It
-    can never equal a real digest, so the next turn is guaranteed to run the
+    losing the checkpoint entirely, the sentinel `UNKNOWN_HASH` is returned. It
+    can never equal a real digest, nor another `UNKNOWN_HASH`, so the next turn is guaranteed to run the
     gate rather than skip.
     """
     try:
         evaluated = tree_hash.compute(state["cwd"], state.get("watch_paths"))
     except Exception:
-        evaluated = "unknown"
-    result, output = run_gate(state, timeout=timeout)
+        evaluated = UNKNOWN_HASH
+    # Handed to run_gate rather than recomputed there: the two calls hashed
+    # the same tree twice per turn, and on this repo the second walk was
+    # pure waste.
+    result, output = run_gate(state, timeout=timeout, current_hash=evaluated)
     return result, output, evaluated
