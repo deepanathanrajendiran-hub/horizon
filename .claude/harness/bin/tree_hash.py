@@ -60,9 +60,17 @@ def _walk_entries(root: Path) -> list[str]:
             p = Path(dirpath) / name
             try:
                 st = p.stat()
-            except OSError:
-                entries.append(f"{p}\x00UNREADABLE")
-                continue
+            except OSError as e:
+                # Re-raised, not recorded. A constant `UNREADABLE` marker is
+                # deterministic, so two hashes over the same unstattable file
+                # agree and the gate is skipped against a tree the harness
+                # cannot actually see. Demonstrated with a directory at mode
+                # 0444 — listable by scandir, not traversable by stat — where
+                # a real content change hashed identically both times. Mode
+                # 0o000 was tested and raises inside os.walk; 0o444 was the
+                # hole. Raising routes this to changed()'s doubt path and
+                # run_gate_at's "unknown" sentinel, both of which run the gate.
+                raise OSError(f"cannot stat {p}: {e}") from e
             entries.append(f"{p}\x00{st.st_mtime_ns}\x00{st.st_size}")
     return sorted(entries)
 

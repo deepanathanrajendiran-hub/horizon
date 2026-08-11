@@ -95,9 +95,17 @@ state = goal.load(SLUG)
 
 try:
     result, output, h = gate.run_gate_at(state)
-except gate.CoverageGate:
-    raise SystemExit("coverage gate: dispatch a fresh judge subagent, then "
-                     "call goal.checkpoint yourself with its verdict")
+except gate.CoverageGate as e:
+    # A coverage gate has no command to run. Print the hash it was evaluated
+    # against and stop HERE: dispatch a fresh judge subagent, then make the
+    # checkpoint below yourself with its verdict and this exact hash.
+    #   goal.checkpoint(SLUG, DID, NEXT, "<the hash printed below>",
+    #                   "pass" | "fail", "<the judge's verdict>")
+    # Never recompute the hash after the judge has run -- by then the tree
+    # has moved, and the next turn would skip against a state nothing judged.
+    print(f"COVERAGE GATE. checkpoint with tree_hash={e.tree_hash!r}")
+    print(f"  did : {DID}\n  next: {NEXT}")
+    raise SystemExit(0)
 except gate.GateUnrunnable as e:
     goal.abandon(SLUG, f"gate unrunnable: {e}")
     raise SystemExit(f"BROKEN GOAL, not work remaining: {e}")
@@ -118,7 +126,9 @@ if result != "pass" and goal.budget_exhausted(state):
 
 if result == "pass":
     goal.complete(SLUG, output)
-    print("COMPLETE. evidence:", output.strip()[:200] or "(gate produced no output)")
+    # The TAIL, like every other truncation here: a coverage judge's verdict
+    # and a failing gate's diagnosis both come last.
+    print("COMPLETE. evidence:", (output.strip() or "(gate produced no output)")[-500:])
 else:
     print("continue. gate said:", (output.strip() or "(no output)")[-500:])
     print("next:", NEXT)
@@ -140,9 +150,23 @@ infinite loop, and `goal.create` enforces this itself: it raises
 Gate kinds:
 - `command` — a shell command that must exit 0 (`npm test`, `pytest -q`).
   Judged mechanically by `gate.run_gate`.
+
+  **The gate must BE the command whose failure matters.** No pipe, no `;`,
+  no `|| true`, no trailing `&`. `/bin/sh` has no `pipefail`, so
+  `pytest -q | tail -30` reports the exit status of `tail` — always 0 —
+  and the goal completes against a suite printing `3 failed`, with stored
+  "evidence" that reads like a pass. Nothing downstream can catch it: the
+  checkpoint honestly records what the gate honestly returned. `create`
+  raises **`goal.GateUnsound`** on these shapes. If you want bounded
+  output, you already have it — `run_gate` truncates to
+  `gate.MAX_OUTPUT`. If you genuinely need a pipeline, make the failure
+  propagate and quote it as one argument:
+  `sh -o pipefail -c 'cmd | filter'`. `&&` is fine: it short-circuits on
+  failure, so the status still comes from the work.
 - `coverage` — a written completeness criterion for research goals, e.g.
   "every claim carries a source; no sub-question left unanswered". Judged
-  by a freshly spawned subagent (Step 4) — never mechanically.
+  by a freshly spawned subagent (see "Subagents", and the coverage
+  branch of the turn block) — never mechanically.
 
 If the user gave no gate, propose one and get explicit confirmation
 before calling `create`.
@@ -162,6 +186,11 @@ slug = state["slug"]
 `create` writes `.claude/harness/goals/<slug>.json` and returns the new
 state: `status: "active"`, `used: {"turns": 0, ...}`, `checkpoints: []`,
 `subagents: []`.
+
+It also raises **`goal.BudgetInvalid`** if `max_turns` or `max_minutes` is
+anything other than a positive integer or `None`, or if both are `None` —
+a goal with no bound can never exhaust, which is the same infinite loop a
+gate exists to prevent, arriving by a different door.
 
 ## Step 2 — Work one increment
 
@@ -188,10 +217,7 @@ Why the single call exists: a checkpoint must record the state the gate
 the watched tree — a counter file, a coverage report, a build artifact —
 so hashing after the run captures that write, the next turn sees an
 unchanged tree, and `fail → fail → pass` collapses into
-`fail → skipped → skipped`. That bug shipped once in this project's own
-test suite precisely because the hash and the gate were two separate
-calls and the ordering was left to the caller. `run_gate_at` removes the
-opportunity.
+`fail → skipped → skipped`.
 
 If the watched tree is unreadable, `run_gate_at` returns the sentinel
 `"unknown"` rather than raising, so the turn still checkpoints. An
@@ -243,8 +269,8 @@ unrunnable-vs-failing distinction, all unit tested in
 
 ## Step 4 — Checkpoint
 
-Record what happened using the hash from Step 3 — not a freshly computed
-one — and the result from Step 4:
+Record what happened using the hash and result Step 3 returned — not a
+freshly computed hash:
 
 ```python
 state = goal.checkpoint(slug, did, next_action, h, result, output)
@@ -324,12 +350,19 @@ disk and became unreachable.
 | `goal.checkpoint` / `complete` / `abandon` | `GoalClosed` (subclass of `GoalStateError`) | goal status is not `"active"` | reload and report the real status |
 | `goal.checkpoint` | `ValueError` | `gate_result` not one of `pass/fail/skipped` | fix the caller — this is a bug in the skill's own call, not a runtime condition to handle |
 | `goal.complete` | `GateNotPassed` | last checkpoint's gate isn't `"pass"` | don't call complete yet; budget exhaustion is not success |
-| `gate.run_gate` | `CoverageGate` | gate kind is `"coverage"` | dispatch a fresh subagent (Step 4) |
+| `gate.run_gate` | `CoverageGate` | gate kind is `"coverage"` | dispatch a fresh judge subagent, then checkpoint with its verdict and `e.tree_hash` — see the coverage branch of the turn block |
 | `gate.run_gate` | `GateUnrunnable` | exit 126 (not executable), exit 127 (not found), or timeout | `goal.abandon` and stop; this is a broken goal, not work left to do |
 | `goal.add_subagent` | `GoalClosed` | goal status is not `"active"` | same as `checkpoint`/`complete`/`abandon`: reload and report the real status |
 | `goal.reopen` | `GoalClosed` | the goal is `"active"` or `"complete"`, not `"abandoned"` | only an abandoned goal reopens; for a completed one, start a new goal |
 | `goal.reopen` | `BudgetInvalid` | `extra_turns`/`extra_minutes` is not a positive integer | fix the call; a grant that cannot bound is the same bug `create` rejects |
-| `tree_hash.compute` (Step 3) | any `Exception` | watched tree unreadable — same condition `tree_hash.changed()` absorbs per spec §5.2.1 | do not let it kill the turn; catch it and checkpoint with the sentinel hash `"unknown"` so the increment's work already on disk is still recorded, and the next turn's `changed()` cannot mistake `"unknown"` for a match |
+| `goal.create` | `GateUnsound` | the gate command discards the exit status of the work it judges — a pipe, `;`, `\|\|`, or a trailing `&` | rewrite the gate as the test command itself. `run_gate` already bounds output, so `\| tail` buys nothing |
+| `goal.create` | `BudgetInvalid` | `max_turns`/`max_minutes` is not a positive integer, or both are `None` | fix the call; a budget that cannot bound is the unbounded loop a gate exists to prevent |
+| `goal.load` | `GoalStateError` | also raised for a malformed checkpoint element or a budget that cannot bound — not only for a missing file | report it; do not guess the state |
+| any locked mutator | `filelock.LockTimeout` | another process holds this goal's state file (a second terminal, a `/loop` beside a live session) | retry once; if it persists, tell the user which lock file to delete — the exception names it |
+
+Nothing in this skill calls `tree_hash` directly — `run_gate_at` absorbs an
+unreadable tree and returns the `"unknown"` sentinel itself, which can never
+equal a real digest, so the next turn is guaranteed to run the gate.
 
 ## Subagents
 
@@ -374,12 +407,6 @@ you recorded so it can be addressed later:
   after a restart — and nothing under `.claude/harness/` records which
   turn a session began at, so there is no way to compute staleness more
   precisely than "this is a new session."
-
-  This deliberately deviates from the design spec, whose `subagents`
-  schema listed a `session` field for staleness detection: it is dropped
-  here because nothing populates it from a real source, so a rule built
-  on it could never actually be checked. `last_seen_turn` is kept as a
-  plain record of when the entry was made, not as a staleness signal.
 
 ## Relationship to other skills
 

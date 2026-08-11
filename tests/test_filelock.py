@@ -88,3 +88,29 @@ def test_different_targets_do_not_serialise_against_each_other(tmp_path):
     with filelock.locked(tmp_path / "a.json"):
         with filelock.locked(tmp_path / "b.json", timeout=0.5):
             pass
+
+
+def test_a_stale_lock_that_cannot_be_reclaimed_still_times_out(tmp_path):
+    """The stale branch used to `continue` without checking the deadline,
+    and `_unlink_if_inode` swallows OSError — so on a read-only or
+    unwritable directory the reclaim never succeeded and this spun at 100%
+    CPU forever, ignoring the timeout. A hang, with no error, in the module
+    every other module's correctness rests on."""
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory permissions")
+    d = tmp_path / "ro"
+    d.mkdir()
+    target = d / "state.json"
+    lock = _lock_path(target)
+    lock.write_text("999999")
+    old = time.time() - filelock.STALE_AFTER - 5
+    os.utime(lock, (old, old))
+    os.chmod(d, 0o500)
+    try:
+        started = time.monotonic()
+        with pytest.raises(filelock.LockTimeout):
+            with filelock.locked(target, timeout=0.5):
+                pass
+        assert time.monotonic() - started < 10, "the lock spun past its timeout"
+    finally:
+        os.chmod(d, 0o700)

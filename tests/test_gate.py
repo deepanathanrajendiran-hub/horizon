@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -115,7 +116,9 @@ def test_timeout_raises_unrunnable(tmp_path):
 
 def test_output_is_bounded(tmp_path):
     repo = _repo(tmp_path)
-    state = _goal(repo, "python3 -c \"print('E' * 20000)\"; exit 1")
+    # One command, not `…; exit 1`: goal.create refuses a gate whose exit
+    # status comes from anything other than the work it judges.
+    state = _goal(repo, "python3 -c \"import sys; sys.stdout.write('E'*20000); sys.exit(1)\"")
     result, output = gate.run_gate(state)
     assert result == "fail"
     assert len(output) <= gate.MAX_OUTPUT
@@ -213,27 +216,45 @@ def test_default_timeout_is_below_the_host_ceiling():
     assert gate.DEFAULT_TIMEOUT < 600
 
 
-def test_an_orphaned_gate_group_is_reaped_on_the_next_run(tmp_path, monkeypatch):
-    """start_new_session detaches the gate so a timeout can kill its whole
-    tree; the same detachment means nothing reaps it if the PARENT dies.
-    A leftover pgid marker is that case, and the next run must clear it."""
-    import signal as _signal
+def test_the_gate_never_signals_a_process_group_it_did_not_start(tmp_path):
+    """The inverse of the test that used to live here.
+
+    An orphan reaper stored each gate's pgid in a marker file and SIGKILLed
+    whatever the file named on the next run. Two demonstrated consequences:
+    two concurrent turns of one goal killed each other's gates (recorded as
+    an honest `fail`, since -9 is neither 126 nor 127), and a marker
+    surviving a reboot named a recycled pid — so the next turn killed an
+    unrelated process group. This asserts that no marker is written and
+    nothing outside the gate's own tree is signalled."""
     repo = _repo(tmp_path)
     state = _goal(repo, "true")
 
-    harness = tmp_path / "harness"
-    (harness / "goals").mkdir(parents=True)
-    monkeypatch.setattr(gate.paths, "harness_root", lambda: harness)
+    bystander = subprocess.Popen(["sleep", "5"], start_new_session=True)
+    try:
+        gate.run_gate(state)
+        assert bystander.poll() is None, "the harness killed an unrelated process"
+        markers = list(tmp_path.rglob("*.gate-pgid"))
+        assert not markers, f"a pgid marker is still being written: {markers}"
+    finally:
+        bystander.kill()
+        bystander.wait(timeout=5)
 
-    victim = subprocess.Popen(["sleep", "60"], start_new_session=True)
-    pgid = os.getpgid(victim.pid)
-    (harness / "goals" / f".{state['slug']}.gate-pgid").write_text(str(pgid))
 
-    gate.run_gate(state)
+def test_a_timed_out_gate_still_kills_its_own_tree(tmp_path):
+    """Removing the reaper must not cost the one kill that is sound: the
+    timeout path holds a live handle on the group it signals."""
+    repo = _repo(tmp_path)
+    marker = repo / "child-finished"
+    script = repo / "slow.sh"
+    script.write_text(f"#!/bin/sh\n(sleep 20; touch {marker}) &\nsleep 20\n")
+    script.chmod(0o755)
+    state = _goal(repo, "./slow.sh")
 
-    victim.wait(timeout=5)
-    assert victim.returncode is not None, "the orphaned process group survived"
-    assert not (harness / "goals" / f".{state['slug']}.gate-pgid").exists()
+    with pytest.raises(gate.GateUnrunnable):
+        gate.run_gate(state, timeout=1)
+
+    time.sleep(0.3)
+    assert not marker.exists(), "a backgrounded grandchild outlived the timeout"
 
 
 def test_skip_is_never_absorbing(tmp_path):
@@ -315,3 +336,38 @@ def test_an_unknown_hash_never_skips(tmp_path):
     goal.checkpoint(state["slug"], "did", "next", "unknown", "fail", "")
 
     assert gate.run_gate(goal.load(state["slug"]), current_hash="unknown")[0] == "fail"
+
+
+def test_an_exit_masking_gate_would_have_passed_a_failing_suite(tmp_path):
+    """Why goal.create refuses these: the gate itself is not detectably
+    broken at run time. run_gate returns `pass`, the checkpoint records
+    `pass`, and goal.complete accepts it."""
+    repo = _repo(tmp_path)
+    failing = repo / "runtests.sh"
+    failing.write_text("#!/bin/sh\necho '3 failed'\nexit 1\n")
+    failing.chmod(0o755)
+
+    honest = _goal(repo, "./runtests.sh")
+    assert gate.run_gate(honest)[0] == "fail"
+
+    # Same failing suite, one pipe. goal.create refuses to build this state,
+    # so construct it by hand to show what it would have done.
+    masked = dict(honest, gate={"kind": "command", "value": "./runtests.sh | tail -30"})
+    assert gate.run_gate(masked)[0] == "pass", "the hole this refusal closes"
+
+    with pytest.raises(goal.GateUnsound):
+        goal.create(goal="masked", cwd=str(repo), gate_kind="command",
+                    gate_value="./runtests.sh | tail -30", max_turns=5)
+
+
+def test_a_coverage_gate_carries_the_hash_it_was_evaluated_against(tmp_path):
+    """The turn block checkpoints the work once the judge returns, and the
+    hash is the one value it cannot recompute correctly by then — the judge
+    has run and the tree may have moved."""
+    repo = _repo(tmp_path)
+    state = _goal(repo, "every claim cites a source", kind="coverage")
+
+    with pytest.raises(gate.CoverageGate) as excinfo:
+        gate.run_gate_at(state)
+
+    assert excinfo.value.tree_hash == tree_hash.compute(repo, [str(repo)])

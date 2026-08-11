@@ -178,3 +178,23 @@ def test_non_git_directory_uses_walk_only(tmp_path):
     before = tree_hash.compute(plain)
     (plain / "b.txt").write_text("two")
     assert tree_hash.compute(plain) != before
+
+
+def test_an_unstattable_file_is_not_hashed_as_a_constant(tmp_path):
+    """"Every failure path in this module reports changed" — but a constant
+    UNREADABLE marker is deterministic, so two hashes over the same
+    unstattable file agreed and the gate was skipped against a tree the
+    harness cannot see. Mode 0o444 is listable by scandir and not
+    traversable by stat; 0o000 (already tested) raises inside os.walk."""
+    root = tmp_path / "watched"
+    sub = root / "sub"
+    sub.mkdir(parents=True)
+    (sub / "f.txt").write_text("before")
+
+    os.chmod(sub, 0o444)
+    try:
+        with pytest.raises(OSError):
+            tree_hash.compute(root, [str(root)])
+        assert tree_hash.changed(root, [str(root)], "any-previous-hash") is True
+    finally:
+        os.chmod(sub, 0o755)

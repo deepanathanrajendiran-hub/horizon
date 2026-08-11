@@ -65,7 +65,12 @@ def locked(target: Path, timeout: float = 10.0):
                 continue                      # released between the two calls
             if time.time() - st.st_mtime > STALE_AFTER:
                 _unlink_if_inode(lock_path, st.st_ino)
-                continue
+                # Falls through to the deadline check rather than looping
+                # straight back. `_unlink_if_inode` swallows OSError, so on a
+                # read-only or unwritable directory the reclaim never
+                # succeeds and this branch used to spin at 100% CPU forever,
+                # ignoring the timeout entirely — a hang, with no error, in
+                # the module every other module's correctness rests on.
             if time.monotonic() > deadline:
                 raise LockTimeout(
                     f"could not lock {target} within {timeout}s; another "

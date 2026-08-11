@@ -8,6 +8,7 @@ a /loop firing. Nothing here trusts in-memory state.
 import json
 import os
 import re
+import shlex
 from datetime import datetime, timezone
 
 import filelock
@@ -19,6 +20,28 @@ SLUG_MAX = 60
 
 class GateRequired(Exception):
     """Raised when a goal is created without a termination criterion."""
+
+
+class GateUnsound(GateRequired):
+    """The gate command cannot report the failure it exists to detect.
+
+    `run_gate` judges a command gate by its exit status, and `/bin/sh` has
+    no `pipefail`. So a gate the agent writes without thinking —
+
+        pytest -q | tail -30        exit status of `tail`, always 0
+        pytest -q; echo done        exit status of `echo`, always 0
+        pytest -q || true           always 0
+
+    — reports `pass` against a suite printing `3 failed`, and the goal is
+    marked complete with stored "evidence" that reads like a success. Every
+    other safeguard here is downstream of this one string: the checkpoint
+    honestly records what the gate honestly returned, and `GateNotPassed`
+    is satisfied, so nothing further can catch it.
+
+    The pipeline shape is the likely one, not an exotic one — an agent
+    wanting bounded output reaches for `| tail` first. `run_gate` already
+    bounds output to `gate.MAX_OUTPUT`, so it is also unnecessary.
+    """
 
 
 class GoalStateError(Exception):
@@ -58,6 +81,43 @@ def _bounded(text: str) -> str:
     if len(text) > MAX_GATE_OUTPUT:
         return "[truncated]...\n" + text[-MAX_GATE_OUTPUT:]
     return text
+
+
+# Shell operators that replace the gate's exit status with something
+# else's. `&&` is absent deliberately: `a && b` fails when `a` fails, so a
+# chain still reports the failure. `2>&1` is a redirect, not an operator,
+# and shlex never yields it as a bare token.
+EXIT_MASKING_OPERATORS = {"|", "|&", ";", "||", "&"}
+
+
+def _assert_sound_gate(value: str) -> None:
+    """Refuse a command gate whose exit status is not the work's verdict.
+
+    Tokenised with shlex rather than searched as a substring, so an
+    operator *inside a quoted argument* — `sh -o pipefail -c 'pytest | tail'`,
+    which is sound — is not mistaken for one at the top level.
+
+    `punctuation_chars=True` is what makes the operators their own tokens.
+    Plain `shlex.split` leaves `pytest -q; echo done` as `['pytest', '-q;',
+    …]`, hiding the `;` inside a word — the check silently passed the very
+    shape it exists to catch until a test caught it.
+    """
+    try:
+        lexer = shlex.shlex(value, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return  # unbalanced quotes; the shell reports it, run_gate raises
+    masking = sorted({t for t in tokens if t in EXIT_MASKING_OPERATORS})
+    if masking:
+        raise GateUnsound(
+            f"gate {value!r} discards the exit status of the work it judges "
+            f"(operator {', '.join(masking)}). The gate must BE the command "
+            f"whose failure matters. run_gate already bounds output to 4000 "
+            f"chars, so `| tail` buys nothing; if a pipeline is genuinely "
+            f"needed, make the failure propagate — "
+            f"sh -o pipefail -c 'cmd | filter' — and quote it as one argument."
+        )
 
 
 def slugify(text: str) -> str:
@@ -126,6 +186,8 @@ def create(goal, cwd, gate_kind, gate_value,
         )
     if gate_kind not in ("command", "coverage"):
         raise GateRequired(f"gate_kind must be 'command' or 'coverage', got {gate_kind!r}")
+    if gate_kind == "command":
+        _assert_sound_gate(str(gate_value))
 
     # An unvalidated budget defeats the same invariant the gate protects:
     # max_turns=None makes budget_exhausted() return False forever, and a
@@ -193,6 +255,40 @@ def load(slug: str) -> dict:
     if missing:
         raise GoalStateError(
             f"goal state at {p} is missing required fields: {', '.join(missing)}"
+        )
+
+    # The elements, not just the containers. Validating only the eight
+    # top-level types let `checkpoints: [{"turn": 1}]` load cleanly and then
+    # raise a bare KeyError inside gate.last_hash and goal.complete — an
+    # exception the skills' error tables never mention, because they were
+    # told to expect GoalStateError. This is the same class refine_log
+    # closed one module over with ENTRY_KEYS, unfixed here.
+    for i, cp in enumerate(state["checkpoints"]):
+        if not isinstance(cp, dict):
+            raise GoalStateError(
+                f"goal state at {p}: checkpoint {i} is "
+                f"{type(cp).__name__}, expected object — refusing to guess"
+            )
+        absent = [k for k in ("turn", "tree_hash", "gate") if k not in cp]
+        if absent:
+            raise GoalStateError(
+                f"goal state at {p}: checkpoint {i} is missing "
+                f"{', '.join(absent)} — refusing to guess"
+            )
+
+    # A budget that cannot bound is the unbounded loop create() exists to
+    # refuse. Loading one silently makes budget_exhausted() return False
+    # forever, which is the same defect arriving by a different door.
+    budget = state["budget"]
+    if budget.get("max_turns") is None and budget.get("max_minutes") is None:
+        raise GoalStateError(
+            f"goal state at {p} has no max_turns and no max_minutes, so "
+            f"budget_exhausted() can never become True — the unbounded loop "
+            f"create() refuses to build"
+        )
+    if "turns" not in state["used"] or "started" not in state["used"]:
+        raise GoalStateError(
+            f"goal state at {p} has an incomplete 'used' block: {state['used']!r}"
         )
     return state
 
@@ -315,8 +411,15 @@ def _reopen_locked(slug: str, reason: str,
         "extra_minutes": extra_minutes,
     })
     state.pop("abandoned_at", None)
-    if extra_turns is not None and state["budget"].get("max_turns") is not None:
-        state["budget"]["max_turns"] += extra_turns
+    if extra_turns is not None:
+        # On a minutes-only goal this used to be silently dropped while
+        # `reopen_history` recorded the grant as honoured: the user granted
+        # five turns, the record agreed, and the goal stopped on the next
+        # check. "Five more turns" means five more than have been used.
+        if state["budget"].get("max_turns") is None:
+            state["budget"]["max_turns"] = state["used"]["turns"] + extra_turns
+        else:
+            state["budget"]["max_turns"] += extra_turns
     if extra_minutes is not None:
         state["budget"]["max_minutes"] = extra_minutes
         state["used"]["started"] = now

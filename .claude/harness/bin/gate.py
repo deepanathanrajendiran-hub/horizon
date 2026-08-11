@@ -8,7 +8,6 @@ import os
 import signal
 import subprocess
 
-import paths
 import tree_hash
 
 MAX_OUTPUT = 4000
@@ -43,6 +42,13 @@ class CoverageGate(Exception):
 
     A coverage gate is judged by a fresh subagent that did not do the
     work, not by running a subprocess — run_gate has nothing to execute.
+
+    Carries `.tree_hash`: the digest the turn's work was evaluated
+    against, when raised from `run_gate_at`. The caller needs it for the
+    checkpoint it makes once the judge returns, and there is no way to
+    recompute it correctly — by then the judge has run and the tree may
+    have moved. Without it, a coverage goal's every turn ended in an
+    exception carrying no way to record the work it had just done.
     Deliberately not a ValueError: callers catch this to route coverage
     gates to subagent judgment, and ValueError is one of the most
     overloaded builtins in the standard library. A coincidental
@@ -58,37 +64,25 @@ def last_hash(state: dict) -> str | None:
     return checkpoints[-1]["tree_hash"] if checkpoints else None
 
 
-def _pgid_marker(state: dict):
-    d = paths.harness_root() / "goals"
-    d.mkdir(parents=True, exist_ok=True)
-    return d / f".{state.get('slug', 'unknown')}.gate-pgid"
-
-
-def _reap_orphans(state: dict) -> list[int]:
-    """Kill any gate process group this goal left running.
-
-    `start_new_session=True` detaches the gate so a timeout can kill the
-    whole tree, but it also means nothing reaps it if the *parent* dies --
-    the host killing a long turn, or a crash. The pgid is recorded while
-    the gate runs and cleared when it returns, so a leftover file means a
-    previous turn was interrupted mid-gate.
-    """
-    marker = _pgid_marker(state)
-    killed = []
-    try:
-        pgid = int(marker.read_text().strip())
-    except (FileNotFoundError, ValueError):
-        return killed
-    try:
-        os.killpg(pgid, signal.SIGKILL)
-        killed.append(pgid)
-    except (ProcessLookupError, PermissionError):
-        pass
-    try:
-        marker.unlink()
-    except FileNotFoundError:
-        pass
-    return killed
+# There was an orphan reaper here: each run recorded its gate's process
+# group id in a marker file, and the next run SIGKILLed whatever that file
+# named, on the theory that a leftover marker meant a killed turn had
+# abandoned a gate.
+#
+# It was removed rather than repaired. It killed a bare integer with no
+# check that the group still belonged to this goal — the exact unsoundness
+# `filelock` refuses to rely on ("a pid check is wrong across containers and
+# mount namespaces, where a pid may be reused or invisible"). Two demonstrated
+# consequences: two concurrent turns of one goal killed each other's gates,
+# and the survivor's SIGKILLed gate was recorded as an honest `fail` because
+# returncode -9 is not 126 or 127; and a marker outliving a reboot named a
+# recycled pid, so the next turn SIGKILLed an unrelated process group — a dev
+# server, a build, or the session itself.
+#
+# What it bought was reaping a leaked `sleep` after a killed turn. What it
+# risked was killing the user's own processes. A best-effort safety net does
+# not get to do that, so the timeout path below — which holds a real handle
+# on the process it kills — is now the only thing here that signals anyone.
 
 
 def run_gate(state: dict, timeout: int = DEFAULT_TIMEOUT,
@@ -141,7 +135,6 @@ def run_gate(state: dict, timeout: int = DEFAULT_TIMEOUT,
         # process group, so a timeout can kill the whole group — including
         # any grandchildren the shell forked off (backgrounded jobs,
         # pipeline stages) — not just the immediate shell process.
-        _reap_orphans(state)
         proc = subprocess.Popen(
             command, shell=True, cwd=state["cwd"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -150,27 +143,18 @@ def run_gate(state: dict, timeout: int = DEFAULT_TIMEOUT,
     except OSError as e:
         raise GateUnrunnable(f"gate could not execute: {command}: {e}") from e
 
-    marker = _pgid_marker(state)
-    try:
-        marker.write_text(str(os.getpgid(proc.pid)))
-    except OSError:
-        marker = None  # best effort; reaping is a safety net, not a contract
-
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as e:
         try:
+            # Safe to signal by group here, unlike the removed reaper: this
+            # pgid comes from a live Popen handle we own, not from a file
+            # written by some earlier process.
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             pass  # already dead
         proc.wait()  # reap; avoid leaving a zombie behind
         raise GateUnrunnable(f"gate timed out after {timeout}s: {command}") from e
-    finally:
-        if marker is not None:
-            try:
-                marker.unlink()
-            except FileNotFoundError:
-                pass
 
     if proc.returncode in (SHELL_NOT_FOUND, SHELL_NOT_EXECUTABLE):
         reason = (
@@ -210,5 +194,12 @@ def run_gate_at(state: dict, timeout: int = DEFAULT_TIMEOUT) -> tuple[str, str, 
     # Handed to run_gate rather than recomputed there: the two calls hashed
     # the same tree twice per turn, and on this repo the second walk was
     # pure waste.
-    result, output = run_gate(state, timeout=timeout, current_hash=evaluated)
+    try:
+        result, output = run_gate(state, timeout=timeout, current_hash=evaluated)
+    except CoverageGate as e:
+        # The hash is the one thing this call produced that the caller
+        # cannot get back any other way. Attach it rather than losing it
+        # inside the exception.
+        e.tree_hash = evaluated
+        raise
     return result, output, evaluated

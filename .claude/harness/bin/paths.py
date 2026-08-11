@@ -17,6 +17,7 @@ The project directory name may contain spaces — quote every path built
 from these.
 """
 
+import re
 from pathlib import Path
 
 
@@ -67,3 +68,23 @@ def undo_dir() -> Path:
 
 def changelog() -> Path:
     return harness_root() / "CHANGELOG.md"
+
+
+def project_key() -> str:
+    """Claude Code's key for this project: the absolute path, `/` and space -> `-`.
+
+    Worked example for a directory whose name ends in a space:
+    `/Users/deeps/Documents/NEW STUFF/fun ` -> `-Users-deeps-Documents-NEW-STUFF-fun-`.
+    """
+    return re.sub(r"[/ ]", "-", str(project_root()))
+
+
+def memory_dir() -> Path:
+    """Where Claude Code actually reads this project's memories from.
+
+    Derived rather than passed in, so a mistyped key cannot be approved:
+    a memory written one character off lands in a directory that
+    `mkdir -p` happily creates and recall never looks at, and the approval
+    prompt shows a plausible path either way.
+    """
+    return Path.home() / ".claude" / "projects" / project_key() / "memory"

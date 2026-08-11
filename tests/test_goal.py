@@ -360,3 +360,76 @@ def test_reopen_rejects_a_budget_grant_that_cannot_bound():
         goal.reopen(st["slug"], "r", extra_turns=0)
     with pytest.raises(goal.BudgetInvalid):
         goal.reopen(st["slug"], "r", extra_turns=True)
+
+
+# ------------------------------------------------------- gate soundness (H1)
+
+@pytest.mark.parametrize("unsound", [
+    "./runtests.sh | tail -30",       # exit status of tail
+    "pytest -q; echo done",           # exit status of echo
+    "pytest -q || true",              # always 0
+    "pytest -q &",                    # backgrounded: exits immediately
+    "cd sub && pytest | head",        # a pipe anywhere in the chain
+])
+def test_a_gate_that_discards_its_exit_status_is_refused(unsound):
+    """run_gate judges by exit status and /bin/sh has no pipefail, so these
+    all report `pass` against a suite printing `3 failed` — and every
+    safeguard downstream is satisfied, because the checkpoint honestly
+    records what the gate honestly returned."""
+    with pytest.raises(goal.GateUnsound):
+        _make(gate_value=unsound)
+
+
+@pytest.mark.parametrize("sound", [
+    "pytest -q",
+    "cd sub && pytest -q",                      # && propagates failure
+    "sh -o pipefail -c 'pytest -q | tail -30'",  # operator inside one argument
+    "pytest -q 2>&1",                            # a redirect, not an operator
+    "make test",
+])
+def test_sound_gates_are_not_refused(sound):
+    assert _make(gate_value=sound)["gate"]["value"] == sound
+
+
+def test_a_coverage_gate_is_not_shell_checked():
+    """A coverage criterion is prose for a judge, not a command; `;` and
+    `|` are ordinary punctuation in it."""
+    st = _make(gate_kind="coverage",
+               gate_value="every public function has a test; edge cases covered")
+    assert st["gate"]["kind"] == "coverage"
+
+
+@pytest.mark.parametrize("broken,fragment", [
+    ({"checkpoints": [{"turn": 1}]}, "tree_hash"),
+    ({"checkpoints": ["not an object"]}, "expected object"),
+    ({"budget": {}}, "unbounded loop"),
+    ({"used": {}}, "incomplete 'used'"),
+])
+def test_load_validates_the_parts_callers_index(broken, fragment):
+    """Validating only the eight top-level types let a malformed checkpoint
+    load cleanly and raise a bare KeyError inside gate.last_hash and
+    goal.complete — an exception neither skill's error table mentions."""
+    st = _make()
+    goal.checkpoint(st["slug"], "did", "next", "h", "fail", "")
+    path = goal._path(st["slug"])
+    state = json.loads(path.read_text())
+    state.update(broken)
+    path.write_text(json.dumps(state))
+
+    with pytest.raises(goal.GoalStateError) as excinfo:
+        goal.load(st["slug"])
+    assert fragment in str(excinfo.value)
+
+
+def test_extra_turns_is_honoured_on_a_minutes_only_goal():
+    """It used to be silently dropped while reopen_history recorded the
+    grant as honoured: the user granted five turns, the record agreed, and
+    the goal stopped on the very next check."""
+    st = _make(max_turns=None, max_minutes=1)
+    goal.checkpoint(st["slug"], "did", "next", "h", "fail", "")
+    goal.abandon(st["slug"], "blocked")
+
+    goal.reopen(st["slug"], "unblocked", extra_turns=5)
+    state = goal.load(st["slug"])
+    assert state["budget"]["max_turns"] == 6      # 1 used + 5 granted
+    assert goal.budget_exhausted(state) is False
