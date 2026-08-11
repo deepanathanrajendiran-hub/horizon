@@ -8,10 +8,16 @@ import os
 import signal
 import subprocess
 
+import paths
 import tree_hash
 
 MAX_OUTPUT = 4000
-DEFAULT_TIMEOUT = 900
+# Below the Bash tool's 600s ceiling that hosts these calls. At 900 the
+# host killed the turn first -- after the increment's work had landed and
+# before the checkpoint recording it -- and because the gate runs in its
+# own process group (start_new_session below), nothing reaped it: the test
+# suite kept running, and every killed turn added another.
+DEFAULT_TIMEOUT = 480
 SHELL_NOT_FOUND = 127
 SHELL_NOT_EXECUTABLE = 126
 
@@ -46,6 +52,39 @@ def last_hash(state: dict) -> str | None:
     return checkpoints[-1]["tree_hash"] if checkpoints else None
 
 
+def _pgid_marker(state: dict):
+    d = paths.harness_root() / "goals"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f".{state.get('slug', 'unknown')}.gate-pgid"
+
+
+def _reap_orphans(state: dict) -> list[int]:
+    """Kill any gate process group this goal left running.
+
+    `start_new_session=True` detaches the gate so a timeout can kill the
+    whole tree, but it also means nothing reaps it if the *parent* dies --
+    the host killing a long turn, or a crash. The pgid is recorded while
+    the gate runs and cleared when it returns, so a leftover file means a
+    previous turn was interrupted mid-gate.
+    """
+    marker = _pgid_marker(state)
+    killed = []
+    try:
+        pgid = int(marker.read_text().strip())
+    except (FileNotFoundError, ValueError):
+        return killed
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+        killed.append(pgid)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        marker.unlink()
+    except FileNotFoundError:
+        pass
+    return killed
+
+
 def run_gate(state: dict, timeout: int = DEFAULT_TIMEOUT) -> tuple[str, str]:
     """Run the goal's gate. Returns (result, output).
 
@@ -68,6 +107,7 @@ def run_gate(state: dict, timeout: int = DEFAULT_TIMEOUT) -> tuple[str, str]:
         # process group, so a timeout can kill the whole group — including
         # any grandchildren the shell forked off (backgrounded jobs,
         # pipeline stages) — not just the immediate shell process.
+        _reap_orphans(state)
         proc = subprocess.Popen(
             command, shell=True, cwd=state["cwd"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -75,6 +115,12 @@ def run_gate(state: dict, timeout: int = DEFAULT_TIMEOUT) -> tuple[str, str]:
         )
     except OSError as e:
         raise GateUnrunnable(f"gate could not execute: {command}: {e}") from e
+
+    marker = _pgid_marker(state)
+    try:
+        marker.write_text(str(os.getpgid(proc.pid)))
+    except OSError:
+        marker = None  # best effort; reaping is a safety net, not a contract
 
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
@@ -85,6 +131,12 @@ def run_gate(state: dict, timeout: int = DEFAULT_TIMEOUT) -> tuple[str, str]:
             pass  # already dead
         proc.wait()  # reap; avoid leaving a zombie behind
         raise GateUnrunnable(f"gate timed out after {timeout}s: {command}") from e
+    finally:
+        if marker is not None:
+            try:
+                marker.unlink()
+            except FileNotFoundError:
+                pass
 
     if proc.returncode in (SHELL_NOT_FOUND, SHELL_NOT_EXECUTABLE):
         reason = (

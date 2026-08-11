@@ -1,4 +1,5 @@
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -202,3 +203,34 @@ def test_run_gate_at_uses_a_sentinel_when_the_tree_is_unreadable(tmp_path):
         assert tree_hash.changed(str(repo), [str(repo)], evaluated) is True
     finally:
         os.chmod(locked, 0o755)
+
+
+def test_default_timeout_is_below_the_host_ceiling():
+    """The Bash tool hosting these calls caps at 600s. A longer gate
+    timeout means the host kills the turn first -- after the increment's
+    work landed and before the checkpoint recording it -- and the detached
+    gate keeps running."""
+    assert gate.DEFAULT_TIMEOUT < 600
+
+
+def test_an_orphaned_gate_group_is_reaped_on_the_next_run(tmp_path, monkeypatch):
+    """start_new_session detaches the gate so a timeout can kill its whole
+    tree; the same detachment means nothing reaps it if the PARENT dies.
+    A leftover pgid marker is that case, and the next run must clear it."""
+    import signal as _signal
+    repo = _repo(tmp_path)
+    state = _goal(repo, "true")
+
+    harness = tmp_path / "harness"
+    (harness / "goals").mkdir(parents=True)
+    monkeypatch.setattr(gate.paths, "harness_root", lambda: harness)
+
+    victim = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    pgid = os.getpgid(victim.pid)
+    (harness / "goals" / f".{state['slug']}.gate-pgid").write_text(str(pgid))
+
+    gate.run_gate(state)
+
+    victim.wait(timeout=5)
+    assert victim.returncode is not None, "the orphaned process group survived"
+    assert not (harness / "goals" / f".{state['slug']}.gate-pgid").exists()

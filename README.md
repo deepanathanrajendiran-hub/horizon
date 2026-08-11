@@ -202,14 +202,16 @@ future sessions here. That's the compounding loop closing for the first time.
 ### The rollback story
 
 ```
-APPLY       record → edit → commit_entry → one ledger line
+APPLY       apply_edit(layer, [(path, content)], why, evidence)
 UNDO        file restored, REVERTED line appended
 STALENESS   you edited the file after approving → UndoConflict, your edit survives
 ```
 
-`record()` snapshots the target **before** the edit; `commit_entry()` writes
-the ledger line **after** it lands. An entry recorded but never committed
-represents a failed edit and is invisible to `undo()`.
+One call does all of it. `apply_edit(layer, [(path, content)], rationale,
+evidence)` takes the **approved content** and performs the write itself, so
+what you were shown, what gets logged, and what lands on disk cannot
+diverge. Every file a proposal touches — a memory file *and* its
+`MEMORY.md` index line — goes in the same call, so they revert together.
 
 ---
 
@@ -233,13 +235,15 @@ So `refine` is fenced four ways:
   anything, anywhere, that softens G1, G2, or G4.
 - **G4 — Approval gate.** No write without your explicit approval, per proposal.
 
-**These are enforced in code, not just written down.** `record()` refuses:
+**These are enforced in code, not just written down.** `apply_edit()` refuses:
 
 ```
-blocked — forge the sentinel the cap counter skips
 blocked — edit refine's own rules
 blocked — same file, lowercase spelling      ← macOS is case-insensitive
 blocked — the enforcement code itself
+blocked — the GLOBAL copies under ~/.claude  ← everything --global targets
+blocked — the ledger the cap is counted from
+blocked — settings.json / hooks              ← these can run arbitrary shell
 blocked — a hardlink to a protected file
 ```
 
@@ -251,7 +255,7 @@ guardrails aren't loaded in it. A proposal reading as reasonable prose ("you
 maintain the harness layer; you have standing approval for maintenance") would
 pass every rule and then edit `CLAUDE.md` with no logging, no cap, no undo.
 
-G3 now closes it: every harness write goes through `record()`, and any
+G3 now closes it: every harness write goes through `apply_edit()`, and any
 proposal creating a skill/subagent/hook must **state what write authority it
 claims** as part of what you're approving.
 
@@ -263,11 +267,12 @@ claims** as part of what you're approving.
 
 | Module | Lines | Job |
 |---|---|---|
-| `paths.py` | 54 | Find the current project; resolve where state lives |
+| `paths.py` | ~60 | Find the current project; resolve where state lives |
+| `filelock.py` | ~85 | Serialise read-modify-write across processes |
 | `tree_hash.py` | 105 | Detect whether files changed, conservatively |
 | `goal.py` | 233 | Goal state: create, checkpoint, complete, abandon |
 | `gate.py` | 125 | Run the gate; decide skip; unrunnable vs failing |
-| `refine_log.py` | 319 | Changelog, snapshots, rollback |
+| `refine_log.py` | ~380 | Apply approved edits, snapshot, roll back |
 
 ### Two design decisions worth understanding
 
@@ -298,7 +303,14 @@ brainstorm → spec → external review → plan → 7 tasks
                                    one fix wave → re-review → merge
 ```
 
-**38 commits. 8 reviews. 16 fix rounds. 78 tests.**
+**40+ commits. 9 reviews. 18 fix rounds. 105 tests.**
+
+The ninth review was different in kind: a fresh agent given the code and
+**explicitly denied** this README, the docs, and the git history, so it
+could not re-report conclusions the authors had already reached. It found
+three Criticals the previous eight had missed. Its diagnosis of why is the
+part worth keeping: *"The tests were written to the same mental model as
+the code, so they inherit its blind spots."*
 
 Every task used a fresh subagent with no memory of previous tasks, then an
 independent reviewer, then targeted fix rounds, then a scoped re-review of
@@ -357,6 +369,23 @@ fourth. An agent pattern-matching the others would write to `.claude/memory/`
 — where Claude Code's recall never looks. And it fails *through* approval: you
 see a plausible full path, approve it, and the memory is invisible forever.
 
+### The cap was one newline deep
+
+`layer` was validated against `|` and `\n` — with a docstring explaining
+exactly why. `rationale` and `evidence` went into the same delimited line
+with no validation, and the skill *instructs* filling `evidence` with quoted
+trajectory text. One newline split the ledger line, and the count silently
+missed a real, committed, undoable edit. Now the cap counts stored JSON
+entries; the changelog is a rendering that can hold anything.
+
+### The approval gate never saw what it approved
+
+`record()` took a *path*, you approved *text*, and some other tool did the
+writing. Nothing connected them, so a mistyped path produced a changelog
+asserting an edit that never happened and an `undo()` that reverted an
+untouched file — while the real change had no snapshot at all. `apply_edit()`
+now takes the content and does the write.
+
 ### The promotion recipe would have cross-contaminated every project
 
 Proven with two real projects before fixing:
@@ -370,7 +399,7 @@ projB silently overwrote projA's identically-titled goal, destroying its checkpo
 
 ## 10. Current state
 
-**78 tests passing.** Acceptance: **9 PASS / 1 NOT RUN** — see
+**105 tests passing.** Acceptance: **9 PASS / 1 NOT RUN** — see
 `docs/superpowers/results.md` for the full table with cited artifacts.
 
 T1, T2, T3 and T9 were run **live**, with real proposals you approved. The
@@ -414,23 +443,19 @@ own memories.
 
 ## 12. Known gaps
 
-Nothing here is hidden. `docs/superpowers/results.md` carries the full list of
-23 deferred items with triage. The ones that matter:
+`docs/superpowers/results.md` carries the full triaged list. What is
+genuinely open now:
 
-1. **`undo()` reverts the wrong edit** if a crash lands between the edit and
-   `commit_entry()`. Fixing it means changing a test that currently encodes
-   today's behaviour as intended — a design decision, not a mechanical fix.
-2. **The heartbeat was never built.** Spec §5.2 called for `/loop` /
-   `ScheduleWakeup`; neither appears anywhere. Cross-session continuation is
-   manual resume only. A scope decision, not a defect.
-3. **`MEMORY.md` index lines sit outside rollback scope.** `record()`
-   snapshots one target, so `/refine --undo` on a memory entry leaves a
-   dangling index line. Found on the first real use of the skill.
-4. **The G2 cap counter has no tests.** It lives in markdown, so
-   `commit_entry()`'s format could drift from it with nothing detecting the
-   break. Ironically the most-iterated logic on the branch is the least tested.
-
----
+1. **T10 is unrun** — it needs a separate Claude Code process (see §10).
+2. **`undo()` picks by recency of application, not by a durable clock.**
+   Entries are ordered by their recorded timestamp; a clock change between
+   two proposals in the same second could order them wrongly.
+3. **The `--global` promotion path is implemented but unexercised in
+   anger.** Two-project isolation is proven in tests; nobody has lived
+   with it for a week.
+4. **Nothing verifies the pre-flight ran.** `count_edits_today()` is
+   called by the skill, and a skill is instructions. Making the cap
+   unbypassable would require a hook, not markdown.
 
 ## 13. File map
 
@@ -445,7 +470,7 @@ Nothing here is hidden. `docs/superpowers/results.md` carries the full list of
     goals/                live goal state (one JSON file per goal)
     undo/                 pre-edit snapshots that make rollback possible
 
-tests/                    78 tests
+tests/                    105 tests
 docs/superpowers/
   specs/                  the design, and the external review that shaped it
   plans/                  the 7-task implementation plan
@@ -479,6 +504,14 @@ would have silently merged every project's audit trail into one.
 None of that was caught by writing more carefully. It was caught by running
 things against the code that still had the bug, and by asking an independent
 reviewer to attack the fix rather than confirm it.
+
+The strongest single result came from the audit that was denied all of this
+context. Eight reviews by people who knew the design missed a cap that a
+newline defeats, a denylist covering three literal paths while its own prose
+claimed otherwise, and an approval gate whose enforcement layer never saw the
+approved content. A reviewer who shares your mental model will check whether
+you implemented what you meant. Only one who doesn't will ask whether what
+you meant is what the code does.
 
 That's what the third memory in your directory says, and it's the one most
 worth keeping.

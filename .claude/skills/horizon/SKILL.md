@@ -44,9 +44,22 @@ wherever the modules happen to live.
 the state directory directly:
 
 ```bash
-ls "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"/.claude/harness/goals/*.json \
-  2>/dev/null || echo "no goals yet"
+python3 - <<'PY'
+import sys, pathlib
+_c = pathlib.Path.cwd().resolve()
+_bin = next((c / ".claude/harness/bin" for c in (_c, *_c.parents)
+             if (c / ".claude/harness/bin").is_dir()),
+            pathlib.Path.home() / ".claude/harness/bin")
+sys.path.insert(0, str(_bin))
+import paths
+found = sorted(paths.goals_dir().glob("*.json"))
+print("\n".join(p.stem for p in found) or "no goals yet")
+PY
 ```
+
+Ask `paths` rather than `git rev-parse`: in a monorepo with `.claude/` in
+a subpackage the two disagree, and a listing that says "no goals yet"
+while `goal.load` can see one makes the agent start a duplicate goal.
 
 To load one: `goal.load(slug)`. It raises **`goal.GoalStateError`** if the
 file is missing, unreadable, not a JSON object, or missing any of the

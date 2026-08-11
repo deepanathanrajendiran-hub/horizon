@@ -261,3 +261,49 @@ def test_save_is_atomic(isolated_goals, monkeypatch):
 
     assert (isolated_goals / f"{st['slug']}.json").read_text() == before
     assert not list(isolated_goals.glob(".*tmp*")), "temp file left behind"
+
+
+def test_non_latin_titles_keep_their_own_slugs(isolated_goals):
+    """Stripping every non-ASCII character collapsed each of these to the
+    same slug, so a user could not name their own goal to resume it."""
+    slugs = {goal.slugify(s) for s in
+             ("重构认证模块", "Рефакторинг авторизации", "認証をなおす", "Refactor auth")}
+    assert len(slugs) == 4, f"titles collapsed together: {slugs}"
+    assert "goal" not in slugs
+
+
+@pytest.mark.parametrize("bad", [0, -1, "20", 3.5, True])
+def test_create_rejects_a_budget_that_cannot_bound(bad):
+    with pytest.raises(goal.BudgetInvalid):
+        _make(max_turns=bad)
+
+
+def test_create_rejects_a_goal_with_no_budget_at_all():
+    """max_turns=None with no max_minutes makes budget_exhausted() return
+    False forever -- an unbounded loop, which is what the gate exists to
+    prevent."""
+    with pytest.raises(goal.BudgetInvalid):
+        _make(max_turns=None)
+
+
+def test_load_rejects_wrong_types_not_just_missing_keys(isolated_goals):
+    """Key presence alone let 'checkpoints': 'x' load cleanly, then blow up
+    later inside gate.last_hash -- defeating 'never guess state' exactly
+    where it matters."""
+    st = _make()
+    p = isolated_goals / f"{st['slug']}.json"
+    raw = json.loads(p.read_text())
+    raw["checkpoints"] = "not a list"
+    p.write_text(json.dumps(raw))
+    with pytest.raises(goal.GoalStateError):
+        goal.load(st["slug"])
+
+
+def test_bounded_keeps_the_tail_like_gate_does(isolated_goals):
+    """A coverage judge's verdict and a failing gate's diagnosis both come
+    last. The two modules disagreeing on direction is worse than either."""
+    st = _make()
+    goal.checkpoint(st["slug"], "x", "y", "h", "fail", "H" * 9000 + "THE-VERDICT")
+    stored = goal.load(st["slug"])["checkpoints"][0]["gate_output"]
+    assert stored.endswith("THE-VERDICT")
+    assert len(stored) <= goal.MAX_GATE_OUTPUT + 32
