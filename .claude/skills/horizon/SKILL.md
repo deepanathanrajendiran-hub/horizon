@@ -57,6 +57,61 @@ report it and ask whether to fix the file or start a fresh goal.
 `GoalStateError`, so a bare `except goal.GoalStateError` also catches it;
 catch `GoalClosed` first if you need to tell the two apart.
 
+## One turn, end to end
+
+Steps 1-5 below explain each piece. This is the whole turn as one runnable
+block — copy it, fill in the three marked places, run it. Do not
+reassemble the steps by hand: the ordering they describe is load-bearing,
+and hand-assembly is where it gets lost.
+
+```bash
+cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" && python3 - <<'PY'
+import sys, pathlib
+_c = pathlib.Path.cwd().resolve()
+_bin = next((c / ".claude/harness/bin" for c in (_c, *_c.parents)
+             if (c / ".claude/harness/bin").is_dir()),
+            pathlib.Path.home() / ".claude/harness/bin")
+sys.path.insert(0, str(_bin))
+import goal, gate
+
+SLUG = "<slug>"                      # (1) from Step 1's create()
+DID  = "<what this increment did>"   # (2) plain language, past tense
+NEXT = "<what the next turn does>"   # (3) written for someone with no context
+
+state = goal.load(SLUG)
+if goal.budget_exhausted(state):
+    print(f"BUDGET EXHAUSTED after {state['used']['turns']} turns — stopping.")
+    print(f"  done so far : {DID}")
+    print(f"  NOT done    : {state['checkpoints'][-1]['next'] if state['checkpoints'] else NEXT}")
+    raise SystemExit(0)              # never report this as success
+
+try:
+    result, output, h = gate.run_gate_at(state)
+except gate.CoverageGate:
+    raise SystemExit("coverage gate: dispatch a fresh judge subagent, then "
+                     "call goal.checkpoint yourself with its verdict")
+except gate.GateUnrunnable as e:
+    goal.abandon(SLUG, f"gate unrunnable: {e}")
+    raise SystemExit(f"BROKEN GOAL, not work remaining: {e}")
+
+goal.checkpoint(SLUG, DID, NEXT, h, result, output)
+state = goal.load(SLUG)
+print(f"turn {state['used']['turns']}: gate={result}")
+
+if result == "pass":
+    goal.complete(SLUG, output)
+    print("COMPLETE. evidence:", output.strip()[:200] or "(gate produced no output)")
+else:
+    print("continue. gate said:", (output.strip() or "(no output)")[-500:])
+    print("next:", NEXT)
+PY
+```
+
+Run the work for the increment *before* this block — the block records
+what happened and decides whether to continue. Two failure modes it exists
+to prevent: calling the gate twice per turn, and computing the tree hash
+after the gate has already run.
+
 ## Step 1 — Establish the goal
 
 Never start without a gate. A loop with no termination criterion is an
@@ -102,56 +157,34 @@ state = goal.load(slug)
 Do the smallest unit of real work that moves toward the goal. Not the
 whole thing. The loop is what makes progress, not any single turn.
 
-## Step 3 — Run the gate and capture the hash it judged
+## Step 3 — Run the gate
 
-Use `gate.run_gate_at`, which hashes the tree and then runs the gate,
-returning both. It exists so this ordering cannot be got wrong by a
-caller:
+**Call the gate exactly once per turn**, with the block below.
+`gate.run_gate_at` hashes the tree and then runs the gate, returning
+`(result, output, h)` where `h` is the hash of the tree the gate
+**actually evaluated**. Pass that exact value to `goal.checkpoint` in
+Step 4, and never recompute it afterwards.
 
-```python
-result, output, h = gate.run_gate_at(state)   # result: "pass"|"fail"|"skipped"
-```
-
-`h` is the hash of the tree the gate *actually evaluated*. Pass this exact
-value to `goal.checkpoint` in Step 5. Do not recompute it afterward — see
-the reasoning below for what that breaks.
+Why the single call exists: a checkpoint must record the state the gate
+*judged*, not the state left behind after it ran. A gate can write into
+the watched tree — a counter file, a coverage report, a build artifact —
+so hashing after the run captures that write, the next turn sees an
+unchanged tree, and `fail → fail → pass` collapses into
+`fail → skipped → skipped`. That bug shipped once in this project's own
+test suite precisely because the hash and the gate were two separate
+calls and the ordering was left to the caller. `run_gate_at` removes the
+opportunity.
 
 If the watched tree is unreadable, `run_gate_at` returns the sentinel
 `"unknown"` rather than raising, so the turn still checkpoints. An
 unreadable tree must not kill the turn *after* the increment's work has
-landed on disk but *before* the record of it — that would tell a resuming
-session to redo work already done. `"unknown"` can never equal a real
-digest, so the next turn is guaranteed to run the gate rather than skip.
+landed but *before* the record of it — a resuming session would be told
+to redo finished work. `"unknown"` can never equal a real digest, so the
+next turn is guaranteed to run the gate rather than skip.
 
-The older two-call form (`tree_hash.compute` then `gate.run_gate`) still
-works and appears in `tests/test_gate.py`, but prefer `run_gate_at`: the
-single call is what makes the ordering structural instead of a discipline
-you have to remember.
-
-**This ordering is load-bearing.** `h` must be the hash of the tree the
-gate is *about to evaluate* — not whatever the tree looks like after the
-gate has already run. Compute it now, hold onto it, and pass this exact
-value to `goal.checkpoint` in Step 5. Do not recompute it afterward and
-use that instead.
-
-Why it matters: a gate command can itself write into the watched tree —
-a counter file, a coverage report, a build artifact. If you compute the
-hash *after* `run_gate` returns, the hash captures that write. On the
-*next* turn, `run_gate`'s skip check compares the current tree to the
-hash recorded in the previous checkpoint; if nothing else touched the
-tree between that checkpoint and this call, the comparison reports
-"unchanged" and the gate is silently skipped — even though it should run
-again. This is not hypothetical: `tests/test_gate.py::
-test_fails_then_passes_on_third_attempt` guards exactly this. Its gate
-script writes its own attempt counter into the watched repo as a side
-effect; the test hashes *before* calling `run_gate` for the reason
-above, and its comment spells out that hashing after collapses the
-intended `fail → fail → pass` sequence into `fail → skipped → skipped`.
-
-## Step 4 — Run the gate
-
-One call site handles both gate kinds — do not branch on `gate["kind"]`
-yourself first; let `run_gate` tell you what it needs via the exception:
+This one call site handles both gate kinds — do not branch on
+`state["gate"]["kind"]` yourself first; let `run_gate_at` tell you what it
+needs via the exception:
 
 ```python
 try:
@@ -190,7 +223,7 @@ output bounding (`gate.MAX_OUTPUT` = 4000 chars), and the
 unrunnable-vs-failing distinction, all unit tested in
 `tests/test_gate.py`. Do not reimplement any of it inline.
 
-## Step 5 — Checkpoint
+## Step 4 — Checkpoint
 
 Record what happened using the hash from Step 3 — not a freshly computed
 one — and the result from Step 4:
@@ -212,7 +245,7 @@ this shouldn't happen — Step 6 stops the loop once status leaves
 assume the checkpoint landed: catch it, reload, and report the real
 status.
 
-## Step 6 — Continue or stop
+## Step 5 — Continue or stop
 
 ```python
 if result == "pass":

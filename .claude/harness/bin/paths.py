@@ -21,16 +21,31 @@ from pathlib import Path
 
 
 def project_root() -> Path:
-    """The nearest ancestor of the working directory containing `.claude/`.
+    """The project containing the working directory.
 
-    Falls back to the working directory itself when no `.claude/` is found,
-    so a fresh project gets its own harness rather than borrowing another's.
+    Nearest ancestor with a `.claude/`, then nearest ancestor with a `.git/`,
+    then the working directory itself.
+
+    `$HOME` is excluded from the walk, and this is the whole point of the
+    function. Every Claude Code user has `~/.claude/`, so a naive upward walk
+    resolves *any* project without its own `.claude/` — the common case — to
+    the home directory. Every such project would then share one goals
+    directory, one changelog and one daily edit cap, and a goal in one would
+    silently overwrite a similarly-named goal in another. Falling back to the
+    working directory keeps a fresh project's state in the fresh project.
     """
     cwd = Path.cwd().resolve()
-    for candidate in (cwd, *cwd.parents):
-        if (candidate / ".claude").is_dir():
-            return candidate
-    return cwd
+    home = Path.home().resolve()
+
+    def _walk(marker: str) -> Path | None:
+        for candidate in (cwd, *cwd.parents):
+            if candidate == home or candidate == candidate.parent:
+                return None
+            if (candidate / marker).exists():
+                return candidate
+        return None
+
+    return _walk(".claude") or _walk(".git") or cwd
 
 
 def harness_root() -> Path:
