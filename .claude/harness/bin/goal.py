@@ -61,7 +61,7 @@ def _bounded(text: str) -> str:
 
 
 def slugify(text: str) -> str:
-    """A filesystem-safe slug that preserves non-Latin scripts.
+    r"""A filesystem-safe slug that preserves non-Latin scripts.
 
     `[^a-z0-9]` stripped every non-ASCII character, so every Chinese,
     Cyrillic, Japanese or Greek goal title collapsed to the same slug and
@@ -144,12 +144,22 @@ def create(goal, cwd, gate_kind, gate_value,
             "is unbounded — the thing a gate exists to prevent"
         )
 
+    # _unique_slug is check-then-write like every other mutator here, and was
+    # the one left unlocked: eight concurrent creates of one title produced
+    # five state files, three goals silently losing theirs to a collision.
+    with filelock.locked(paths.goals_dir() / "CREATE"):
+        return _create_locked(goal, cwd, gate_kind, gate_value,
+                              max_turns, max_minutes, watch_paths)
+
+
+def _create_locked(goal, cwd, gate_kind, gate_value,
+                   max_turns, max_minutes, watch_paths) -> dict:
     state = {
         "slug": _unique_slug(slugify(goal)),
         "goal": goal,
         "cwd": str(cwd),
         "gate": {"kind": gate_kind, "value": gate_value},
-        "watch_paths": [str(p) for p in (watch_paths or [cwd])],
+        "watch_paths": [os.path.abspath(str(p)) for p in (watch_paths or [cwd])],
         "budget": {"max_turns": max_turns, "max_minutes": max_minutes},
         "used": {"turns": 0, "started": _now()},
         "status": "active",

@@ -91,6 +91,16 @@ def run_gate(state: dict, timeout: int = DEFAULT_TIMEOUT) -> tuple[str, str]:
     result is "pass", "fail", or "skipped". Skipping happens only when the
     tree is provably unchanged since the last checkpoint — see tree_hash,
     where every uncertain path reports changed.
+
+    **Never two skips in a row.** A skip does no work, so the tree is still
+    unchanged on the next turn, so it skips again: skip is an absorbing
+    state and the loop burns its entire budget without ever running the
+    gate. Observed as fail, fail, then eight consecutive skips on a gate
+    that would have passed on its third run — the gate's own counter lived
+    outside `watch_paths`, so neither git nor the mtime walk could see it
+    advancing. One forced run breaks the cycle, which costs a single gate
+    invocation and matches this module's stated asymmetry: a false skip is
+    a correctness bug, a false run costs seconds.
     """
     if state["gate"]["kind"] != "command":
         raise CoverageGate(
@@ -98,7 +108,10 @@ def run_gate(state: dict, timeout: int = DEFAULT_TIMEOUT) -> tuple[str, str]:
             "by a fresh subagent that did not do the work"
         )
 
-    if not tree_hash.changed(state["cwd"], state.get("watch_paths"), last_hash(state)):
+    checkpoints = state.get("checkpoints") or []
+    skipped_last_turn = bool(checkpoints) and checkpoints[-1].get("gate") == "skipped"
+    if (not skipped_last_turn
+            and not tree_hash.changed(state["cwd"], state.get("watch_paths"), last_hash(state))):
         return "skipped", ""
 
     command = state["gate"]["value"]

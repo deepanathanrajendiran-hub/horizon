@@ -85,3 +85,22 @@ def test_concurrent_apply_edits_all_get_a_snapshot(tmp_path):
 
     ids = [e["id"] for e in entries]
     assert len(ids) == len(set(ids)), f"colliding entry ids: {sorted(ids)}"
+
+
+def test_concurrent_creates_do_not_collide_on_slugs(tmp_path):
+    """_unique_slug is check-then-write like every other mutator, and was
+    the one left unlocked: eight concurrent creates of one title produced
+    five state files, three goals silently losing theirs."""
+    state_dir = tmp_path / "goals"
+    state_dir.mkdir()
+
+    _run_workers(f"""
+        import goal
+        goal.create(goal="Fix the login bug", cwd={str(tmp_path)!r},
+                    gate_kind="command", gate_value="pytest", max_turns=5)
+    """, state_dir)
+
+    files = list(state_dir.glob("*.json"))
+    assert len(files) == N, f"{len(files)} state files for {N} goals — slugs collided"
+    slugs = {json.loads(f.read_text())["slug"] for f in files}
+    assert len(slugs) == N

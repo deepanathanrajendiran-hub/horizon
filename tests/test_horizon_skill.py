@@ -161,14 +161,34 @@ def test_the_turn_block_does_not_recompute_the_hash():
     assert "goal.checkpoint(SLUG, DID, NEXT, h," in block
 
 
-def test_the_turn_block_refuses_to_report_exhaustion_as_success():
+def test_the_turn_block_records_the_work_before_checking_the_budget():
+    """The exhausting turn's own increment must not be lost.
+
+    Checking the budget before checkpointing meant the final turn's work
+    landed on disk and never entered the record, so a resuming session was
+    told to redo it — the exact failure the "unknown" sentinel exists to
+    prevent. Checkpoint first, then decide whether to stop.
+    """
     import re
     text = SKILL.read_text()
     i = text.index("## One turn, end to end")
     block = re.search(r"```bash\n(.*?)```", text[i:], re.S).group(1)
+
     assert "budget_exhausted" in block
     assert "never report this as success" in block
-    assert block.index("budget_exhausted") < block.index("run_gate_at"), (
-        "budget is checked after the gate runs — a turn past the cap would "
-        "still burn a full gate run"
+    assert block.index("goal.checkpoint(") < block.index("budget_exhausted"), (
+        "the budget is checked before the work is recorded — the turn that "
+        "exhausts the budget loses its own increment"
     )
+
+
+def test_the_turn_block_does_not_hardcode_a_project_root():
+    """`cd $(git rev-parse --show-toplevel)` contradicts the skill's own
+    advice 20 lines above it, and in a monorepo with .claude/ in a
+    subpackage it lands somewhere the bootstrap cannot find the modules."""
+    import re
+    text = SKILL.read_text()
+    i = text.index("## One turn, end to end")
+    block = re.search(r"```bash\n(.*?)```", text[i:], re.S).group(1)
+    assert "git rev-parse" not in block
+    assert "cd " not in block

@@ -78,7 +78,7 @@ reassemble the steps by hand: the ordering they describe is load-bearing,
 and hand-assembly is where it gets lost.
 
 ```bash
-cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" && python3 - <<'PY'
+python3 - <<'PY'
 import sys, pathlib
 _c = pathlib.Path.cwd().resolve()
 _bin = next((c / ".claude/harness/bin" for c in (_c, *_c.parents)
@@ -92,11 +92,6 @@ DID  = "<what this increment did>"   # (2) plain language, past tense
 NEXT = "<what the next turn does>"   # (3) written for someone with no context
 
 state = goal.load(SLUG)
-if goal.budget_exhausted(state):
-    print(f"BUDGET EXHAUSTED after {state['used']['turns']} turns — stopping.")
-    print(f"  done so far : {DID}")
-    print(f"  NOT done    : {state['checkpoints'][-1]['next'] if state['checkpoints'] else NEXT}")
-    raise SystemExit(0)              # never report this as success
 
 try:
     result, output, h = gate.run_gate_at(state)
@@ -107,9 +102,19 @@ except gate.GateUnrunnable as e:
     goal.abandon(SLUG, f"gate unrunnable: {e}")
     raise SystemExit(f"BROKEN GOAL, not work remaining: {e}")
 
+# Checkpoint FIRST. The work described by DID is already on disk; checking
+# the budget before recording it means the turn that exhausts the budget
+# loses its own increment, and a resuming session is told to redo finished
+# work — the exact failure the "unknown" sentinel exists to prevent.
 goal.checkpoint(SLUG, DID, NEXT, h, result, output)
 state = goal.load(SLUG)
 print(f"turn {state['used']['turns']}: gate={result}")
+
+if result != "pass" and goal.budget_exhausted(state):
+    print(f"BUDGET EXHAUSTED after {state['used']['turns']} turns — stopping.")
+    print(f"  done so far : {DID}")
+    print(f"  NOT done    : {NEXT}")
+    raise SystemExit(0)              # never report this as success
 
 if result == "pass":
     goal.complete(SLUG, output)

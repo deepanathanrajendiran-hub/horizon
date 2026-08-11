@@ -234,3 +234,45 @@ def test_an_orphaned_gate_group_is_reaped_on_the_next_run(tmp_path, monkeypatch)
     victim.wait(timeout=5)
     assert victim.returncode is not None, "the orphaned process group survived"
     assert not (harness / "goals" / f".{state['slug']}.gate-pgid").exists()
+
+
+def test_skip_is_never_absorbing(tmp_path):
+    """A skip does no work, so the tree is still unchanged next turn, so it
+    skips again — forever. Observed as fail, fail, then eight consecutive
+    skips against a gate that passes on its third run, with the gate's own
+    counter living outside watch_paths where neither git nor the mtime walk
+    could see it advance. The loop burned its whole budget looking busy."""
+    repo = _repo(tmp_path)
+    watched = repo / "src"
+    watched.mkdir()
+    (watched / "a.py").write_text("x = 1\n")
+
+    script = repo / "check.sh"
+    script.write_text(
+        "#!/bin/sh\n"
+        "n=$(cat .n 2>/dev/null || echo 0)\n"
+        "n=$((n+1))\n"
+        "echo $n > .n\n"           # side effect OUTSIDE watch_paths
+        "[ $n -ge 3 ] && exit 0\n"
+        "exit 1\n"
+    )
+    script.chmod(0o755)
+
+    state = goal.create(goal="narrowed", cwd=str(repo), gate_kind="command",
+                        gate_value="./check.sh", max_turns=10,
+                        watch_paths=[str(watched)])
+    results = []
+    for i in range(10):
+        current = goal.load(state["slug"])
+        if goal.budget_exhausted(current):
+            break
+        r, o, h = gate.run_gate_at(current)
+        goal.checkpoint(state["slug"], f"turn {i}", "next", h, r, o)
+        results.append(r)
+        if r == "pass":
+            break
+
+    assert "pass" in results, f"the loop never reached a passing gate: {results}"
+    assert not any(a == "skipped" and b == "skipped"
+                   for a, b in zip(results, results[1:])), \
+        f"two consecutive skips — skip is absorbing again: {results}"
