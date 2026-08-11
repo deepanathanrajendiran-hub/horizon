@@ -238,7 +238,15 @@ So `refine` is fenced four ways:
   anything, anywhere, that softens G1, G2, or G4.
 - **G4 — Approval gate.** No write without your explicit approval, per proposal.
 
-**These are enforced in code, not just written down.** `apply_edit()` refuses:
+**These are enforced in code — with one honest limit.** `apply_edit()` is the
+*disciplined* path, not the only one: I hold `Write` and `Edit`, nothing
+intercepts them, and no hook is installed. Every guarantee below holds exactly
+as long as harness writes go through `apply_edit()`. If you want it to be a
+wall rather than a rule, that takes a `PreToolUse` hook in your own
+`settings.json` — which `refine` deliberately cannot write, since `settings*.json`
+is on the denylist below. §12 has the snippet.
+
+With that said, `apply_edit()` refuses:
 
 ```
 blocked — edit refine's own rules
@@ -287,12 +295,12 @@ something innocent, that file is yours to write by hand — the rule is that
 
 | Module | Lines | Job |
 |---|---|---|
-| `paths.py` | 69 | Find the current project; resolve where state lives |
-| `filelock.py` | 109 | Serialise read-modify-write across processes |
-| `tree_hash.py` | 105 | Detect whether files changed, conservatively |
-| `goal.py` | 365 | Goal state: create, checkpoint, complete, abandon, reopen |
-| `gate.py` | 214 | Run the gate; decide skip; unrunnable vs failing |
-| `refine_log.py` | 660 | Apply approved edits, enforce the cap, snapshot, roll back |
+| `paths.py` | 90 | Find the current project; resolve where state lives |
+| `filelock.py` | 114 | Serialise read-modify-write across processes |
+| `tree_hash.py` | 113 | Detect whether files changed, conservatively |
+| `goal.py` | 468 | Goal state: create, checkpoint, complete, abandon, reopen |
+| `gate.py` | 205 | Run the gate; decide skip; unrunnable vs failing |
+| `refine_log.py` | 828 | Apply approved edits, enforce the cap, snapshot, roll back |
 
 ### Two design decisions worth understanding
 
@@ -331,7 +339,7 @@ brainstorm → spec → external review → plan → 7 tasks
                                    one fix wave → re-review → merge
 ```
 
-**50+ commits. 10 reviews. 18 fix rounds. 154 tests.**
+**50+ commits. 12 reviews. 18 fix rounds. 218 tests.**
 
 The last two reviews were different in kind: a fresh agent given the code and
 **explicitly denied** this README, the docs, and the git history, so it could
@@ -423,6 +431,79 @@ asserting an edit that never happened and an `undo()` that reverted an
 untouched file — while the real change had no snapshot at all. `apply_edit()`
 now takes the content and does the write.
 
+### The one string that decided what "verified" means
+
+`horizon` exists to make "complete" mean *verified*. The gate is a shell
+command the agent writes itself, judged by its exit status — and `/bin/sh` has
+no `pipefail`. So the first thing an agent reaches for when it wants readable
+test output:
+
+```
+pytest -q | tail -30     → exit status of tail. Always 0.
+pytest -q; echo done     → exit status of echo. Always 0.
+pytest -q || true        → always 0.
+```
+
+All three mark the goal **complete** against a suite printing `3 failed`, with
+stored "evidence" that reads like a pass. Nothing downstream catches it,
+because nothing downstream is wrong: the checkpoint honestly records what the
+gate honestly returned. Roughly 40 lines of this skill argue that a placeholder
+must never be the passing value, and none covered the likelier way a passing
+value gets fabricated. `create` now refuses these shapes.
+
+### The lost update, rebuilt inside the fix for the lost update
+
+`AppendLine` exists because two memory proposals in one session both read
+`MEMORY.md` before either wrote, and the second dropped the first's index line.
+Its docstring says resolving under the lock *"removes the window rather than
+narrowing it."*
+
+One `apply_edit` call touching the same file twice put the window straight
+back: every target was snapshotted before any target was written, so both
+appends resolved against the same pre-write bytes. `apply_edit` returned
+success, one memory was left unindexed and invisible to recall, and the entry
+was *born* un-undoable — the very first `undo()` raised `UndoConflict` and
+blamed the user for a hand-edit that never happened. The skill actively steers
+into it: *"every file a single proposal touches goes in the same call."*
+
+### The reaper that could SIGKILL your dev server
+
+Each gate run recorded its process group id in a file; the next run SIGKILLed
+whatever that file named. `filelock`'s own docstring, one module over, explains
+why that reasoning is unsound: *"a pid check is wrong across containers and
+mount namespaces, where a pid may be reused or invisible."*
+
+Demonstrated: two concurrent turns of one goal killed each other's gates — and
+because `-9` is neither 126 nor 127, the survivor recorded a **passing** gate
+as an honest `fail`. And a marker outliving a reboot names a recycled pid, so
+the next turn kills whatever now owns that number. Deleted rather than
+repaired: it risked killing the user's own processes to reap a leaked `sleep`.
+
+### A lock that stopped honouring its timeout
+
+`filelock` reclaims a lock older than 60 seconds. If the reclaim *fails* — a
+read-only mount, an unwritable directory — the stale branch looped back without
+checking the deadline. Not a slow path: a 100%-CPU hang with no error and no
+timeout, in the module every other module's correctness rests on. It hung this
+session when I ran the auditor's reproduction.
+
+### The tripwire that blocked the best memories
+
+The content scan that enforces G3's semantic half was matching verbs without
+polarity, so it refused:
+
+```
+"Never skip the tests before committing."           ← blocked
+"Do not write files without asking the user first." ← blocked
+```
+
+Those are the memories a *well-behaved* session most wants to write, and both
+are exactly the "direct user correction" the harvest step is told to look for.
+Two auditors independently said to cut it down. A tripwire that fires mostly on
+true statements about testing teaches its user to route around it — and by its
+own admission a paraphrase walks past it anyway. It is now narrow: write
+authority, cap-raising, and approval-bypassing only.
+
 ### The skip optimisation could deadlock the loop
 
 `horizon` skips the gate when the tree is provably unchanged — a real saving on
@@ -494,11 +575,11 @@ projB silently overwrote projA's identically-titled goal, destroying its checkpo
 
 ## 10. Current state
 
-**154 tests passing.** Acceptance: **9 PASS / 1 NOT RUN** — see
+**218 tests passing.** Acceptance: **9 PASS / 1 NOT RUN** — see
 `docs/superpowers/results.md` for the full table with cited artifacts.
 
-Every fix in the last two rounds was verified by **neutering it and confirming
-the covering test fails** — 11 of 11 discriminate. A test that passes against
+Every fix in the last three rounds was verified by **neutering it and confirming
+the covering test fails** — 28 of 28 discriminate. A test that passes against
 the pre-fix code proves nothing, and this project has shipped two of those.
 
 T1, T2, T3 and T9 were run **live**, with real proposals you approved. The
@@ -554,11 +635,38 @@ genuinely open now:
    with it for a week.
 4. **G3's semantic half is a tripwire, not a proof.** The content scan
    catches the literal shapes an audit found. A paraphrase that never says
-   "standing approval" and never names `refine_log` would pass it. Only the
-   approval gate — you, reading the proposal — actually closes this.
-5. **The cap is per-project and per-24h, not per-trajectory.** Two unrelated
-   sessions in one project within a day share one budget of 3. That is the
-   safe direction of the error, and it will occasionally be annoying.
+   "standing approval" and never names `refine_log` would pass it. It is now
+   deliberately *narrow*, because the wide version blocked the best memories
+   a session could write. Only the approval gate — you, reading the proposal
+   — actually closes this.
+5. **The cap counts this project's ledger.** Two unrelated sessions in one
+   project within a day share one budget of 3 (the safe direction). But
+   `/refine --global` run in N projects can land 3N edits under `~/.claude/`
+   in a day, with every pre-flight honestly reporting zero. The skill now
+   says so where the count is described; the count itself is still
+   per-project.
+6. **Nothing intercepts `Write`/`Edit`.** The guardrails bind the
+   `apply_edit()` path, and I am the one who chooses to use it. To make that
+   structural, add this to `~/.claude/settings.json` yourself — `refine`
+   can't, by design:
+
+   ```json
+   {
+     "hooks": {
+       "PreToolUse": [{
+         "matcher": "Write|Edit|NotebookEdit",
+         "hooks": [{
+           "type": "command",
+           "command": "python3 -c \"import json,sys,re; p=json.load(sys.stdin).get('tool_input',{}).get('file_path',''); sys.exit(2 if re.search(r'/(CLAUDE\\.md|\\.claude/(skills|agents)/)', p or '') else 0)\""
+         }]
+       }]
+     }
+   }
+   ```
+
+   It blocks direct writes to the harness layer, leaving `apply_edit()` — a
+   `python3` call, not a `Write` — as the only route. Try it on a scratch
+   project first; a `PreToolUse` hook that misfires blocks ordinary work.
 6. **`horizon` is over-built for what it does**, on the assessment of the
    audit that had no stake in it. The core — goal file, gate, atomic
    checkpoints, no-success-without-a-passing-gate — is sound and tested. The
@@ -570,15 +678,15 @@ genuinely open now:
 ```
 .claude/
   skills/
-    horizon/SKILL.md      417 lines — goal, gate, checkpoint, continuation
-    refine/SKILL.md       541 lines — harvest, route, propose, log, undo
+    horizon/SKILL.md      444 lines — goal, gate, checkpoint, continuation
+    refine/SKILL.md       558 lines — harvest, route, propose, log, undo
   harness/
     bin/                  6 Python modules, stdlib only
     CHANGELOG.md          every approved harness edit, newest last
     goals/                live goal state (one JSON file per goal)
     undo/                 pre-edit snapshots that make rollback possible
 
-tests/                    154 tests, in 7 files
+tests/                    218 tests, in 8 files
 docs/superpowers/
   specs/                  the design, and the external review that shaped it
   plans/                  the 7-task implementation plan
