@@ -575,7 +575,7 @@ projB silently overwrote projA's identically-titled goal, destroying its checkpo
 
 ## 10. Current state
 
-**220 tests passing.** Acceptance: **9 PASS / 1 PARTIAL** — see
+**220 tests passing.** Acceptance: **10 PASS** — see
 `docs/superpowers/results.md` for the full table with cited artifacts.
 
 Every fix in the last three rounds was verified by **neutering it and confirming
@@ -584,12 +584,18 @@ the pre-fix code proves nothing, and this project has shipped two of those.
 
 T1, T2, T3 and T9 were run **live**, with real proposals you approved.
 
-T10 was run on 2026-08-11 in a genuinely separate process. A resuming session
-treated the stored subagent entry as dead and never addressed the stale handle
-— the hazard it exists to catch. It did not respawn from `brief`, because this
-environment forbids dispatching agents unasked, so that half remains untested.
-Running it also turned up a real defect: a silent passing gate recorded empty
-evidence. Details in `docs/superpowers/results.md`.
+T10 was run twice on 2026-08-11, in separate processes, and **passes**. A
+resuming session treated the stored subagent entry as dead, never addressed the
+stale handle, and respawned from the recorded `brief`. The second run also gave
+the coverage-judge branch its first live exercise — the path that discarded a
+goal's entire turn until it was fixed that morning.
+
+Both runs earned their keep by breaking something. The first: a silent passing
+gate recorded empty evidence. The second: **four of the 29 `file:line`
+citations in its own deliverable were wrong**, displaced by a ten-line
+insertion made in the commit that recorded the first run — and the
+hand-verification that had pronounced them accurate had sampled only the region
+that could not have drifted. Details in `docs/superpowers/results.md`.
 
 ### Running T10 yourself
 
