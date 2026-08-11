@@ -433,3 +433,23 @@ def test_extra_turns_is_honoured_on_a_minutes_only_goal():
     state = goal.load(st["slug"])
     assert state["budget"]["max_turns"] == 6      # 1 used + 5 granted
     assert goal.budget_exhausted(state) is False
+
+
+def test_a_silent_passing_gate_still_records_evidence():
+    """`test -f x`, `make -s check` and most linters print nothing on
+    success, so gate_evidence — the only thing a completed goal offers as
+    proof it was verified — was stored as the empty string. Found by
+    running T10, whose own gate was silent."""
+    st = _make(gate_value="test -f something")
+    goal.checkpoint(st["slug"], "did", "next", "h", "pass", "")
+    done = goal.complete(st["slug"], "")
+
+    assert done["gate_evidence"].strip(), "a completed goal recorded no evidence"
+    assert "test -f something" in done["gate_evidence"]
+
+
+def test_real_gate_output_is_preserved_verbatim():
+    st = _make()
+    goal.checkpoint(st["slug"], "did", "next", "h", "pass", "")
+    done = goal.complete(st["slug"], "42 passed in 3.1s")
+    assert done["gate_evidence"] == "42 passed in 3.1s"

@@ -575,17 +575,21 @@ projB silently overwrote projA's identically-titled goal, destroying its checkpo
 
 ## 10. Current state
 
-**218 tests passing.** Acceptance: **9 PASS / 1 NOT RUN** — see
+**220 tests passing.** Acceptance: **9 PASS / 1 PARTIAL** — see
 `docs/superpowers/results.md` for the full table with cited artifacts.
 
 Every fix in the last three rounds was verified by **neutering it and confirming
-the covering test fails** — 28 of 28 discriminate. A test that passes against
+the covering test fails** — 29 of 29 discriminate. A test that passes against
 the pre-fix code proves nothing, and this project has shipped two of those.
 
-T1, T2, T3 and T9 were run **live**, with real proposals you approved. The
-only unrun test is T10 (subagent restart safety), which needs a genuinely
-separate Claude Code process — a subagent shares this one and would prove
-nothing about handle staleness.
+T1, T2, T3 and T9 were run **live**, with real proposals you approved.
+
+T10 was run on 2026-08-11 in a genuinely separate process. A resuming session
+treated the stored subagent entry as dead and never addressed the stale handle
+— the hazard it exists to catch. It did not respawn from `brief`, because this
+environment forbids dispatching agents unasked, so that half remains untested.
+Running it also turned up a real defect: a silent passing gate recorded empty
+evidence. Details in `docs/superpowers/results.md`.
 
 ### Running T10 yourself
 
@@ -686,7 +690,7 @@ genuinely open now:
     goals/                live goal state (one JSON file per goal)
     undo/                 pre-edit snapshots that make rollback possible
 
-tests/                    218 tests, in 8 files
+tests/                    220 tests, in 8 files
 docs/superpowers/
   specs/                  the design, and the external review that shaped it
   plans/                  the 7-task implementation plan

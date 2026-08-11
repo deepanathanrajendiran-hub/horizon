@@ -352,7 +352,17 @@ def _complete_locked(slug: str, gate_output: str) -> dict:
             "is reported as a partial result, never as success."
         )
     state["status"] = "complete"
-    state["gate_evidence"] = _bounded(gate_output)
+    # A quiet gate must still leave evidence. `test -f x`, `make -s check`
+    # and most linters print nothing on success, so this field -- the only
+    # thing a completed goal offers as proof it was verified -- was stored
+    # as the empty string. Found by running the T10 acceptance test, whose
+    # own gate was silent. The command and its verdict are the minimum a
+    # later reader needs to judge whether "complete" meant anything.
+    evidence = (gate_output or "").strip()
+    if not evidence:
+        evidence = (f"{state['gate']['value']} -> exit 0 (gate produced no "
+                    f"output; passing evidence is the exit status alone)")
+    state["gate_evidence"] = _bounded(evidence)
     state["completed_at"] = _now()
     return _save(state)
 
