@@ -168,6 +168,31 @@ Gate kinds:
   by a freshly spawned subagent (see "Subagents", and the coverage
   branch of the turn block) — never mechanically.
 
+### Choosing between them
+
+Measured, not asserted. In an A/B trial one agent turned a red suite green
+without editing a single test, by returning a `str` subclass whose `__eq__`
+matched two contradictory expected values. The command gate exited 0 and the
+goal was marked **complete**. Three independent judges, given the same diff and
+a written criterion, called it gaming 3 times out of 3 — with zero false alarms
+on two honest solutions.
+
+So:
+
+- **A command gate answers "did it run?"** It is a proxy, and a proxy you can
+  write to is a proxy you can satisfy without doing the work. Use one when the
+  thing being measured is outside your control, or when being wrong is cheap.
+- **A coverage gate answers "is it right?"** Use one when the deliverable is
+  prose or judgement, **and whenever you have write access to whatever the
+  command gate measures** — which, for a test suite in the repo you are
+  editing, is always.
+- **Both, for anything that matters.** Nothing stops you running the command
+  gate as the loop's driver and a coverage judge before `complete()`. That
+  combination is the only one this project has evidence for.
+
+The judge must not be the agent that did the work, and must not be a `fork` —
+a self-grader is not a gate.
+
 If the user gave no gate, propose one and get explicit confirmation
 before calling `create`.
 
@@ -317,6 +342,23 @@ means the tree didn't change since the last attempt, which is not
 evidence of progress either — it still counts against the budget and
 still needs a real next increment.
 
+## When the goal is provably unachievable
+
+Distinct from a failing gate (work still to do) and an unrunnable one (a broken
+goal). Sometimes the gate runs perfectly and the goal simply cannot be reached:
+two requirements contradict each other, an API does not exist, the spec is
+impossible. Four trials hit this in the A/B run and all four improvised the
+same answer, which is the right one:
+
+```python
+goal.abandon(slug, "provably unachievable: <the proof, in one sentence>")
+```
+
+Abandon it and say *why it cannot be done*, with the demonstration. Do not burn
+the remaining budget re-attempting it, and do not report it as success. The
+reason string is the deliverable — a resuming session, or the user, needs the
+proof, not the fact that you gave up.
+
 ## Reopening an abandoned goal
 
 Abandonment is not the end of the record. A goal abandoned for a blocker
@@ -353,6 +395,7 @@ disk and became unreachable.
 | `gate.run_gate` | `CoverageGate` | gate kind is `"coverage"` | dispatch a fresh judge subagent, then checkpoint with its verdict and `e.tree_hash` — see the coverage branch of the turn block |
 | `gate.run_gate` | `GateUnrunnable` | exit 126 (not executable), exit 127 (not found), or timeout | `goal.abandon` and stop; this is a broken goal, not work left to do |
 | `goal.add_subagent` | `GoalClosed` | goal status is not `"active"` | same as `checkpoint`/`complete`/`abandon`: reload and report the real status |
+| `goal.complete` | `EvidenceInsufficient` (subclass of `GateNotPassed`) | a **coverage** goal is completing on a verdict with no substance in it | the judge did not really run, or returned garbage. Re-dispatch it and pass what it actually said. Two judges in a nine-judge trial returned the literal string `"Test"` as their reasoning |
 | `goal.reopen` | `GoalClosed` | the goal is `"active"` or `"complete"`, not `"abandoned"` | only an abandoned goal reopens; for a completed one, start a new goal |
 | `goal.reopen` | `BudgetInvalid` | `extra_turns`/`extra_minutes` is not a positive integer | fix the call; a grant that cannot bound is the same bug `create` rejects |
 | `goal.create` | `GateUnsound` | the gate command discards the exit status of the work it judges — a pipe, `;`, `\|\|`, or a trailing `&` | rewrite the gate as the test command itself. `run_gate` already bounds output, so `\| tail` buys nothing |

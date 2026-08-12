@@ -453,3 +453,32 @@ def test_real_gate_output_is_preserved_verbatim():
     goal.checkpoint(st["slug"], "did", "next", "h", "pass", "")
     done = goal.complete(st["slug"], "42 passed in 3.1s")
     assert done["gate_evidence"] == "42 passed in 3.1s"
+
+
+def test_a_coverage_goal_cannot_complete_on_a_contentless_verdict():
+    """A command gate's silence is proof enough — the exit status carries it.
+    A coverage gate has no exit status: the judge's written verdict IS the
+    proof. In a nine-judge trial two returned the literal string "Test" as
+    their reasoning, which would have been stored as evidence and read, in
+    the record, exactly like a real verdict."""
+    st = _make(gate_kind="coverage", gate_value="every claim carries a source")
+    goal.checkpoint(st["slug"], "did", "next", "h", "pass", "Test")
+    with pytest.raises(goal.EvidenceInsufficient):
+        goal.complete(st["slug"], "Test")
+    assert goal.load(st["slug"])["status"] == "active", "closed on a bad verdict"
+
+
+def test_a_coverage_goal_completes_on_a_real_verdict():
+    st = _make(gate_kind="coverage", gate_value="every claim carries a source")
+    verdict = ("PASS - all 12 claims carry a source; spot-checked 4 against the "
+               "cited files and each quotation matches.")
+    goal.checkpoint(st["slug"], "did", "next", "h", "pass", verdict)
+    assert goal.complete(st["slug"], verdict)["status"] == "complete"
+
+
+def test_a_command_goal_still_completes_on_silence():
+    """The new guard must not leak into command gates, where an empty output
+    is the normal, correct case."""
+    st = _make(gate_value="test -f something")
+    goal.checkpoint(st["slug"], "did", "next", "h", "pass", "")
+    assert goal.complete(st["slug"], "")["status"] == "complete"

@@ -16,6 +16,9 @@ import paths
 
 MAX_GATE_OUTPUT = 4000
 SLUG_MAX = 60
+# Long enough to require a sentence, short enough never to reject a real
+# verdict. Calibrated against the degenerate ones actually observed ("Test").
+MIN_COVERAGE_EVIDENCE = 40
 
 
 class GateRequired(Exception):
@@ -50,6 +53,25 @@ class GoalStateError(Exception):
 
 class GateNotPassed(Exception):
     """Raised when completion is attempted without a passing gate."""
+
+
+class EvidenceInsufficient(GateNotPassed):
+    """A coverage goal is completing on a verdict with no substance in it.
+
+    A command gate's evidence can legitimately be empty -- `test -f x` and
+    most linters print nothing on success, and the exit status is the
+    proof. A coverage gate has no exit status: the judge's written verdict
+    IS the entire proof, so a blank or contentless one means the judge did
+    not actually run, or returned garbage that nobody read.
+
+    Not hypothetical. In a nine-judge trial two returned the literal
+    string "Test" as their reasoning, with a verdict attached. Stored
+    unchecked, that is a goal marked complete on the word of a judge that
+    plainly never looked -- and it reads, in the record, exactly like a
+    real verdict.
+
+    A subclass of GateNotPassed so existing handlers still catch it.
+    """
 
 
 class BudgetInvalid(Exception):
@@ -359,6 +381,13 @@ def _complete_locked(slug: str, gate_output: str) -> dict:
     # own gate was silent. The command and its verdict are the minimum a
     # later reader needs to judge whether "complete" meant anything.
     evidence = (gate_output or "").strip()
+    if state["gate"]["kind"] == "coverage" and len(evidence) < MIN_COVERAGE_EVIDENCE:
+        raise EvidenceInsufficient(
+            f"coverage goal {slug!r} cannot complete on {evidence!r}: a "
+            f"coverage gate's only proof is the judge's written verdict, and "
+            f"this one carries no reasoning. Re-dispatch the judge and pass "
+            f"what it actually said."
+        )
     if not evidence:
         evidence = (f"{state['gate']['value']} -> exit 0 (gate produced no "
                     f"output; passing evidence is the exit status alone)")
