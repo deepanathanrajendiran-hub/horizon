@@ -130,3 +130,37 @@ def test_the_refine_undo_snippet_runs(tmp_path, monkeypatch, capsys):
 
     assert target.read_text() == "before\n"
     assert "reverted entry 0001" in capsys.readouterr().out
+
+def test_horizon_documents_the_gate_timeout_and_the_coverage_floor():
+    """Two numbers decide real outcomes and were documented nowhere: a gate
+    slower than the default timeout is misclassified as a broken goal
+    unless the skill says the knob exists, and a coverage verdict shorter
+    than the evidence floor refuses completion with no warning. Tied to
+    the constants so the prose rots loudly when they move."""
+    text = _skill("horizon")
+    assert "gate.DEFAULT_TIMEOUT" in text
+    assert str(gate.DEFAULT_TIMEOUT) in text
+    assert "goal.MIN_COVERAGE_EVIDENCE" in text
+    assert str(goal.MIN_COVERAGE_EVIDENCE) in text
+
+
+def test_refine_states_the_tripwire_scope_the_code_enforces():
+    """The prose claimed the content scan fired only on G/K edits while the
+    module scans every layer, so a skill-compliant M or rho proposal was
+    refused AFTER user approval -- and the error table forbids rewording,
+    leaving no in-skill recovery. The prose must state the enforced scope,
+    including the G/K-only memory-write patterns."""
+    text = _skill("refine")
+    assert "when a G or K edit's text references" not in text
+    section = text[text.index("content tripwire"):text.index("G4 —")]
+    assert "every layer" in section
+    assert "MEMORY.md" in section
+    assert ".claude/projects/" in section
+
+
+def test_refine_gives_dedupe_an_index_update_mechanism():
+    """'Update the matching entry' was unimplementable when the update
+    touched an index line: AppendLine only appends and rendered bodies are
+    forbidden, so the exact case dedupe exists for had no permitted path."""
+    text = _skill("refine")
+    assert "refine_log.ReplaceLine" in text
