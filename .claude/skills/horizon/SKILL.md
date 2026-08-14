@@ -7,11 +7,11 @@ description: Use when a task needs to survive across turns or sessions - long re
 
 Long-horizon work fails for one reason: state lives in context, and
 context ends. This skill moves state to disk after every increment, using
-three modules at `.claude/harness/bin/` — `goal.py` (goal state),
-`gate.py` (gate execution), `tree_hash.py` (change detection). The skill
-calls these modules; it does not reimplement their logic. If a step below
-can't be done by calling one of them, stop and say so rather than
-inventing an inline substitute.
+four modules at `.claude/harness/bin/` — `goal.py` (goal state),
+`gate.py` (gate execution), `tree_hash.py` (change detection), and
+`paths.py` (where state lives). The skill calls these modules; it does
+not reimplement their logic. If a step below can't be done by calling one
+of them, stop and say so rather than inventing an inline substitute.
 
 ## Setup
 
@@ -72,10 +72,14 @@ catch `GoalClosed` first if you need to tell the two apart.
 
 ## One turn, end to end
 
-Steps 1-5 below explain each piece. This is the whole turn as one runnable
-block — copy it, fill in the three marked places, run it. Do not
-reassemble the steps by hand: the ordering they describe is load-bearing,
-and hand-assembly is where it gets lost.
+Steps 1-5 below explain each piece. **Do the increment's work first** —
+these blocks record what happened and decide whether to continue; they do
+no work themselves. A command-gate turn is the first block alone — copy
+it, fill in the three marked places, run it. A coverage-gate turn is the
+first block **plus** the completion block below it: the first stops at
+`COVERAGE GATE` so a judge can rule, the second records the verdict and
+finishes the turn. Do not reassemble the steps by hand: the ordering they
+describe is load-bearing, and hand-assembly is where it gets lost.
 
 ```bash
 python3 - <<'PY'
@@ -96,17 +100,22 @@ state = goal.load(SLUG)
 try:
     result, output, h = gate.run_gate_at(state)
 except gate.CoverageGate as e:
-    # A coverage gate has no command to run. Print the hash it was evaluated
-    # against and stop HERE: dispatch a fresh judge subagent, then make the
-    # checkpoint below yourself with its verdict and this exact hash.
-    #   goal.checkpoint(SLUG, DID, NEXT, "<the hash printed below>",
-    #                   "pass" | "fail", "<the judge's verdict>")
-    # Never recompute the hash after the judge has run -- by then the tree
-    # has moved, and the next turn would skip against a state nothing judged.
-    print(f"COVERAGE GATE. checkpoint with tree_hash={e.tree_hash!r}")
+    # A coverage gate has no command to run: a fresh judge subagent rules.
+    # Stop HERE. Dispatch the judge (see "The coverage turn" below), then
+    # run the completion block with its verdict and this exact hash. Never
+    # recompute the hash after the judge has run -- by then the tree has
+    # moved, and the next turn would skip against a state nothing judged.
+    print(f"COVERAGE GATE. run the completion block with H={e.tree_hash}")
     print(f"  did : {DID}\n  next: {NEXT}")
     raise SystemExit(0)
 except gate.GateUnrunnable as e:
+    # exit 126/127 is a broken goal. A timeout may just be a slow gate:
+    # re-run this block passing gate.run_gate_at(state, timeout=590) --
+    # the hosting Bash tool tops out at 600s -- and abandon only if the
+    # gate cannot finish inside that ceiling.
+    if "timed out" in str(e):
+        raise SystemExit(f"GATE TIMED OUT (default {gate.DEFAULT_TIMEOUT}s). "
+                         f"Raise the timeout and re-run this block: {e}")
     goal.abandon(SLUG, f"gate unrunnable: {e}")
     raise SystemExit(f"BROKEN GOAL, not work remaining: {e}")
 
@@ -126,8 +135,8 @@ if result != "pass" and goal.budget_exhausted(state):
 
 if result == "pass":
     goal.complete(SLUG, output)
-    # The TAIL, like every other truncation here: a coverage judge's verdict
-    # and a failing gate's diagnosis both come last.
+    # The TAIL, like every other truncation here: a failing gate's
+    # diagnosis comes last.
     print("COMPLETE. evidence:", (output.strip() or "(gate produced no output)")[-500:])
 else:
     print("continue. gate said:", (output.strip() or "(no output)")[-500:])
@@ -135,10 +144,83 @@ else:
 PY
 ```
 
-Run the work for the increment *before* this block — the block records
-what happened and decides whether to continue. Two failure modes it exists
-to prevent: calling the gate twice per turn, and computing the tree hash
-after the gate has already run.
+Two failure modes the block exists to prevent: calling the gate twice per
+turn, and computing the tree hash after the gate has already run.
+
+### The coverage turn
+
+A coverage goal's turn is the block above **plus** the block below. The
+first stops at `COVERAGE GATE` after printing the hash the tree was
+evaluated at; nothing is checkpointed yet. Between the two blocks,
+dispatch the judge:
+
+- **A fresh subagent via the Agent tool** — any `subagent_type` other
+  than `"fork"`, so it starts with no memory of this goal's work. The
+  agent that did the work must not grade it, and a fork is the same
+  grader with the same blind spots. Self-grading is the weakest link in
+  any autonomous loop.
+- **Its prompt carries the criterion and the primary artifacts** — the
+  coverage criterion verbatim (`state["gate"]["value"]`), plus the diff,
+  file paths, or raw outputs the judge needs to check the work itself.
+  Never a summary written by the agent that did the work: a judge fed a
+  summary is grading the summary.
+- **Ask for a one-word verdict plus its reasoning.** The verdict becomes
+  `RESULT` ("pass" or "fail" — never "skipped"; coverage gates always get
+  a fresh judgment) and the reasoning becomes `VERDICT`, quoted.
+  `goal.complete` refuses a verdict shorter than
+  `goal.MIN_COVERAGE_EVIDENCE` (= 40) characters with
+  `goal.EvidenceInsufficient`: a contentless verdict is a judge that
+  never looked. Re-dispatch the judge rather than padding its words
+  yourself.
+
+Then finish the turn — checkpoint, budget stop, completion — with this
+block:
+
+```bash
+python3 - <<'PY'
+import sys, pathlib
+_c = pathlib.Path.cwd().resolve()
+_bin = next((c / ".claude/harness/bin" for c in (_c, *_c.parents)
+             if (c / ".claude/harness/bin").is_dir()),
+            pathlib.Path.home() / ".claude/harness/bin")
+sys.path.insert(0, str(_bin))
+import goal
+
+SLUG    = "<slug>"
+DID     = "<same DID as the first block>"
+NEXT    = "<what the next turn does>"
+H       = "<hash-from-part-one>"   # paste exactly as printed -- bare, no quotes of your own
+RESULT  = "<pass-or-fail>"         # the judge's verdict, one word
+VERDICT = "<judge-reasoning>"      # the judge's own words, quoted -- not your summary
+
+if RESULT not in ("pass", "fail"):
+    raise SystemExit("fill RESULT with the judge's verdict -- a placeholder "
+                     "must never be the passing value, so this refuses to run unfilled")
+if not H.strip() or H.startswith("<"):
+    raise SystemExit("fill H with the exact hash the first block printed")
+
+# Checkpoint FIRST, exactly like the command turn: the increment is already
+# on disk, and the turn that exhausts the budget must not lose its record.
+goal.checkpoint(SLUG, DID, NEXT, H, RESULT, VERDICT)
+state = goal.load(SLUG)
+print(f"turn {state['used']['turns']}: judge={RESULT}")
+
+if RESULT != "pass" and goal.budget_exhausted(state):
+    print(f"BUDGET EXHAUSTED after {state['used']['turns']} turns — stopping.")
+    print(f"  done so far : {DID}\n  NOT done    : {NEXT}")
+    raise SystemExit(0)              # never report this as success
+
+if RESULT == "pass":
+    # Raises goal.EvidenceInsufficient if VERDICT is under
+    # goal.MIN_COVERAGE_EVIDENCE (= 40) chars: re-dispatch the judge and
+    # pass what it actually said -- never pad the verdict yourself.
+    goal.complete(SLUG, VERDICT)
+    print("COMPLETE. evidence:", VERDICT.strip()[-500:])
+else:
+    print("continue. judge said:", VERDICT.strip()[-500:])
+    print("next:", NEXT)
+PY
+```
 
 ## Step 1 — Establish the goal
 
@@ -231,11 +313,15 @@ whole thing. The loop is what makes progress, not any single turn.
 
 ## Step 3 — Run the gate
 
-**Call the gate exactly once per turn**, with the block below.
-`gate.run_gate_at` hashes the tree and then runs the gate, returning
-`(result, output, h)` where `h` is the hash of the tree the gate
-**actually evaluated**. Pass that exact value to `goal.checkpoint` in
-Step 4, and never recompute it afterwards.
+**The turn block calls the gate exactly once per turn** —
+`gate.run_gate_at(state)` hashes the tree and then runs the gate,
+returning `(result, output, h)` where `h` is the hash of the tree the
+gate **actually evaluated**. That exact value goes to `goal.checkpoint`
+in Step 4, never a recomputed one. There is no second implementation of
+this step to copy: the turn block at the top is the only canonical form.
+An earlier revision kept a near-duplicate snippet here, and the two
+drifted — the duplicate is where a live `NotImplementedError` sat waiting
+for anyone who copied the wrong block.
 
 Why the single call exists: a checkpoint must record the state the gate
 *judged*, not the state left behind after it ran. A gate can write into
@@ -249,48 +335,41 @@ If the watched tree is unreadable, `run_gate_at` returns the sentinel
 unreadable tree must not kill the turn *after* the increment's work has
 landed but *before* the record of it — a resuming session would be told
 to redo finished work. `"unknown"` can never equal a real digest, so the
-next turn is guaranteed to run the gate rather than skip.
+next turn is guaranteed to run the gate rather than skip. One nuance: a
+watch directory that is *missing* is not "unreadable" — it hashes to a
+deterministic MISSING marker, so a deleted output directory can
+legitimately produce a skip. Only a tree that exists and cannot be read
+yields the sentinel.
 
-This one call site handles both gate kinds — do not branch on
-`state["gate"]["kind"]` yourself first; let `run_gate_at` tell you what it
-needs via the exception:
+**The timeout is a parameter, not a law.** `run_gate_at` accepts
+`timeout=` (default `gate.DEFAULT_TIMEOUT`, 480 seconds; the hosting
+Bash tool itself tops out at 600). A gate slower than its timeout raises
+`GateUnrunnable` exactly like a broken command, but the turn block
+treats the two differently: a timeout stops and asks for a retry with a
+higher timeout — it never abandons; only exit 126/127 abandons. For a
+slow suite or build, re-run the turn block passing `timeout=590`.
 
-```python
-try:
-    result, output, h = gate.run_gate_at(state)  # "pass" | "fail" | "skipped"
-except gate.CoverageGate:
-    # run_gate raises this unconditionally for gate_kind == "coverage",
-    # before it even looks at tree_hash — coverage gates have no skip
-    # path; every checkpoint gets a fresh judgment. Dispatch via the
-    # Agent tool (any subagent_type other than "fork", so it starts with
-    # no memory of this goal's work) with a prompt containing the
-    # coverage criterion (state["gate"]["value"]) plus what actually
-    # happened this turn — never a summary written by the agent that did
-    # the work. Self-grading is the weakest link in any autonomous loop,
-    # and an agent that graded its own research will pass itself. Its
-    # reply becomes result ("pass" or "fail" — never "skipped", coverage
-    # gates always get a fresh judgment) and output (its reasoning,
-    # bounded to a few thousand characters).
-    #
-    # A placeholder in a verification path must never be the passing
-    # value: an agent running this verbatim without dispatching the judge
-    # would otherwise auto-complete every coverage goal on a fabricated
-    # verdict, silently. Fail loud instead.
-    raise NotImplementedError("dispatch the judge subagent here")
-except gate.GateUnrunnable as e:
-    # A broken goal, not work still to do: command not found (exit 127),
-    # not executable (exit 126), or it timed out. Stop — do not retry
-    # blindly, that burns the whole turn budget on a command that was
-    # never going to run. Report the exact cause from `e`.
-    goal.abandon(slug, f"gate unrunnable: {e}")
-    raise
-```
+The two exceptions the turn block handles:
 
-`gate.CoverageGate` is deliberately **not** a `ValueError` — catch it by
-name. `run_gate` owns the skip decision, spawning the gate command,
-output bounding (`gate.MAX_OUTPUT` = 4000 chars), and the
-unrunnable-vs-failing distinction, all unit tested in
-`tests/test_gate.py`. Do not reimplement any of it inline.
+- `gate.CoverageGate` — raised unconditionally for `gate_kind ==
+  "coverage"`: coverage gates have no skip path, so the previous
+  checkpoint's hash is never compared and every checkpoint gets a fresh
+  judgment. `run_gate_at` still computes the tree hash first — that
+  digest is what it attaches as `e.tree_hash`, and it is the **only**
+  path that does; bare `gate.run_gate` raises the same exception without
+  the attribute. The turn block prints that hash and stops so the judge and
+  the completion block can finish the turn ("The coverage turn" above).
+  `gate.CoverageGate` is deliberately **not** a `ValueError` — catch it
+  by name.
+- `gate.GateUnrunnable` — a broken goal, not work still to do: command
+  not found (exit 127), not executable (exit 126), or timed out. Do not
+  retry a 126/127 blindly — that burns the whole turn budget on a
+  command that was never going to run.
+
+`run_gate` owns the skip decision, spawning the gate command, output
+bounding (`gate.MAX_OUTPUT` = 4000 chars), and the unrunnable-vs-failing
+distinction, all unit tested in `tests/test_gate.py`. Do not reimplement
+any of it inline.
 
 ## Step 4 — Checkpoint
 
@@ -342,6 +421,11 @@ means the tree didn't change since the last attempt, which is not
 evidence of progress either — it still counts against the budget and
 still needs a real next increment.
 
+For a coverage goal this whole step happens inside the completion block:
+the judge's `RESULT` plays the part of `result`, and an
+`EvidenceInsufficient` out of `complete` means the verdict carried no
+substance — re-dispatch the judge, never pad its words.
+
 ## When the goal is provably unachievable
 
 Distinct from a failing gate (work still to do) and an unrunnable one (a broken
@@ -388,19 +472,18 @@ disk and became unreachable.
 | Call | Exception | Meaning | Action |
 |---|---|---|---|
 | `goal.create` | `GateRequired` | no/blank gate, or bad `gate_kind` | fix the call; never create a gate-less goal |
-| `goal.load` | `GoalStateError` | file missing, unreadable, not an object, or missing required keys | report; do not guess state |
+| `goal.load` | `GoalStateError` | file missing, unreadable, not a JSON object, missing required keys, a malformed checkpoint element, or a budget that cannot bound | report; do not guess state |
 | `goal.checkpoint` / `complete` / `abandon` | `GoalClosed` (subclass of `GoalStateError`) | goal status is not `"active"` | reload and report the real status |
 | `goal.checkpoint` | `ValueError` | `gate_result` not one of `pass/fail/skipped` | fix the caller — this is a bug in the skill's own call, not a runtime condition to handle |
 | `goal.complete` | `GateNotPassed` | last checkpoint's gate isn't `"pass"` | don't call complete yet; budget exhaustion is not success |
-| `gate.run_gate` | `CoverageGate` | gate kind is `"coverage"` | dispatch a fresh judge subagent, then checkpoint with its verdict and `e.tree_hash` — see the coverage branch of the turn block |
-| `gate.run_gate` | `GateUnrunnable` | exit 126 (not executable), exit 127 (not found), or timeout | `goal.abandon` and stop; this is a broken goal, not work left to do |
+| `gate.run_gate_at` | `CoverageGate` | gate kind is `"coverage"` | dispatch a fresh judge, then run the completion block with its verdict and `e.tree_hash` (set only by `run_gate_at`; bare `run_gate` raises it without the attribute) — see "The coverage turn" |
+| `gate.run_gate_at` | `GateUnrunnable` | exit 126 (not executable), exit 127 (not found), or timeout | 126/127: `goal.abandon` and stop — a broken goal, not work left to do. Timeout: raise `timeout=` (default 480s) and re-run before concluding anything |
 | `goal.add_subagent` | `GoalClosed` | goal status is not `"active"` | same as `checkpoint`/`complete`/`abandon`: reload and report the real status |
 | `goal.complete` | `EvidenceInsufficient` (subclass of `GateNotPassed`) | a **coverage** goal is completing on a verdict with no substance in it | the judge did not really run, or returned garbage. Re-dispatch it and pass what it actually said. Two judges in a nine-judge trial returned the literal string `"Test"` as their reasoning |
 | `goal.reopen` | `GoalClosed` | the goal is `"active"` or `"complete"`, not `"abandoned"` | only an abandoned goal reopens; for a completed one, start a new goal |
 | `goal.reopen` | `BudgetInvalid` | `extra_turns`/`extra_minutes` is not a positive integer | fix the call; a grant that cannot bound is the same bug `create` rejects |
 | `goal.create` | `GateUnsound` | the gate command discards the exit status of the work it judges — a pipe, `;`, `\|\|`, or a trailing `&` | rewrite the gate as the test command itself. `run_gate` already bounds output, so `\| tail` buys nothing |
 | `goal.create` | `BudgetInvalid` | `max_turns`/`max_minutes` is not a positive integer, or both are `None` | fix the call; a budget that cannot bound is the unbounded loop a gate exists to prevent |
-| `goal.load` | `GoalStateError` | also raised for a malformed checkpoint element or a budget that cannot bound — not only for a missing file | report it; do not guess the state |
 | any locked mutator | `filelock.LockTimeout` | another process holds this goal's state file (a second terminal, a `/loop` beside a live session) | retry once; if it persists, tell the user which lock file to delete — the exception names it |
 
 Nothing in this skill calls `tree_hash` directly — `run_gate_at` absorbs an
