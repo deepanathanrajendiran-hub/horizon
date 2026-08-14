@@ -339,7 +339,7 @@ brainstorm → spec → external review → plan → 7 tasks
                                    one fix wave → re-review → merge
 ```
 
-**50+ commits. 12 reviews. 18 fix rounds. 218 tests.**
+**50+ commits. 12 reviews. 18 fix rounds. 260 tests.**
 
 The last two reviews were different in kind: a fresh agent given the code and
 **explicitly denied** this README, the docs, and the git history, so it could
@@ -575,7 +575,7 @@ projB silently overwrote projA's identically-titled goal, destroying its checkpo
 
 ## 10. Current state
 
-**220 tests passing.** Acceptance: **10 PASS** — see
+**260 tests passing.** Acceptance: **10 PASS** — see
 `docs/superpowers/results.md` for the full table with cited artifacts.
 
 Every fix in the last three rounds was verified by **neutering it and confirming
@@ -680,26 +680,25 @@ own memories.
 `docs/superpowers/results.md` carries the full triaged list. What is
 genuinely open now:
 
-1. **T10 is unrun** — it needs a separate Claude Code process (see §10).
-2. **`undo()` picks by recency of application, not by a durable clock.**
+1. **`undo()` picks by recency of application, not by a durable clock.**
    Entries are ordered by their recorded timestamp; a clock change between
    two proposals in the same second could order them wrongly.
-3. **The `--global` promotion path is implemented but unexercised in
+2. **The `--global` promotion path is implemented but unexercised in
    anger.** Two-project isolation is proven in tests; nobody has lived
    with it for a week.
-4. **G3's semantic half is a tripwire, not a proof.** The content scan
+3. **G3's semantic half is a tripwire, not a proof.** The content scan
    catches the literal shapes an audit found. A paraphrase that never says
    "standing approval" and never names `refine_log` would pass it. It is now
    deliberately *narrow*, because the wide version blocked the best memories
    a session could write. Only the approval gate — you, reading the proposal
    — actually closes this.
-5. **The cap counts this project's ledger.** Two unrelated sessions in one
+4. **The cap counts this project's ledger.** Two unrelated sessions in one
    project within a day share one budget of 3 (the safe direction). But
    `/refine --global` run in N projects can land 3N edits under `~/.claude/`
    in a day, with every pre-flight honestly reporting zero. The skill now
    says so where the count is described; the count itself is still
    per-project.
-6. **Nothing intercepts `Write`/`Edit`.** The guardrails bind the
+5. **Nothing intercepts `Write`/`Edit`.** The guardrails bind the
    `apply_edit()` path, and I am the one who chooses to use it. To make that
    structural, add this to `~/.claude/settings.json` yourself — `refine`
    can't, by design:
@@ -732,15 +731,15 @@ genuinely open now:
 ```
 .claude/
   skills/
-    horizon/SKILL.md      444 lines — goal, gate, checkpoint, continuation
-    refine/SKILL.md       558 lines — harvest, route, propose, log, undo
+    horizon/SKILL.md      384 lines — goal, gate, checkpoint, continuation
+    refine/SKILL.md       435 lines — harvest, route, propose, log, undo
   harness/
     bin/                  6 Python modules, stdlib only
     CHANGELOG.md          every approved harness edit, newest last
     goals/                live goal state (one JSON file per goal)
     undo/                 pre-edit snapshots that make rollback possible
 
-tests/                    220 tests, in 8 files
+tests/                    260 tests, in 8 files
 docs/superpowers/
   specs/                  the design, and the external review that shaped it
   plans/                  the 7-task implementation plan
