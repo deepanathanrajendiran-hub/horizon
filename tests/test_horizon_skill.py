@@ -25,14 +25,14 @@ class _FakeGateUnrunnable(Exception):
 class _FakeGoal:
     """Records every mutator call so a test can assert on order and args."""
 
-    def __init__(self, exhausted=False):
+    def __init__(self, exhausted=False, status="active"):
         self.calls = []
         self._exhausted = exhausted
         self._state = {
             "slug": "x", "goal": "g", "cwd": "/x", "watch_paths": ["/x"],
             "gate": {"kind": "command", "value": "true"},
             "budget": {"max_turns": 20, "max_minutes": None},
-            "used": {"turns": 1}, "status": "active",
+            "used": {"turns": 1}, "status": status,
             "checkpoints": [], "subagents": [],
         }
 
@@ -148,21 +148,26 @@ def test_the_turn_block_does_not_recompute_the_hash():
 
 
 def test_the_turn_block_records_the_work_before_checking_the_budget():
-    """The exhausting turn's own increment must not be lost.
-
-    Checking the budget before checkpointing meant the final turn's work
-    landed on disk and never entered the record, so a resuming session was
-    told to redo it — the exact failure the "unknown" sentinel exists to
-    prevent. Checkpoint first, then decide whether to stop.
-    """
-    import re
+    """Two orderings, both load-bearing. BEFORE the gate: an exhausted or
+    closed goal must stop the turn before any work-spend (the guard).
+    AFTER the gate: the checkpoint must land before the budget stop, so
+    the exhausting turn's own increment is never lost."""
     text = SKILL.read_text()
-    i = text.index("## One turn, end to end")
-    block = re.search(r"```bash\n(.*?)```", text[i:], re.S).group(1)
+    block = _turn_blocks()[0]
 
-    assert "budget_exhausted" in block
-    assert "never report this as success" in block
-    assert block.index("goal.checkpoint(") < block.index("budget_exhausted"), (
+    gate_i = block.index("result, output, h = gate.run_gate_at(state)")
+    head, tail = block[:gate_i], block[gate_i:]
+
+    assert "budget_exhausted" in head, (
+        "no pre-work guard: an already-exhausted goal burns a full "
+        "increment before anything refuses"
+    )
+    assert 'status' in head and 'active' in head, (
+        "no pre-work guard for a completed/abandoned goal"
+    )
+    assert "budget_exhausted" in tail
+    assert "never report this as success" in tail
+    assert tail.index("goal.checkpoint(") < tail.index("budget_exhausted"), (
         "the budget is checked before the work is recorded — the turn that "
         "exhausts the budget loses its own increment"
     )
@@ -280,3 +285,21 @@ def test_the_coverage_completion_block_records_before_the_budget_stop():
     assert [c[0] for c in goal.calls] == ["checkpoint"], (
         "the exhausting turn lost its own increment, or completed anyway"
     )
+
+def test_the_turn_block_refuses_to_work_an_exhausted_or_closed_goal():
+    """checkpoint() now refuses beyond the cap, but by then the gate has
+    already run — a whole increment of spend on a goal nobody granted
+    more budget. The block must stop at load time, before the gate."""
+    def gate_must_not_run(state):
+        raise AssertionError("the gate ran on an exhausted goal")
+
+    goal = _FakeGoal(exhausted=True)
+    with pytest.raises(SystemExit) as exit_info:
+        _run(_turn_blocks()[0], {"goal": goal, "gate": _fake_gate(gate_must_not_run)})
+    assert goal.calls == []
+    assert exit_info.value.code not in (0, None) or "EXHAUST" in str(exit_info.value.code).upper()
+
+    goal2 = _FakeGoal(status="complete")
+    with pytest.raises(SystemExit):
+        _run(_turn_blocks()[0], {"goal": goal2, "gate": _fake_gate(gate_must_not_run)})
+    assert goal2.calls == []

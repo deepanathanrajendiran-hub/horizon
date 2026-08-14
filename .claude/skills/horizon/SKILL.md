@@ -77,6 +77,11 @@ DID  = "<what this increment did>"   # (2) plain language, past tense
 NEXT = "<what the next turn does>"   # (3) written for someone with no context
 
 state = goal.load(SLUG)
+if state["status"] != "active":
+    raise SystemExit(f"GOAL ALREADY {state['status'].upper()} — report the stored outcome; do not work")
+if goal.budget_exhausted(state):
+    raise SystemExit("BUDGET ALREADY EXHAUSTED before this turn began — its work is "
+                     "unrecorded; abandon and reopen with extra_turns before any more work")
 
 try:
     result, output, h = gate.run_gate_at(state)
@@ -302,6 +307,7 @@ decision.
 | `goal.load` | `GoalStateError` | file missing, unreadable, not a JSON object, missing required keys, a malformed checkpoint element, or a budget that cannot bound | report; do not guess state |
 | `goal.checkpoint` / `complete` / `abandon` / `add_subagent` | `GoalClosed` (subclass of `GoalStateError`) | goal status is not `"active"` | reload and report the real status |
 | `goal.checkpoint` | `ValueError` | `gate_result` not one of pass/fail/skipped | a bug in the caller, not a runtime condition to handle |
+| `goal.checkpoint` | `goal.BudgetExhausted` (subclass of `GoalStateError`) | the turn would exceed `max_turns` — only the exhausting turn itself records; the wall clock never refuses | abandon ("budget spent, work remains") and `goal.reopen` with `extra_turns` to record the increment |
 | `goal.complete` | `GateNotPassed` | last checkpoint's gate isn't `"pass"` | budget exhaustion is not success; don't call complete yet |
 | `goal.complete` | `EvidenceInsufficient` (subclass of `GateNotPassed`) | a coverage goal completing on a contentless verdict | the judge never really looked — re-dispatch it and pass what it actually said |
 | `gate.run_gate_at` | `CoverageGate` | gate kind is `"coverage"` | dispatch a fresh judge, then run the completion block with its verdict and `e.tree_hash` (set only by `run_gate_at`) |

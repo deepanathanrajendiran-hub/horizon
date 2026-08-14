@@ -482,3 +482,55 @@ def test_a_command_goal_still_completes_on_silence():
     st = _make(gate_value="test -f something")
     goal.checkpoint(st["slug"], "did", "next", "h", "pass", "")
     assert goal.complete(st["slug"], "")["status"] == "complete"
+
+def test_checkpoint_beyond_the_turn_budget_is_refused():
+    """The exhausting turn (== max_turns) must still record — that is the
+    checkpoint-FIRST invariant. But the turn after it used to record too:
+    checkpoint() incremented past the cap forever and the goal stayed
+    active, so a loop that ignored budget_exhausted() burned unbounded
+    spend with the module never refusing. Beyond the cap it now refuses,
+    loudly, with the goal and the on-disk record untouched."""
+    state = _make(max_turns=1)
+    goal.checkpoint(state["slug"], "d", "n", "h1", "fail")
+    with pytest.raises(goal.BudgetExhausted):
+        goal.checkpoint(state["slug"], "d2", "n2", "h2", "fail")
+    s = goal.load(state["slug"])
+    assert s["used"]["turns"] == 1
+    assert len(s["checkpoints"]) == 1
+    assert s["status"] == "active"
+
+
+def test_reopen_with_extra_turns_lets_the_refused_checkpoint_land():
+    """The recovery for a refused checkpoint is the one that already
+    exists: abandon (budget spent, work remains), reopen with an explicit
+    grant, then the record lands."""
+    state = _make(max_turns=1)
+    slug = state["slug"]
+    goal.checkpoint(slug, "d", "n", "h1", "fail")
+    with pytest.raises(goal.BudgetExhausted):
+        goal.checkpoint(slug, "d2", "n2", "h2", "fail")
+    goal.abandon(slug, "budget spent, work remains")
+    goal.reopen(slug, "user granted more turns", extra_turns=1)
+    goal.checkpoint(slug, "d2", "n2", "h2", "fail")
+    assert goal.load(slug)["used"]["turns"] == 2
+
+
+def test_wall_clock_exhaustion_does_not_refuse_the_in_flight_checkpoint():
+    """The asymmetry is deliberate: a turn that started before the clock
+    ran out has its work on disk by checkpoint time, and refusing would
+    lose that increment — the exact failure the 'unknown' sentinel exists
+    to prevent. Only the turn ceiling refuses; the wall clock stays a
+    query the loop stops on."""
+    state = _make(max_turns=1000, max_minutes=1)
+    state["used"]["started"] = "2000-01-01T00:00:00+00:00"
+    goal._save(state)
+    assert goal.budget_exhausted(goal.load(state["slug"])) is True
+    goal.checkpoint(state["slug"], "d", "n", "h", "fail")
+    assert goal.load(state["slug"])["used"]["turns"] == 1
+
+
+def test_budget_exhausted_exception_is_a_goal_state_error():
+    """The skill documents that a bare `except goal.GoalStateError` also
+    catches the protocol-refusal subclasses; the new one must not be the
+    odd family member."""
+    assert issubclass(goal.BudgetExhausted, goal.GoalStateError)

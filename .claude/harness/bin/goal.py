@@ -77,6 +77,22 @@ class EvidenceInsufficient(GateNotPassed):
 class BudgetInvalid(Exception):
     """Raised when a goal is created with a budget that cannot bound it."""
 
+class BudgetExhausted(GoalStateError):
+    """A checkpoint would record a turn beyond max_turns.
+
+    The exhausting turn itself (turn == max_turns) always records — the
+    checkpoint-FIRST invariant protects its increment. Refused is the turn
+    AFTER it: work past the cap is spend nobody granted, and a module that
+    records it forever leaves the budget purely advisory. Recovery:
+    abandon ("budget spent, work remains"), reopen with an explicit
+    extra_turns grant, and the checkpoint lands.
+
+    Wall-clock exhaustion never refuses: a turn that started before the
+    deadline has its work on disk by checkpoint time, and losing that
+    increment is the exact failure the "unknown" sentinel exists to
+    prevent. The clock is a query (budget_exhausted) the loop stops on.
+    """
+
 
 class GoalClosed(GoalStateError):
     """Raised when an operation is attempted on a goal that is no longer active."""
@@ -333,6 +349,16 @@ def _checkpoint_locked(slug, did, next_action, tree_hash_value,
     if state["status"] != "active":
         raise GoalClosed(
             f"cannot checkpoint: goal status is {state['status']!r}, not active"
+        )
+    max_turns = state["budget"].get("max_turns")
+    if max_turns is not None and state["used"]["turns"] >= max_turns:
+        # Only the turn ceiling refuses; see BudgetExhausted for why the
+        # wall clock never does.
+        raise BudgetExhausted(
+            f"cannot checkpoint: {state['used']['turns']} of {max_turns} "
+            f"turns already used. This increment's work is on disk but the "
+            f"budget is spent — abandon ('budget spent, work remains') and "
+            f"reopen with extra_turns to record it."
         )
     gate_output = _bounded(gate_output)
     state["checkpoints"].append({
