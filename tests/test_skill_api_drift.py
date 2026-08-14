@@ -170,22 +170,25 @@ def test_the_skills_stay_lean():
     three Criticals hid in the prose, and '390 lines of prose for
     load -> work -> gate -> checkpoint -> repeat is where the
     contradictions live'. The executable blocks, the tables, and the
-    operative rules carry the skill; rationale gets one line each.
+    operative rules carry the skill; rationale gets one line each. A
+    ceiling pinned at the achieved lean size, with no headroom, makes
+    re-bloat fail the suite instead of waiting for the next audit —
+    raising it HERE, consciously, with the reason on record, is the
+    designed mechanism for growth.
 
-    The ceilings are pinned AT the lean rewrite's achieved size, with no
-    headroom, so any future addition must consciously raise them here
-    with a justification — re-bloat fails the suite instead of waiting
-    for the next audit. (The horizon figure is above the audit's
-    '40% of 487' arithmetic because the coverage completion block and
-    the Heartbeat section did not exist when that arithmetic was done;
-    prose outside code blocks and tables is what actually got cut.)"""
+    Raises so far: 330 -> 380 at the lean rewrite (the coverage
+    completion block and the Heartbeat postdate the audit's 40%-of-487
+    arithmetic); 380 -> 385 and 430 -> 435 for the four defect fixes of
+    2026-08-14 (the turn block's pre-work exhaustion guards, the
+    BudgetExhausted table row, and the AmbiguousMatch / single-line
+    contract for the line edits)."""
     horizon_lines = _skill("horizon").count("\n")
     refine_lines = _skill("refine").count("\n")
-    assert horizon_lines <= 380, (
-        f"horizon/SKILL.md is {horizon_lines} lines; the ceiling is 380"
+    assert horizon_lines <= 385, (
+        f"horizon/SKILL.md is {horizon_lines} lines; the ceiling is 385"
     )
-    assert refine_lines <= 430, (
-        f"refine/SKILL.md is {refine_lines} lines; the ceiling is 430"
+    assert refine_lines <= 435, (
+        f"refine/SKILL.md is {refine_lines} lines; the ceiling is 435"
     )
 
 
