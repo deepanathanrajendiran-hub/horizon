@@ -54,6 +54,10 @@ class _FakeGoal:
         self.calls.append(("abandon", slug, reason))
         return dict(self._state)
 
+    def add_subagent(self, slug, role, name, brief):
+        self.calls.append(("add_subagent", slug, role, name, brief))
+        return dict(self._state)
+
 
 def _fake_gate(run_gate_at):
     class fake:
@@ -265,11 +269,14 @@ def test_the_coverage_completion_block_fails_loud_on_unfilled_placeholders():
 
 def test_the_coverage_completion_block_checkpoints_then_completes_on_pass():
     """The judge's verdict is checkpointed with the part-one hash, and only
-    then does complete() run -- the prescribed coverage flow terminates."""
+    then does complete() run -- the prescribed coverage flow terminates.
+    The judge is registered ahead of the checkpoint, because complete()
+    refuses a coverage goal with no judge recorded for the turn."""
     goal = _FakeGoal()
     _run(_filled(_turn_blocks()[1]), {"goal": goal})
-    assert [c[0] for c in goal.calls] == ["checkpoint", "complete"]
-    checkpoint = goal.calls[0]
+    assert [c[0] for c in goal.calls] == ["add_subagent", "checkpoint", "complete"]
+    assert "judge" in goal.calls[0][2].lower(), "the role must register as a judge"
+    checkpoint = goal.calls[1]
     assert checkpoint[4] == "cov-hash-1234"
     assert checkpoint[5] == "pass"
 
@@ -282,7 +289,7 @@ def test_the_coverage_completion_block_records_before_the_budget_stop():
     with pytest.raises(SystemExit) as exit_info:
         _run(_filled(_turn_blocks()[1], result="fail"), {"goal": goal})
     assert exit_info.value.code == 0
-    assert [c[0] for c in goal.calls] == ["checkpoint"], (
+    assert [c[0] for c in goal.calls] == ["add_subagent", "checkpoint"], (
         "the exhausting turn lost its own increment, or completed anyway"
     )
 

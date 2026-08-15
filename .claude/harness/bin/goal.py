@@ -19,6 +19,12 @@ SLUG_MAX = 60
 # Long enough to require a sentence, short enough never to reject a real
 # verdict. Calibrated against the degenerate ones actually observed ("Test").
 MIN_COVERAGE_EVIDENCE = 40
+# Matched case-insensitively against a subagent's `role`, so both
+# "coverage-judge" and a bare "judge" register. Substring rather than an
+# exact string because the cost of the two disagreeing is a refusal on a
+# judge that genuinely ran -- the one direction that teaches an agent to
+# route around the check.
+JUDGE_ROLE_MARKER = "judge"
 
 
 class GateRequired(Exception):
@@ -69,6 +75,35 @@ class EvidenceInsufficient(GateNotPassed):
     unchecked, that is a goal marked complete on the word of a judge that
     plainly never looked -- and it reads, in the record, exactly like a
     real verdict.
+
+    A subclass of GateNotPassed so existing handlers still catch it.
+    """
+
+
+class JudgeNotRecorded(GateNotPassed):
+    """A coverage goal is completing with no judge recorded for the turn.
+
+    MIN_COVERAGE_EVIDENCE checks that a verdict has substance; nothing
+    checked where it came from. A worker that graded its own work and
+    wrote a thoughtful paragraph produced a record byte-indistinguishable
+    from one an independent judge returned -- and the skill's rule that
+    the worker "must not grade its own work" lived only in prose.
+
+    So provenance is now a precondition: `add_subagent` must carry an
+    entry whose role names a judge, recorded during the turn being
+    completed (`last_seen_turn >= that turn - 1`, since the judge is
+    dispatched before the checkpoint increments the count). A judge from
+    an earlier turn does not carry forward: it graded an older tree, and
+    accepting it would let one real judgement certify every later turn.
+
+    This cannot prove independence -- a worker may still record an entry
+    and write the verdict itself. It makes the claim explicit and dated
+    in the durable record instead of absent from it, which is the most
+    the state file can do; the skill still carries the rule.
+
+    Consequence worth stating: in an environment with no subagent
+    dispatch, a coverage goal cannot be completed at all. That is the
+    intended reading of "judged by a fresh subagent", not a regression.
 
     A subclass of GateNotPassed so existing handlers still catch it.
     """
@@ -407,6 +442,22 @@ def _complete_locked(slug: str, gate_output: str) -> dict:
     # own gate was silent. The command and its verdict are the minimum a
     # later reader needs to judge whether "complete" meant anything.
     evidence = (gate_output or "").strip()
+    if state["gate"]["kind"] == "coverage":
+        # Provenance before substance: if no judge was dispatched, what is
+        # being passed is not a judge's verdict at all, and complaining
+        # about its length would point at the wrong problem.
+        floor = last["turn"] - 1
+        if not any(JUDGE_ROLE_MARKER in (s.get("role") or "").lower()
+                   and (s.get("last_seen_turn") or 0) >= floor
+                   for s in state.get("subagents", [])):
+            raise JudgeNotRecorded(
+                f"coverage goal {slug!r} cannot complete: no subagent whose "
+                f"role contains {JUDGE_ROLE_MARKER!r} is recorded for turn "
+                f"{last['turn']}. Dispatch a fresh judge (never a fork), "
+                f"register it with goal.add_subagent(slug, 'coverage-judge', "
+                f"<name>, <brief>) before checkpointing, and pass back what "
+                f"it actually said."
+            )
     if state["gate"]["kind"] == "coverage" and len(evidence) < MIN_COVERAGE_EVIDENCE:
         raise EvidenceInsufficient(
             f"coverage goal {slug!r} cannot complete on {evidence!r}: a "

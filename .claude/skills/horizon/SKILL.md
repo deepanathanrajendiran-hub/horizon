@@ -140,6 +140,13 @@ grading the summary. Ask for a one-word verdict plus reasoning: verdict
 quoted. Verdicts under `goal.MIN_COVERAGE_EVIDENCE` (= 40) chars are
 refused — re-dispatch the judge rather than padding its words.
 
+The block below **records the judge before checkpointing**, and
+`goal.complete` refuses a coverage goal with no judge registered for the
+turn (`goal.JudgeNotRecorded`). The entry is a dated claim in the state
+file, not proof of independence — it cannot stop you writing the verdict
+yourself. It stops the claim being absent, which is what let a
+self-graded turn read exactly like an independent one.
+
 ```bash
 python3 - <<'PY'
 import sys, pathlib
@@ -156,12 +163,19 @@ NEXT    = "<what the next turn does>"
 H       = "<hash-from-part-one>"   # paste exactly as printed -- bare, no quotes of your own
 RESULT  = "<pass-or-fail>"         # the judge's verdict, one word
 VERDICT = "<judge-reasoning>"      # the judge's own words, quoted -- not your summary
+JUDGE   = "<judge-subagent-name>"  # who you dispatched -- provenance, recorded below
 
 if RESULT not in ("pass", "fail"):
     raise SystemExit("fill RESULT with the judge's verdict -- a placeholder "
                      "must never be the passing value, so this refuses to run unfilled")
 if not H.strip() or H.startswith("<"):
     raise SystemExit("fill H with the exact hash the first block printed")
+
+# Record the judge before the checkpoint: goal.complete refuses a coverage
+# goal whose turn has no judge entry, and one from an earlier turn graded
+# an older tree, so it does not carry forward.
+goal.add_subagent(SLUG, "coverage-judge", JUDGE,
+                  "criterion verbatim + the primary artifacts; returned RESULT/VERDICT")
 
 # Checkpoint FIRST, exactly like the command turn: the increment is already
 # on disk, and the turn that exhausts the budget must not lose its record.
@@ -310,6 +324,7 @@ decision.
 | `goal.checkpoint` | `goal.BudgetExhausted` (subclass of `GoalStateError`) | the turn would exceed `max_turns` — only the exhausting turn itself records; the wall clock never refuses | abandon ("budget spent, work remains") and `goal.reopen` with `extra_turns` to record the increment |
 | `goal.complete` | `GateNotPassed` | last checkpoint's gate isn't `"pass"` | budget exhaustion is not success; don't call complete yet |
 | `goal.complete` | `EvidenceInsufficient` (subclass of `GateNotPassed`) | a coverage goal completing on a contentless verdict | the judge never really looked — re-dispatch it and pass what it actually said |
+| `goal.complete` | `JudgeNotRecorded` (subclass of `GateNotPassed`) | a coverage goal has no subagent whose role names a judge recorded for this turn — an earlier turn's judge does not carry forward | dispatch a fresh judge and register it with `goal.add_subagent` before checkpointing; with no subagent dispatch available, a coverage goal cannot be completed, which is the rule and not a bug |
 | `gate.run_gate_at` | `CoverageGate` | gate kind is `"coverage"` | dispatch a fresh judge, then run the completion block with its verdict and `e.tree_hash` (set only by `run_gate_at`) |
 | `gate.run_gate_at` | `GateUnrunnable` | exit 126, exit 127, or timeout | 126/127: `goal.abandon` — a broken goal. Timeout: raise `timeout=` (default 480s) and re-run |
 | any locked mutator | `filelock.LockTimeout` | another process holds this goal's state file | retry once; if it persists, tell the user which lock file to delete — the exception names it |

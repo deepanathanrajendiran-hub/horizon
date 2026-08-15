@@ -462,6 +462,9 @@ def test_a_coverage_goal_cannot_complete_on_a_contentless_verdict():
     their reasoning, which would have been stored as evidence and read, in
     the record, exactly like a real verdict."""
     st = _make(gate_kind="coverage", gate_value="every claim carries a source")
+    # A judge IS recorded here, so the refusal under test stays the verdict's
+    # emptiness rather than the provenance check that now runs before it.
+    goal.add_subagent(st["slug"], "coverage-judge", "judge-1", "criterion + sources")
     goal.checkpoint(st["slug"], "did", "next", "h", "pass", "Test")
     with pytest.raises(goal.EvidenceInsufficient):
         goal.complete(st["slug"], "Test")
@@ -472,6 +475,7 @@ def test_a_coverage_goal_completes_on_a_real_verdict():
     st = _make(gate_kind="coverage", gate_value="every claim carries a source")
     verdict = ("PASS - all 12 claims carry a source; spot-checked 4 against the "
                "cited files and each quotation matches.")
+    goal.add_subagent(st["slug"], "coverage-judge", "judge-1", "criterion + sources")
     goal.checkpoint(st["slug"], "did", "next", "h", "pass", verdict)
     assert goal.complete(st["slug"], verdict)["status"] == "complete"
 
@@ -534,3 +538,73 @@ def test_budget_exhausted_exception_is_a_goal_state_error():
     catches the protocol-refusal subclasses; the new one must not be the
     odd family member."""
     assert issubclass(goal.BudgetExhausted, goal.GoalStateError)
+
+
+# --------------------------------------------------------------------------
+# a coverage verdict must say where it came from
+# --------------------------------------------------------------------------
+
+_VERDICT = ("PASS — read src/api.py and docs/reference.md; all three endpoints "
+            "carry their method, path and every status code named in the source.")
+
+
+def _coverage(**kw):
+    return _make(gate_kind="coverage",
+                 gate_value="does the doc cover every endpoint?", **kw)
+
+
+def test_a_coverage_goal_cannot_complete_with_no_judge_recorded():
+    """MIN_COVERAGE_EVIDENCE checks the verdict has substance; nothing
+    checked who wrote it. A worker that graded its own work and wrote a
+    thoughtful paragraph left a record byte-indistinguishable from an
+    independent judge's, so 'the worker must not grade its own work' was
+    prose with nothing behind it."""
+    state = _coverage()
+    goal.checkpoint(state["slug"], "wrote the doc", "gate", "h", "pass", _VERDICT)
+    with pytest.raises(goal.JudgeNotRecorded):
+        goal.complete(state["slug"], _VERDICT)
+    assert goal.load(state["slug"])["status"] == "active"
+
+
+@pytest.mark.parametrize("role", ["coverage-judge", "judge", "Coverage-Judge"])
+def test_a_judge_recorded_for_the_turn_satisfies_it(role):
+    """Substring and case-insensitive: the cost of the role string and the
+    check disagreeing is a refusal on a judge that genuinely ran, which is
+    the one direction that teaches an agent to route around it."""
+    state = _coverage()
+    goal.add_subagent(state["slug"], role, "judge-1", "criterion + raw artifacts")
+    goal.checkpoint(state["slug"], "wrote the doc", "gate", "h", "pass", _VERDICT)
+    assert goal.complete(state["slug"], _VERDICT)["status"] == "complete"
+
+
+def test_a_non_judge_subagent_does_not_satisfy_it():
+    state = _coverage()
+    goal.add_subagent(state["slug"], "researcher", "r", "find the endpoints")
+    goal.checkpoint(state["slug"], "wrote the doc", "gate", "h", "pass", _VERDICT)
+    with pytest.raises(goal.JudgeNotRecorded):
+        goal.complete(state["slug"], _VERDICT)
+
+
+def test_a_judge_from_an_earlier_turn_does_not_carry_forward():
+    """It graded an older tree. Accepting it would let one real judgement
+    certify every later turn — the same staleness the tree hash exists to
+    catch, one layer over."""
+    state = _coverage()
+    goal.add_subagent(state["slug"], "coverage-judge", "judge-1", "turn-1 judge")
+    goal.checkpoint(state["slug"], "turn 1", "add DELETE", "h", "fail", "DELETE missing")
+    goal.checkpoint(state["slug"], "turn 2", "gate", "h2", "pass", _VERDICT)
+    with pytest.raises(goal.JudgeNotRecorded):
+        goal.complete(state["slug"], _VERDICT)
+
+
+def test_a_command_goal_needs_no_judge():
+    """The exit status is the proof; a command gate never had a judge."""
+    state = _make()
+    goal.checkpoint(state["slug"], "fixed it", "gate", "h", "pass", "")
+    assert goal.complete(state["slug"], "")["status"] == "complete"
+
+
+def test_judge_not_recorded_is_a_gate_not_passed():
+    """The skill's error table groups the completion refusals; a bare
+    `except goal.GateNotPassed` must still catch this one."""
+    assert issubclass(goal.JudgeNotRecorded, goal.GateNotPassed)
