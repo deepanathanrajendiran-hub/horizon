@@ -88,3 +88,42 @@ def memory_dir() -> Path:
     prompt shows a plausible path either way.
     """
     return Path.home() / ".claude" / "projects" / project_key() / "memory"
+
+
+# --------------------------------------------------------------------------
+# the global ledger
+# --------------------------------------------------------------------------
+#
+# Everything above is deliberately per-project. `/refine --global` breaks
+# that assumption in one direction only: its *targets* are shared
+# (`~/.claude/CLAUDE.md`, `~/.claude/skills/`, `~/.claude/agents/`), so
+# bookkeeping keyed to whichever project happened to run the command left
+# two holes that only appear once you work in more than one repo.
+#
+#   The cap stopped bounding anything. Three edits per project per day
+#   against one shared store is 3N edits a day, and every pre-flight
+#   honestly reported a number under three.
+#
+#   Undo was stranded. A global edit made from project A was revertible
+#   only from project A, so noticing a bad global rule a week later in
+#   project B left no way to reach it.
+#
+# One shared ledger under `~/.claude/harness/` closes both: global writes
+# count against each other wherever they were made, and `--undo --global`
+# reaches them from anywhere. Project writes are untouched and still land
+# in the project.
+
+
+def global_harness_root() -> Path:
+    """The shared harness directory, for `--global` bookkeeping only."""
+    return Path.home() / ".claude" / "harness"
+
+
+def global_undo_dir() -> Path:
+    d = global_harness_root() / "undo"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def global_changelog() -> Path:
+    return global_harness_root() / "CHANGELOG.md"

@@ -185,14 +185,16 @@ def test_the_skills_stay_lean():
     completion block now registers the judge it dispatched, because
     `complete()` refuses a coverage goal with none recorded for the turn,
     and an executable `add_subagent` call in the block an agent pastes is
-    worth more than a paragraph telling it to remember."""
+    worth more than a paragraph telling it to remember; 435 -> 440 for the
+    global ledger, whose `scope=` contract refine has to state because
+    getting it wrong books a global edit against the wrong budget."""
     horizon_lines = _skill("horizon").count("\n")
     refine_lines = _skill("refine").count("\n")
     assert horizon_lines <= 399, (
         f"horizon/SKILL.md is {horizon_lines} lines; the ceiling is 399"
     )
-    assert refine_lines <= 435, (
-        f"refine/SKILL.md is {refine_lines} lines; the ceiling is 435"
+    assert refine_lines <= 440, (
+        f"refine/SKILL.md is {refine_lines} lines; the ceiling is 440"
     )
 
 
