@@ -267,7 +267,7 @@ def create(goal, cwd, gate_kind, gate_value,
             raise BudgetInvalid(f"{name} must be a positive integer or None")
     if max_turns is None and max_minutes is None:
         raise BudgetInvalid("A goal needs at least one of max_turns or max_minutes")
-    with filelock.locked(paths.goals_dir() / "CREATE"):
+    with filelock.goal_locked(paths.goals_dir() / "CREATE"):
         return _create_locked(goal, cwd, gate_kind, gate_value, max_turns,
                               max_minutes, watch_paths, review_criterion)
 
@@ -358,7 +358,7 @@ def checkpoint(slug, did, next_action, tree_hash_value,
     losing one turn's record entirely."""
     if gate_result not in ("pass", "fail", "skipped"):
         raise ValueError(f"gate_result must be pass|fail|skipped, got {gate_result!r}")
-    with filelock.locked(_path(slug)):
+    with filelock.goal_locked(_path(slug)):
         return _checkpoint_locked(slug, did, next_action, tree_hash_value,
                                   gate_result, gate_output)
 
@@ -415,7 +415,7 @@ def record_review(slug: str, result: str, evidence: str, judge: str,
         raise JudgeNotRecorded("Supply the fresh reviewer's actual handle")
     if not isinstance(evidence, str) or len(evidence.strip()) < MIN_COVERAGE_EVIDENCE:
         raise EvidenceInsufficient("Supply the reviewer's substantive reasoning")
-    with filelock.locked(_path(slug)):
+    with filelock.goal_locked(_path(slug)):
         state = load(slug)
         if state["status"] != "active":
             raise GoalClosed(f"Goal is {state['status']}")
@@ -575,7 +575,7 @@ def _add_subagent_locked(slug: str, role: str, name: str, brief: str,
 
 def _with_lock(fn):
     def wrapper(slug, *a, **kw):
-        with filelock.locked(_path(slug)):
+        with filelock.goal_locked(_path(slug)):
             return fn(slug, *a, **kw)
     wrapper.__name__ = fn.__name__.strip("_").replace("_locked", "")
     wrapper.__doc__ = fn.__doc__

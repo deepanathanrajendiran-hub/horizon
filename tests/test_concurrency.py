@@ -12,6 +12,7 @@ import subprocess
 import sys
 import textwrap
 from pathlib import Path
+import time
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BIN = REPO_ROOT / ".claude" / "harness" / "bin"
@@ -103,3 +104,39 @@ def test_concurrent_creates_do_not_collide_on_slugs(tmp_path):
     assert len(files) == N, f"{len(files)} state files for {N} goals — slugs collided"
     slugs = {json.loads(f.read_text())["slug"] for f in files}
     assert len(slugs) == N
+
+def test_goal_create_waits_for_process_owned_create_lock(tmp_path):
+    sys.path.insert(0, str(BIN))
+    import filelock
+
+    if not filelock.state_supported():
+        return
+    state_dir = tmp_path / "goals"
+    state_dir.mkdir()
+    script = "\n".join([
+        "import sys",
+        f"sys.path.insert(0, {str(BIN)!r})",
+        "from pathlib import Path",
+        "import paths",
+        f"paths.goals_dir = lambda: Path({str(state_dir)!r})",
+        "import goal",
+        "print('ready', flush=True)",
+        f"goal.create('shared', {str(tmp_path)!r}, 'command', 'true')",
+    ])
+    child = None
+    try:
+        with filelock.goal_locked(state_dir / "CREATE"):
+            child = subprocess.Popen(
+                [sys.executable, "-u", "-c", script],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            assert child.stdout.readline().strip() == "ready", child.stderr.read()
+            time.sleep(0.2)
+            assert list(state_dir.glob("*.json")) == []
+        stdout, stderr = child.communicate(timeout=5)
+        assert child.returncode == 0, (stdout, stderr)
+        assert len(list(state_dir.glob("*.json"))) == 1
+    finally:
+        if child is not None and child.poll() is None:
+            child.kill()
+            child.communicate(timeout=5)

@@ -112,3 +112,39 @@ def _unlink_if_inode(lock_path: Path, ino: int) -> None:
         pass
     except OSError:
         pass
+
+def state_supported() -> bool:
+    import sys
+    return sys.platform == "darwin" or sys.platform.startswith("linux")
+
+@contextmanager
+def goal_locked(target: Path, timeout: float = 10.0):
+    """Hold a process-owned goal lock without stale-file reclamation."""
+    if not state_supported():
+        with locked(target, timeout):
+            yield
+        return
+    import fcntl
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = target.parent / f".{target.name}.flock"
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    acquired = False
+    try:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise LockTimeout(f"could not lock {target} within {timeout}s")
+                time.sleep(POLL)
+        yield
+    finally:
+        try:
+            if acquired:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
