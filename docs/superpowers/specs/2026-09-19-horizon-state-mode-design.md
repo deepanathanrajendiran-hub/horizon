@@ -1,6 +1,6 @@
 # Horizon state mode: design for coding and refactoring
 
-Date: 2026-09-19. Status: proposed design, ready for written review.
+Date: 2026-09-19. Status: approved by the user for implementation planning on 2026-09-19.
 
 ## Decision and intended benefit
 
