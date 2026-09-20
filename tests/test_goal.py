@@ -8,12 +8,14 @@ BIN = Path(__file__).resolve().parents[1] / ".claude" / "harness" / "bin"
 sys.path.insert(0, str(BIN))
 
 import goal  # noqa: E402
+import tree_hash
 
 
 @pytest.fixture(autouse=True)
 def isolated_goals(tmp_path, monkeypatch):
     d = tmp_path / "goals"
     d.mkdir()
+    (tmp_path / "project").mkdir()
     monkeypatch.setattr(goal.paths, "goals_dir", lambda: d)
     return d
 
@@ -21,13 +23,16 @@ def isolated_goals(tmp_path, monkeypatch):
 def _make(**kw):
     args = dict(
         goal="Refactor the auth module",
-        cwd="/tmp/proj",
-        gate_kind="command",
-        gate_value="pytest -q",
-        max_turns=3,
+        cwd=str(goal.paths.goals_dir().parent / "project"),
+        gate_kind="command", gate_value="pytest -q", max_turns=3,
     )
     args.update(kw)
     return goal.create(**args)
+
+
+def _digest(state):
+    return tree_hash.compute(state["cwd"], state.get("watch_paths"))
+
 
 
 def test_slugify_is_filesystem_safe():
@@ -70,14 +75,14 @@ def test_budget_exhausted_at_max_turns():
 def test_complete_requires_passing_gate():
     """Spec 5.5: budget exhaustion is never reported as success."""
     state = _make()
-    goal.checkpoint(state["slug"], "tried", "retry", "h1", "fail", "2 failed")
+    goal.checkpoint(state["slug"], "tried", "retry", _digest(state), "fail", "2 failed")
     with pytest.raises(goal.GateNotPassed):
         goal.complete(state["slug"], "2 failed")
 
 
 def test_complete_succeeds_after_passing_gate():
     state = _make()
-    goal.checkpoint(state["slug"], "fixed it", "none", "h1", "pass", "ok")
+    goal.checkpoint(state["slug"], "fixed it", "none", _digest(state), "pass", "ok")
     done = goal.complete(state["slug"], "ok")
     assert done["status"] == "complete"
     assert done["gate_evidence"] == "ok"
@@ -136,18 +141,16 @@ def test_checkpoint_rejects_invalid_gate_result():
 
 
 def test_complete_bounds_gate_output():
-    """Spec 6: a runaway gate must not bloat the state file, even on the
-    passing/completing call."""
     state = _make()
-    goal.checkpoint(state["slug"], "fixed it", "none", "h1", "pass", "ok")
-    done = goal.complete(state["slug"], "E" * 20000)
+    goal.checkpoint(state["slug"], "fixed it", "none", _digest(state), "pass", "E" * 20000)
+    done = goal.complete(state["slug"], "caller text cannot replace recorded evidence")
     assert len(done["gate_evidence"]) <= goal.MAX_GATE_OUTPUT + 32
     assert "truncated" in done["gate_evidence"]
 
 
 def test_complete_after_abandon_raises_goal_closed():
     state = _make()
-    goal.checkpoint(state["slug"], "fixed it", "none", "h1", "pass", "ok")
+    goal.checkpoint(state["slug"], "fixed it", "none", _digest(state), "pass", "ok")
     goal.abandon(state["slug"], "cancelled")
     with pytest.raises(goal.GoalClosed):
         goal.complete(state["slug"], "ok")
@@ -155,10 +158,10 @@ def test_complete_after_abandon_raises_goal_closed():
 
 def test_checkpoint_after_complete_raises_goal_closed():
     state = _make()
-    goal.checkpoint(state["slug"], "fixed it", "none", "h1", "pass", "ok")
+    goal.checkpoint(state["slug"], "fixed it", "none", _digest(state), "pass", "ok")
     goal.complete(state["slug"], "ok")
     with pytest.raises(goal.GoalClosed):
-        goal.checkpoint(state["slug"], "more", "next", "h2", "pass", "ok")
+        goal.checkpoint(state["slug"], "more", "next", _digest(state), "pass", "ok")
 
 
 def test_abandon_after_complete_raises_goal_closed(isolated_goals):
@@ -166,7 +169,7 @@ def test_abandon_after_complete_raises_goal_closed(isolated_goals):
     overwritten by any mutator, not just checkpoint()/complete(). A
     rejected call must leave the on-disk file untouched."""
     state = _make()
-    goal.checkpoint(state["slug"], "fixed it", "none", "h1", "pass", "ok")
+    goal.checkpoint(state["slug"], "fixed it", "none", _digest(state), "pass", "ok")
     goal.complete(state["slug"], "ok")
     path = isolated_goals / f"{state['slug']}.json"
     before = path.read_text()
@@ -190,7 +193,7 @@ def test_add_subagent_after_complete_raises_goal_closed(isolated_goals):
     """add_subagent must be guarded the same as checkpoint/complete/abandon:
     bookkeeping for a subagent must not silently land on a closed goal."""
     state = _make()
-    goal.checkpoint(state["slug"], "fixed it", "none", "h1", "pass", "ok")
+    goal.checkpoint(state["slug"], "fixed it", "none", _digest(state), "pass", "ok")
     goal.complete(state["slug"], "ok")
     path = isolated_goals / f"{state['slug']}.json"
     before = path.read_text()
@@ -333,7 +336,7 @@ def test_reopen_refuses_a_completed_goal():
     """A completed goal has a passing gate on record; reopening would let
     that evidence stand for later work it never judged."""
     st = _make()
-    goal.checkpoint(st["slug"], "did", "next", "h", "pass", "ok")
+    goal.checkpoint(st["slug"], "did", "next", _digest(st), "pass", "ok")
     goal.complete(st["slug"], "ok")
     with pytest.raises(goal.GoalClosed):
         goal.reopen(st["slug"], "one more thing")
@@ -441,7 +444,7 @@ def test_a_silent_passing_gate_still_records_evidence():
     proof it was verified — was stored as the empty string. Found by
     running T10, whose own gate was silent."""
     st = _make(gate_value="test -f something")
-    goal.checkpoint(st["slug"], "did", "next", "h", "pass", "")
+    goal.checkpoint(st["slug"], "did", "next", _digest(st), "pass", "")
     done = goal.complete(st["slug"], "")
 
     assert done["gate_evidence"].strip(), "a completed goal recorded no evidence"
@@ -450,8 +453,8 @@ def test_a_silent_passing_gate_still_records_evidence():
 
 def test_real_gate_output_is_preserved_verbatim():
     st = _make()
-    goal.checkpoint(st["slug"], "did", "next", "h", "pass", "")
-    done = goal.complete(st["slug"], "42 passed in 3.1s")
+    goal.checkpoint(st["slug"], "did", "next", _digest(st), "pass", "42 passed in 3.1s")
+    done = goal.complete(st["slug"], "different caller text")
     assert done["gate_evidence"] == "42 passed in 3.1s"
 
 
@@ -465,7 +468,7 @@ def test_a_coverage_goal_cannot_complete_on_a_contentless_verdict():
     # A judge IS recorded here, so the refusal under test stays the verdict's
     # emptiness rather than the provenance check that now runs before it.
     goal.add_subagent(st["slug"], "coverage-judge", "judge-1", "criterion + sources")
-    goal.checkpoint(st["slug"], "did", "next", "h", "pass", "Test")
+    goal.checkpoint(st["slug"], "did", "next", _digest(st), "pass", "Test")
     with pytest.raises(goal.EvidenceInsufficient):
         goal.complete(st["slug"], "Test")
     assert goal.load(st["slug"])["status"] == "active", "closed on a bad verdict"
@@ -476,7 +479,7 @@ def test_a_coverage_goal_completes_on_a_real_verdict():
     verdict = ("PASS - all 12 claims carry a source; spot-checked 4 against the "
                "cited files and each quotation matches.")
     goal.add_subagent(st["slug"], "coverage-judge", "judge-1", "criterion + sources")
-    goal.checkpoint(st["slug"], "did", "next", "h", "pass", verdict)
+    goal.checkpoint(st["slug"], "did", "next", _digest(st), "pass", verdict)
     assert goal.complete(st["slug"], verdict)["status"] == "complete"
 
 
@@ -484,7 +487,7 @@ def test_a_command_goal_still_completes_on_silence():
     """The new guard must not leak into command gates, where an empty output
     is the normal, correct case."""
     st = _make(gate_value="test -f something")
-    goal.checkpoint(st["slug"], "did", "next", "h", "pass", "")
+    goal.checkpoint(st["slug"], "did", "next", _digest(st), "pass", "")
     assert goal.complete(st["slug"], "")["status"] == "complete"
 
 def test_checkpoint_beyond_the_turn_budget_is_refused():
@@ -560,7 +563,7 @@ def test_a_coverage_goal_cannot_complete_with_no_judge_recorded():
     independent judge's, so 'the worker must not grade its own work' was
     prose with nothing behind it."""
     state = _coverage()
-    goal.checkpoint(state["slug"], "wrote the doc", "gate", "h", "pass", _VERDICT)
+    goal.checkpoint(state["slug"], "wrote the doc", "gate", _digest(state), "pass", _VERDICT)
     with pytest.raises(goal.JudgeNotRecorded):
         goal.complete(state["slug"], _VERDICT)
     assert goal.load(state["slug"])["status"] == "active"
@@ -573,14 +576,14 @@ def test_a_judge_recorded_for_the_turn_satisfies_it(role):
     the one direction that teaches an agent to route around it."""
     state = _coverage()
     goal.add_subagent(state["slug"], role, "judge-1", "criterion + raw artifacts")
-    goal.checkpoint(state["slug"], "wrote the doc", "gate", "h", "pass", _VERDICT)
+    goal.checkpoint(state["slug"], "wrote the doc", "gate", _digest(state), "pass", _VERDICT)
     assert goal.complete(state["slug"], _VERDICT)["status"] == "complete"
 
 
 def test_a_non_judge_subagent_does_not_satisfy_it():
     state = _coverage()
     goal.add_subagent(state["slug"], "researcher", "r", "find the endpoints")
-    goal.checkpoint(state["slug"], "wrote the doc", "gate", "h", "pass", _VERDICT)
+    goal.checkpoint(state["slug"], "wrote the doc", "gate", _digest(state), "pass", _VERDICT)
     with pytest.raises(goal.JudgeNotRecorded):
         goal.complete(state["slug"], _VERDICT)
 
@@ -591,8 +594,8 @@ def test_a_judge_from_an_earlier_turn_does_not_carry_forward():
     catch, one layer over."""
     state = _coverage()
     goal.add_subagent(state["slug"], "coverage-judge", "judge-1", "turn-1 judge")
-    goal.checkpoint(state["slug"], "turn 1", "add DELETE", "h", "fail", "DELETE missing")
-    goal.checkpoint(state["slug"], "turn 2", "gate", "h2", "pass", _VERDICT)
+    goal.checkpoint(state["slug"], "turn 1", "add DELETE", _digest(state), "fail", "DELETE missing")
+    goal.checkpoint(state["slug"], "turn 2", "gate", _digest(state), "pass", _VERDICT)
     with pytest.raises(goal.JudgeNotRecorded):
         goal.complete(state["slug"], _VERDICT)
 
@@ -600,7 +603,7 @@ def test_a_judge_from_an_earlier_turn_does_not_carry_forward():
 def test_a_command_goal_needs_no_judge():
     """The exit status is the proof; a command gate never had a judge."""
     state = _make()
-    goal.checkpoint(state["slug"], "fixed it", "gate", "h", "pass", "")
+    goal.checkpoint(state["slug"], "fixed it", "gate", _digest(state), "pass", "")
     assert goal.complete(state["slug"], "")["status"] == "complete"
 
 

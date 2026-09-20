@@ -9,3 +9,7 @@ __pycache__/
 # executes on goal resume. Never commit.
 .claude/harness/goals/
 .claude/harness/undo/
+.codex/harness/goals/
+.codex/harness/undo/
+.codex/harness/CHANGELOG.md
+.codex/memory/

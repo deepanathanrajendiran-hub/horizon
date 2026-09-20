@@ -37,27 +37,23 @@ def _run_workers(body: str, state_dir: Path, n: int = N):
     return [p.communicate() for p in procs]
 
 
-def test_concurrent_checkpoints_do_not_lose_turns(tmp_path):
+def test_concurrent_checkpoints_do_not_lose_turns(tmp_path, monkeypatch):
     state_dir = tmp_path / "goals"
     state_dir.mkdir()
     sys.path.insert(0, str(BIN))
     import goal
-    goal.paths.goals_dir = lambda: state_dir
+    monkeypatch.setattr(goal.paths, "goals_dir", lambda: state_dir)
     st = goal.create(goal="race", cwd=str(tmp_path), gate_kind="command",
                      gate_value="true", max_turns=100)
-
     _run_workers(f"""
         import goal
         goal.checkpoint({st['slug']!r}, f"worker {{WORKER}}", "next", "h", "fail", "")
     """, state_dir)
-
     final = json.loads((state_dir / f"{st['slug']}.json").read_text())
     assert final["used"]["turns"] == N, (
-        f"lost turns: used.turns={final['used']['turns']} after {N} checkpoints"
-    )
+        f"lost turns: used.turns={final['used']['turns']} after {N} checkpoints")
     assert len(final["checkpoints"]) == N, (
-        f"lost checkpoints: {len(final['checkpoints'])} recorded of {N}"
-    )
+        f"lost checkpoints: {len(final['checkpoints'])} recorded of {N}")
 
 
 def test_concurrent_apply_edits_all_get_a_snapshot(tmp_path):
