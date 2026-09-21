@@ -340,3 +340,14 @@ def test_reserved_packet_counts_returned_checkpoint_and_review_metadata():
     with pytest.raises(state.StateError, match=r"packet.*24576"):
         state.build_packet(goal_state, attempt_id="a1", base_revision=2,
                            current_hash="a" * 64, runtime="codex", reserve_verdicts=True)
+
+def test_execution_rejects_nonstring_status_and_worker_runtime_as_state_errors():
+    state = _state_module()
+    execution = state.new_execution()
+    execution["active_attempt"] = "a1"
+    execution["attempts"] = [_attempt(status=["reserved"])]
+    with pytest.raises(state.StateError, match="status"):
+        state.validate_execution(execution)
+    execution["attempts"] = [_attempt(status="attached", worker={"runtime": ["codex"], "handle": "h"})]
+    with pytest.raises(state.StateError, match="runtime"):
+        state.validate_execution(execution)

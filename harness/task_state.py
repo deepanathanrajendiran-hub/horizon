@@ -212,7 +212,7 @@ def _validate_worker(worker) -> None:
     if worker is None:
         return
     _require_keys(worker, {"runtime", "handle"}, "attempt.worker")
-    if worker["runtime"] not in {"codex", "claude"}:
+    if not isinstance(worker["runtime"], str) or worker["runtime"] not in {"codex", "claude"}:
         raise StateError("attempt.worker.runtime must be codex or claude")
     if not isinstance(worker["handle"], str) or not worker["handle"]:
         raise StateError("attempt.worker.handle must be nonempty text")
@@ -246,7 +246,7 @@ def _validate_attempt(attempt: dict) -> None:
     for field in ("turn", "base_revision"):
         if not _is_int(attempt[field]) or attempt[field] < 0:
             raise StateError(f"attempt.{field} must be a nonnegative integer")
-    if attempt["status"] not in {"reserved", "attached", "finishing", "accepted", "recovered"}:
+    if not isinstance(attempt["status"], str) or attempt["status"] not in {"reserved", "attached", "finishing", "accepted", "recovered"}:
         raise StateError("attempt.status is invalid")
     _validate_reference(attempt["packet"], "attempt.packet")
     _require_hash(attempt["procedure_sha256"], "attempt.procedure_sha256")
