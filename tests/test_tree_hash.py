@@ -198,3 +198,12 @@ def test_an_unstattable_file_is_not_hashed_as_a_constant(tmp_path):
         assert tree_hash.changed(root, [str(root)], "any-previous-hash") is True
     finally:
         os.chmod(sub, 0o755)
+
+def test_goal_bookkeeping_does_not_change_hash(make_state_goal):
+    import goal
+    import steps
+
+    state = make_state_goal()
+    before = tree_hash.compute(state["cwd"], state["watch_paths"])
+    steps.begin(state["slug"], "r1")
+    assert tree_hash.compute(state["cwd"], state["watch_paths"]) == before
