@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 import filelock
 import paths
 import tree_hash
+import copy
+import task_state
 
 MAX_GATE_OUTPUT = 4000
 SLUG_MAX = 60
@@ -56,6 +58,13 @@ class GateUnsound(GateRequired):
 
 class GoalStateError(Exception):
     """Raised when goal state is missing or unreadable. Never guess."""
+
+class RevisionConflict(GoalStateError):
+    """The on-disk execution revision changed before a commit."""
+
+
+class AttemptOpen(GoalStateError):
+    """A lifecycle mutation requires the active attempt to be closed."""
 
 
 class GateNotPassed(Exception):
@@ -251,8 +260,48 @@ def _save(state: dict) -> dict:
     return state
 
 
+def _initial_state(goal, cwd, gate_kind, gate_value, max_turns,
+                   max_minutes, watch_paths, review_criterion):
+    cwd = os.path.abspath(str(cwd))
+    state = {
+        "slug": slugify(goal), "goal": goal, "cwd": cwd,
+        "gate": {"kind": gate_kind, "value": gate_value},
+        "watch_paths": [os.path.abspath(os.path.join(cwd, str(p)))
+                        for p in (watch_paths or [cwd])],
+        "budget": {"max_turns": max_turns, "max_minutes": max_minutes},
+        "used": {"turns": 0, "started": _now()}, "status": "active",
+        "subagents": [], "checkpoints": [],
+    }
+    if review_criterion is not None:
+        state["gate"]["review_criterion"] = review_criterion.strip()
+    return state
+
+
+def _validate_state_execution(state: dict) -> None:
+    if "execution" not in state:
+        return
+    task_state.validate_execution(state["execution"])
+    attempts = state["execution"]["attempts"]
+    turns = [attempt["turn"] for attempt in attempts]
+    if turns != list(range(1, len(attempts) + 1)):
+        raise task_state.StateError("attempt turn numbers must be sequential and unique")
+    used_turns = state["used"]["turns"]
+    if isinstance(used_turns, bool) or not isinstance(used_turns, int) or used_turns != len(attempts):
+        raise task_state.StateError("used.turns must equal the number of reserved attempts")
+    terminal_turns = [attempt["turn"] for attempt in attempts
+                      if attempt["status"] in {"accepted", "recovered"}]
+    checkpoint_turns = [checkpoint["turn"] for checkpoint in state["checkpoints"]]
+    if (any(isinstance(turn, bool) or not isinstance(turn, int) for turn in checkpoint_turns)
+            or checkpoint_turns != terminal_turns):
+        raise task_state.StateError("terminal attempts must correspond one-to-one with checkpoint turns")
+
 def create(goal, cwd, gate_kind, gate_value,
-           max_turns=20, max_minutes=None, watch_paths=None, review_criterion=None) -> dict:
+           max_turns=20, max_minutes=None, watch_paths=None, review_criterion=None,
+           *, execution: str = "conversation") -> dict:
+    if execution not in ("conversation", "state"):
+        raise GoalStateError(f"unsupported execution mode: {execution!r}")
+    if execution == "state" and not filelock.state_supported():
+        raise GoalStateError("state execution is unsupported on this platform")
     if not gate_value or not str(gate_value).strip():
         raise GateRequired("A goal requires a command or coverage criterion.")
     if gate_kind not in ("command", "coverage"):
@@ -267,6 +316,21 @@ def create(goal, cwd, gate_kind, gate_value,
             raise BudgetInvalid(f"{name} must be a positive integer or None")
     if max_turns is None and max_minutes is None:
         raise BudgetInvalid("A goal needs at least one of max_turns or max_minutes")
+    if execution == "state":
+        state = _initial_state(goal, cwd, gate_kind, gate_value, max_turns,
+                               max_minutes, watch_paths, review_criterion)
+        state["execution"] = task_state.new_execution()
+        try:
+            task_state.build_packet(
+                state, attempt_id="A" * 64, base_revision=1,
+                current_hash="0" * 64, runtime=paths.runtime(),
+                reserve_verdicts=True,
+            )
+        except task_state.StateError as error:
+            raise GoalStateError(f"initial packet cannot be created: {error}") from error
+        with filelock.goal_locked(paths.goals_dir() / "CREATE"):
+            state["slug"] = _unique_slug(state["slug"])
+            return _save(state)
     with filelock.goal_locked(paths.goals_dir() / "CREATE"):
         return _create_locked(goal, cwd, gate_kind, gate_value, max_turns,
                               max_minutes, watch_paths, review_criterion)
@@ -274,18 +338,9 @@ def create(goal, cwd, gate_kind, gate_value,
 
 def _create_locked(goal, cwd, gate_kind, gate_value,
                    max_turns, max_minutes, watch_paths, review_criterion=None) -> dict:
-    cwd = os.path.abspath(str(cwd))
-    state = {
-        "slug": _unique_slug(slugify(goal)), "goal": goal, "cwd": cwd,
-        "gate": {"kind": gate_kind, "value": gate_value},
-        "watch_paths": [os.path.abspath(os.path.join(cwd, str(p)))
-                        for p in (watch_paths or [cwd])],
-        "budget": {"max_turns": max_turns, "max_minutes": max_minutes},
-        "used": {"turns": 0, "started": _now()}, "status": "active",
-        "subagents": [], "checkpoints": [],
-    }
-    if review_criterion is not None:
-        state["gate"]["review_criterion"] = review_criterion.strip()
+    state = _initial_state(goal, cwd, gate_kind, gate_value, max_turns,
+                           max_minutes, watch_paths, review_criterion)
+    state["slug"] = _unique_slug(state["slug"])
     return _save(state)
 
 
@@ -315,12 +370,7 @@ def load(slug: str) -> dict:
             f"goal state at {p} is missing required fields: {', '.join(missing)}"
         )
 
-    # The elements, not just the containers. Validating only the eight
-    # top-level types let `checkpoints: [{"turn": 1}]` load cleanly and then
-    # raise a bare KeyError inside gate.last_hash and goal.complete — an
-    # exception the skills' error tables never mention, because they were
-    # told to expect GoalStateError. This is the same class refine_log
-    # closed one module over with ENTRY_KEYS, unfixed here.
+    # Existing callers index these checkpoint fields directly.
     for i, cp in enumerate(state["checkpoints"]):
         if not isinstance(cp, dict):
             raise GoalStateError(
@@ -334,9 +384,6 @@ def load(slug: str) -> dict:
                 f"{', '.join(absent)} — refusing to guess"
             )
 
-    # A budget that cannot bound is the unbounded loop create() exists to
-    # refuse. Loading one silently makes budget_exhausted() return False
-    # forever, which is the same defect arriving by a different door.
     budget = state["budget"]
     if budget.get("max_turns") is None and budget.get("max_minutes") is None:
         raise GoalStateError(
@@ -348,6 +395,10 @@ def load(slug: str) -> dict:
         raise GoalStateError(
             f"goal state at {p} has an incomplete 'used' block: {state['used']!r}"
         )
+    try:
+        _validate_state_execution(state)
+    except task_state.StateError as error:
+        raise GoalStateError(f"goal state at {p} has invalid execution: {error}") from error
     return state
 
 
@@ -588,3 +639,50 @@ complete = _with_lock(_complete_locked)
 abandon = _with_lock(_abandon_locked)
 reopen = _with_lock(_reopen_locked)
 add_subagent = _with_lock(_add_subagent_locked)
+
+
+def execution_mode(state: dict) -> str:
+    block = state.get("execution")
+    return "conversation" if block is None else block["mode"]
+
+
+def require_idle(state: dict) -> None:
+    if execution_mode(state) == "state" and state["execution"]["active_attempt"] is not None:
+        raise AttemptOpen("Close or recover the active attempt first")
+
+
+def commit_revision(state: dict, *, expected_revision: int) -> dict:
+    """Commit one state-mode mutation while the caller holds the strict goal lock."""
+    current = load(state["slug"])
+    if execution_mode(current) != "state":
+        raise GoalStateError("revision commits require a state-mode goal")
+    if current["execution"]["revision"] != expected_revision:
+        raise RevisionConflict("Execution revision changed; inspect status")
+    candidate = copy.deepcopy(state)
+    candidate["execution"]["revision"] = expected_revision + 1
+    try:
+        _validate_state_execution(candidate)
+    except (KeyError, TypeError, task_state.StateError) as error:
+        raise GoalStateError(f"invalid execution candidate: {error}") from error
+    return _save(candidate)
+
+
+def summary(state: dict) -> dict:
+    last = state["checkpoints"][-1] if state["checkpoints"] else None
+    block = state.get("execution")
+    active = None
+    if block and block["active_attempt"] is not None:
+        item = next(a for a in block["attempts"] if a["id"] == block["active_attempt"])
+        active = {key: item[key] for key in ("id", "status", "worker", "packet")}
+    return {
+        "slug": state["slug"], "goal": state["goal"], "status": state["status"],
+        "runtime": paths.runtime(), "gate": state["gate"], "budget": state["budget"],
+        "used": state["used"], "budget_exhausted": budget_exhausted(state),
+        "last_checkpoint": last, "reviews": state.get("reviews", [])[-1:],
+        "gate_evidence": state.get("gate_evidence"),
+        "execution_mode": execution_mode(state),
+        "turn_unit": "worker_attempt" if block else "checkpoint",
+        "execution_revision": block["revision"] if block else None,
+        "active_attempt": active,
+        "next_action": block["task"]["next_action"] if block else (last.get("next", "") if last else ""),
+    }

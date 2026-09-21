@@ -9,6 +9,8 @@ sys.path.insert(0, str(BIN))
 
 import goal  # noqa: E402
 import tree_hash
+import os
+import subprocess
 
 
 @pytest.fixture(autouse=True)
@@ -611,3 +613,159 @@ def test_judge_not_recorded_is_a_gate_not_passed():
     """The skill's error table groups the completion refusals; a bare
     `except goal.GateNotPassed` must still catch this one."""
     assert issubclass(goal.JudgeNotRecorded, goal.GateNotPassed)
+
+
+def _reserved_attempt():
+    return {
+        "id": "request-001", "turn": 1, "base_revision": 0,
+        "status": "reserved", "packet": {"path": "packet.json", "sha256": "0" * 64},
+        "procedure_sha256": "0" * 64, "worker": None,
+        "gate_process": None, "finish_nonce": None, "update_sha256": None,
+        "pending": None, "events": [], "result": None,
+    }
+
+
+def test_state_mode_is_explicit_and_does_not_rewrite_legacy(isolated_goals):
+    legacy = _make()
+    legacy_path = isolated_goals / f"{legacy['slug']}.json"
+    before = legacy_path.read_bytes()
+    assert "execution" not in legacy
+    state = _make(execution="state")
+    assert state["execution"]["mode"] == "state"
+    assert state["execution"]["schema_version"] == 1
+    assert state["execution"]["revision"] == 0
+    assert state["used"]["turns"] == 0
+    assert goal.load(legacy["slug"]) == legacy
+    assert legacy_path.read_bytes() == before
+
+
+def test_unknown_state_version_is_not_silently_loaded():
+    state = _make(execution="state")
+    state["execution"]["schema_version"] = 99
+    goal._save(state)
+    with pytest.raises(goal.GoalStateError, match="schema"):
+        goal.load(state["slug"])
+
+
+def test_state_create_rejects_unsupported_platform_before_mkdir(tmp_path, monkeypatch):
+    destination = tmp_path / "new-goals"
+    monkeypatch.setattr(goal.paths, "goals_dir", lambda: destination)
+    monkeypatch.setattr(goal.filelock, "state_supported", lambda: False)
+    with pytest.raises(goal.GoalStateError, match="platform"):
+        goal.create("Objective", tmp_path, "command", "true", execution="state")
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("overrides", [
+    {"goal": "O" * 30000},
+    {"review_criterion": "R" * 30000},
+])
+def test_state_create_rejects_oversized_immutable_packet_without_goal_file(
+        isolated_goals, overrides):
+    with pytest.raises(goal.GoalStateError, match="packet"):
+        _make(execution="state", **overrides)
+    assert list(isolated_goals.glob("*.json")) == []
+
+
+def test_state_create_saves_once_after_packet_preview(monkeypatch):
+    calls = []
+    original = goal._save
+
+    def counted(state):
+        calls.append(state["execution"]["revision"])
+        return original(state)
+
+    monkeypatch.setattr(goal, "_save", counted)
+    state = _make(execution="state")
+    assert calls == [0]
+    assert goal.load(state["slug"]) == state
+
+
+def test_state_load_rejects_malformed_execution_and_attempt():
+    state = _make(execution="state")
+    state["execution"]["task"]["entries"] = "broken"
+    goal._save(state)
+    with pytest.raises(goal.GoalStateError):
+        goal.load(state["slug"])
+    state["execution"]["task"]["entries"] = []
+    state["execution"]["attempts"] = [{"id": "request-001"}]
+    goal._save(state)
+    with pytest.raises(goal.GoalStateError):
+        goal.load(state["slug"])
+
+
+def test_state_load_checks_attempt_turn_and_checkpoint_consistency():
+    state = _make(execution="state")
+    state["execution"]["attempts"] = [_reserved_attempt()]
+    state["execution"]["active_attempt"] = "request-001"
+    state["used"]["turns"] = 1
+    goal._save(state)
+    assert goal.load(state["slug"]) == state
+    state["used"]["turns"] = 0
+    goal._save(state)
+    with pytest.raises(goal.GoalStateError, match="turn"):
+        goal.load(state["slug"])
+    state["used"]["turns"] = 1
+    state["checkpoints"] = [{
+        "turn": 1, "tree_hash": "0" * 64, "gate": "fail",
+    }]
+    goal._save(state)
+    with pytest.raises(goal.GoalStateError, match="checkpoint"):
+        goal.load(state["slug"])
+
+
+def test_state_revision_commit_checks_disk_and_preserves_input():
+    state = _make(execution="state")
+    candidate = goal.load(state["slug"])
+    candidate["execution"]["task"]["summary"] = "Made progress"
+    with goal.filelock.goal_locked(goal._path(state["slug"])):
+        committed = goal.commit_revision(candidate, expected_revision=0)
+        assert committed["execution"]["revision"] == 1
+        assert candidate["execution"]["revision"] == 0
+        with pytest.raises(goal.RevisionConflict):
+            goal.commit_revision(candidate, expected_revision=0)
+    assert goal.load(state["slug"]) == committed
+
+
+def test_state_revision_failed_atomic_replace_preserves_old_goal(
+        isolated_goals, monkeypatch):
+    state = _make(execution="state")
+    target = isolated_goals / f"{state['slug']}.json"
+    before = target.read_bytes()
+    monkeypatch.setattr(goal.os, "replace",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("boom")))
+    with goal.filelock.goal_locked(goal._path(state["slug"])):
+        with pytest.raises(OSError, match="boom"):
+            goal.commit_revision(state, expected_revision=0)
+    assert target.read_bytes() == before
+    assert not list(isolated_goals.glob(".*tmp*"))
+
+
+def test_state_summary_and_idle_guard():
+    state = _make(execution="state")
+    info = goal.summary(state)
+    assert info["execution_mode"] == "state"
+    assert info["turn_unit"] == "worker_attempt"
+    assert info["execution_revision"] == 0
+    assert info["next_action"] == state["execution"]["task"]["next_action"]
+    goal.require_idle(state)
+    state["execution"]["attempts"] = [_reserved_attempt()]
+    state["execution"]["active_attempt"] = "request-001"
+    assert goal.summary(state)["active_attempt"]["id"] == "request-001"
+    with pytest.raises(goal.AttemptOpen):
+        goal.require_idle(state)
+
+
+def test_legacy_bin_import_can_create_and_load_state_goal(tmp_path):
+    project = tmp_path / "unrelated-project"
+    project.mkdir()
+    script = (
+        "import goal; "
+        "s = goal.create('Objective', '.', 'command', 'true', execution='state'); "
+        "assert goal.load(s['slug']) == s"
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(BIN)
+    process = subprocess.run([sys.executable, "-c", script], cwd=project,
+                             env=env, text=True, capture_output=True)
+    assert process.returncode == 0, process.stderr
