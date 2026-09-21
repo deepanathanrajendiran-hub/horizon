@@ -349,8 +349,13 @@ def load(slug: str) -> dict:
     if not p.exists():
         raise GoalStateError(f"no goal state at {p}")
     try:
-        state = json.loads(p.read_text())
-    except (json.JSONDecodeError, OSError) as e:
+        state = json.loads(
+            p.read_text(),
+            object_pairs_hook=task_state._no_duplicates,
+            parse_constant=task_state._nonfinite,
+            parse_float=task_state._finite_float,
+        )
+    except (UnicodeError, json.JSONDecodeError, OSError, task_state.StateError) as e:
         raise GoalStateError(f"goal state at {p} is unreadable: {e}") from e
     if not isinstance(state, dict):
         raise GoalStateError(

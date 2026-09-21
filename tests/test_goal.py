@@ -769,3 +769,23 @@ def test_legacy_bin_import_can_create_and_load_state_goal(tmp_path):
     process = subprocess.run([sys.executable, "-c", script], cwd=project,
                              env=env, text=True, capture_output=True)
     assert process.returncode == 0, process.stderr
+
+
+@pytest.mark.parametrize("execution", ["conversation", "state"])
+def test_load_rejects_duplicate_keys_in_saved_goal(isolated_goals, execution):
+    state = _make(execution=execution)
+    path = isolated_goals / f"{state['slug']}.json"
+    raw = path.read_text()
+    path.write_text(raw.replace('"turns": 0', '"turns": 0, "turns": 0', 1))
+    with pytest.raises(goal.GoalStateError, match="duplicate"):
+        goal.load(state["slug"])
+
+
+@pytest.mark.parametrize("number", ["NaN", "Infinity", "-Infinity", "1e999"])
+def test_load_rejects_nonfinite_saved_numbers(isolated_goals, number):
+    state = _make(execution="state")
+    path = isolated_goals / f"{state['slug']}.json"
+    raw = path.read_text()
+    path.write_text(raw.replace('"turns": 0', f'"turns": {number}', 1))
+    with pytest.raises(goal.GoalStateError, match="non-finite"):
+        goal.load(state["slug"])
