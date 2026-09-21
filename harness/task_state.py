@@ -4,6 +4,7 @@ import hashlib
 from pathlib import Path
 import stat
 import re
+import math
 
 
 class StateError(ValueError):
@@ -20,23 +21,24 @@ def merge_update(task: dict, update: dict, *, attempt_id: str,
     candidate = copy.deepcopy(task)
     audit = []
     indexes = {entry["id"]: index for index, entry in enumerate(candidate["entries"])}
-    touched = set()
+    touched_fields = set()
+    touched_entries = set()
     for operation in update["ops"]:
         _validate_operation(operation)
         kind = operation["op"]
         if kind == "set":
             field = operation["field"]
-            if field in touched:
+            if field in touched_fields:
                 raise StateError(f"contradictory operations for {field}")
-            touched.add(field)
+            touched_fields.add(field)
             before = candidate[field]
             candidate[field] = operation["value"]
             audit.append({"id": field, "before": before, "after": candidate[field], "reason": None})
             continue
         entry_id = operation.get("id", operation.get("entry", {}).get("id"))
-        if entry_id in touched:
+        if entry_id in touched_entries:
             raise StateError(f"contradictory operations for entry ID: {entry_id}")
-        touched.add(entry_id)
+        touched_entries.add(entry_id)
         if kind == "archive":
             if entry_id not in indexes:
                 raise StateError(f"unknown entry ID: {entry_id}")
@@ -173,8 +175,8 @@ def new_execution() -> dict:
 
 def validate_execution(execution: dict) -> None:
     _require_keys(execution, {"mode", "schema_version", "revision", "task", "active_attempt", "attempts"}, "execution")
-    if execution["mode"] != "state" or execution["schema_version"] != 1:
-        raise StateError("execution must be state schema version 1")
+    if execution["mode"] != "state" or not _is_int(execution["schema_version"]) or execution["schema_version"] != 1:
+        raise StateError("execution.schema_version must be integer 1 for state mode")
     if not _is_int(execution["revision"]) or execution["revision"] < 0:
         raise StateError("execution.revision must be a nonnegative integer")
     validate_task(execution["task"])
@@ -182,6 +184,97 @@ def validate_execution(execution: dict) -> None:
         _require_id(execution["active_attempt"], "execution.active_attempt")
     if not isinstance(execution["attempts"], list):
         raise StateError("execution.attempts must be a list")
+    seen = set()
+    nonterminal = []
+    for attempt in execution["attempts"]:
+        _validate_attempt(attempt)
+        if attempt["id"] in seen:
+            raise StateError(f"duplicate attempt ID: {attempt['id']}")
+        seen.add(attempt["id"])
+        if attempt["status"] in {"reserved", "attached", "finishing"}:
+            nonterminal.append(attempt["id"])
+    if len(nonterminal) > 1:
+        raise StateError("execution has more than one nonterminal attempt")
+    if nonterminal:
+        if execution["active_attempt"] != nonterminal[0]:
+            raise StateError("execution.active_attempt must identify the nonterminal attempt")
+    elif execution["active_attempt"] is not None:
+        raise StateError("execution.active_attempt requires a nonterminal attempt")
+
+def _validate_reference(reference, field: str) -> None:
+    _require_keys(reference, {"path", "sha256"}, field)
+    if not isinstance(reference["path"], str) or not reference["path"]:
+        raise StateError(f"{field}.path must be nonempty text")
+    _require_hash(reference["sha256"], f"{field}.sha256")
+
+
+def _validate_worker(worker) -> None:
+    if worker is None:
+        return
+    _require_keys(worker, {"runtime", "handle"}, "attempt.worker")
+    if worker["runtime"] not in {"codex", "claude"}:
+        raise StateError("attempt.worker.runtime must be codex or claude")
+    if not isinstance(worker["handle"], str) or not worker["handle"]:
+        raise StateError("attempt.worker.handle must be nonempty text")
+
+
+def _validate_gate_process(process) -> None:
+    if process is None:
+        return
+    _require_keys(process, {"pid", "pgid", "started_at", "finish_nonce"}, "attempt.gate_process")
+    for field in ("pid", "pgid"):
+        if not _is_int(process[field]) or process[field] <= 0:
+            raise StateError(f"attempt.gate_process.{field} must be a positive integer")
+    for field in ("started_at", "finish_nonce"):
+        if not isinstance(process[field], str) or not process[field]:
+            raise StateError(f"attempt.gate_process.{field} must be nonempty text")
+
+
+def _validate_pending(pending) -> None:
+    if pending is None:
+        return
+    _require_keys(pending, {"update", "candidate", "audit", "worker_evidence"}, "attempt.pending")
+    for field in ("update", "candidate", "audit", "worker_evidence"):
+        _validate_reference(pending[field], f"attempt.pending.{field}")
+
+
+def _validate_attempt(attempt: dict) -> None:
+    _require_keys(attempt, {"id", "turn", "base_revision", "status", "packet",
+                            "procedure_sha256", "worker", "gate_process", "finish_nonce",
+                            "update_sha256", "pending", "events", "result"}, "attempt")
+    _require_id(attempt["id"], "attempt.id")
+    for field in ("turn", "base_revision"):
+        if not _is_int(attempt[field]) or attempt[field] < 0:
+            raise StateError(f"attempt.{field} must be a nonnegative integer")
+    if attempt["status"] not in {"reserved", "attached", "finishing", "accepted", "recovered"}:
+        raise StateError("attempt.status is invalid")
+    _validate_reference(attempt["packet"], "attempt.packet")
+    _require_hash(attempt["procedure_sha256"], "attempt.procedure_sha256")
+    _validate_worker(attempt["worker"])
+    _validate_gate_process(attempt["gate_process"])
+    if attempt["finish_nonce"] is not None and (not isinstance(attempt["finish_nonce"], str) or not attempt["finish_nonce"]):
+        raise StateError("attempt.finish_nonce must be null or nonempty text")
+    if attempt["update_sha256"] is not None:
+        _require_hash(attempt["update_sha256"], "attempt.update_sha256")
+    _validate_pending(attempt["pending"])
+    if not isinstance(attempt["events"], list):
+        raise StateError("attempt.events must be a list")
+    if attempt["result"] is not None and not isinstance(attempt["result"], dict):
+        raise StateError("attempt.result must be null or an object")
+    status = attempt["status"]
+    if status == "reserved" and any((attempt["worker"] is not None, attempt["pending"] is not None,
+                                       attempt["update_sha256"] is not None, attempt["result"] is not None)):
+        raise StateError("reserved attempt has lifecycle fields set")
+    if status == "attached" and (attempt["worker"] is None or attempt["pending"] is not None or
+                                   attempt["update_sha256"] is not None or attempt["result"] is not None):
+        raise StateError("attached attempt has inconsistent lifecycle fields")
+    if status == "finishing" and (attempt["worker"] is None or attempt["pending"] is None or attempt["result"] is not None):
+        raise StateError("finishing attempt has inconsistent lifecycle fields")
+    if status == "accepted" and (attempt["worker"] is None or attempt["pending"] is None or
+                                   attempt["update_sha256"] is None or attempt["result"] is None):
+        raise StateError("accepted attempt has inconsistent lifecycle fields")
+    if status == "recovered" and attempt["result"] is None:
+        raise StateError("recovered attempt requires a result")
 
 
 def _no_duplicates(pairs):
@@ -196,6 +289,12 @@ def _no_duplicates(pairs):
 def _nonfinite(value):
     raise StateError(f"non-finite JSON value: {value}")
 
+def _finite_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise StateError(f"non-finite JSON value: {value}")
+    return parsed
+
 
 def read_update(path: Path) -> dict:
     try:
@@ -207,7 +306,7 @@ def read_update(path: Path) -> dict:
         raise StateError(f"update must fit {UPDATE_LIMIT} UTF-8 bytes (got {len(raw)})")
     try:
         update = json.loads(raw.decode("utf-8"), object_pairs_hook=_no_duplicates,
-                            parse_constant=_nonfinite)
+                            parse_constant=_nonfinite, parse_float=_finite_float)
     except (UnicodeDecodeError, json.JSONDecodeError, StateError) as error:
         raise StateError(f"invalid update JSON: {error}") from error
     if not isinstance(update, dict):
@@ -281,8 +380,8 @@ def inspect_evidence(entry: dict, project: Path, current_hash: str) -> dict:
 
 def _validate_update(update: dict, attempt_id: str, base_revision: int) -> None:
     _require_keys(update, {"schema_version", "attempt_id", "base_revision", "did", "ops"}, "update")
-    if update["schema_version"] != 1:
-        raise StateError("update.schema_version must be 1")
+    if not _is_int(update["schema_version"]) or update["schema_version"] != 1:
+        raise StateError("update.schema_version must be integer 1")
     _require_id(update["attempt_id"], "update.attempt_id")
     if update["attempt_id"] != attempt_id:
         raise StateError("update.attempt_id does not match reserved attempt")
@@ -354,8 +453,24 @@ def _latest_review(state: dict, reserve: bool):
 
 def _with_packet_reservations(packet: dict) -> dict:
     reserved = copy.deepcopy(packet)
-    reserved["latest_checkpoint"] = _packet_excerpt(None, "checkpoint:reserved", True)
-    reserved["latest_review"] = _packet_excerpt(None, "review:reserved", True)
+    checkpoint = reserved["latest_checkpoint"]
+    if checkpoint is None:
+        reserved["latest_checkpoint"] = _packet_excerpt(None, "checkpoint:reserved", True)
+    else:
+        checkpoint["verdict"] = _packet_excerpt(
+            None, f"checkpoint:{checkpoint.get('turn', 'latest')}", True)
+    review = reserved["latest_review"]
+    if review is None:
+        reserved["latest_review"] = _packet_excerpt(None, "review:reserved", True)
+    else:
+        for field in ("evidence", "result", "output", "verdict"):
+            if field in review and isinstance(review[field], dict):
+                review[field] = _packet_excerpt(
+                    None, f"review:{review.get('turn', 'latest')}", True)
+                break
+        else:
+            review["verdict"] = _packet_excerpt(
+                None, f"review:{review.get('turn', 'latest')}", True)
     for entry in reserved["task"]["entries"]:
         entry["freshness"] = "unverified"
     for entry in reserved["snapshot"]["evidence"]:
@@ -425,7 +540,11 @@ def build_packet(goal_state: dict, *, attempt_id: str, base_revision: int,
         "latest_review": _latest_review(goal_state, reserve_verdicts),
         "audit_path": goal_state.get("audit_path"),
     }
-    measured = len(canonical_bytes(_with_packet_reservations(packet) if reserve_verdicts else packet))
-    if measured > PACKET_LIMIT:
-        raise StateError(f"packet must fit {PACKET_LIMIT} UTF-8 bytes (got {measured})")
+    actual_size = len(canonical_bytes(packet))
+    if actual_size > PACKET_LIMIT:
+        raise StateError(f"packet must fit {PACKET_LIMIT} UTF-8 bytes (got {actual_size})")
+    if reserve_verdicts:
+        reserved_size = len(canonical_bytes(_with_packet_reservations(packet)))
+        if reserved_size > PACKET_LIMIT:
+            raise StateError(f"packet must fit {PACKET_LIMIT} UTF-8 bytes (got {reserved_size})")
     return packet

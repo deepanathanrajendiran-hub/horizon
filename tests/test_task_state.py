@@ -269,3 +269,74 @@ def test_rejected_later_operation_does_not_mutate_accepted_task(tmp_path):
         state.merge_update(task, update, attempt_id="r1", base_revision=3,
                            project=tmp_path, provenance=_provenance())
     assert state.canonical_bytes(task) == before
+
+def _attempt(status="reserved", **changes):
+    result = {"id": "a1", "turn": 1, "base_revision": 0, "status": status,
+              "packet": {"path": "attempts/a1.json", "sha256": "a" * 64},
+              "procedure_sha256": "b" * 64, "worker": None, "gate_process": None,
+              "finish_nonce": None, "update_sha256": None, "pending": None,
+              "events": [], "result": None}
+    result.update(changes)
+    return result
+
+
+def test_execution_rejects_boolean_schema_version_and_invalid_attempt_lifecycle():
+    state = _state_module()
+    execution = state.new_execution()
+    execution["schema_version"] = True
+    with pytest.raises(state.StateError, match="schema_version"):
+        state.validate_execution(execution)
+    execution = state.new_execution()
+    execution["attempts"] = [_attempt(status="reserved")]
+    execution["active_attempt"] = None
+    with pytest.raises(state.StateError, match="active_attempt"):
+        state.validate_execution(execution)
+    execution["active_attempt"] = "a1"
+    state.validate_execution(execution)
+    execution["attempts"].append(_attempt(id="a2", status="attached",
+                                           worker={"runtime": "codex", "handle": "h"}))
+    with pytest.raises(state.StateError, match="nonterminal"):
+        state.validate_execution(execution)
+    execution = state.new_execution()
+    execution["attempts"] = [{"id": "a1"}]
+    with pytest.raises(state.StateError, match="attempt"):
+        state.validate_execution(execution)
+
+
+def test_update_rejects_boolean_schema_version_and_overflow_float(tmp_path):
+    state = _state_module()
+    update = {"schema_version": True, "attempt_id": "r1", "base_revision": 3,
+              "did": "x", "ops": []}
+    with pytest.raises(state.StateError, match="schema_version"):
+        state.merge_update(_task(), update, attempt_id="r1", base_revision=3,
+                           project=tmp_path, provenance=_provenance())
+    overflow = tmp_path / "overflow.json"
+    overflow.write_text('{"value":1e999}')
+    with pytest.raises(state.StateError, match="non-finite"):
+        state.read_update(overflow)
+
+
+def test_set_and_upsert_use_separate_operation_namespaces(tmp_path):
+    state = _state_module()
+    update = {"schema_version": 1, "attempt_id": "r1", "base_revision": 3,
+              "did": "x", "ops": [
+                  {"op": "set", "field": "summary", "value": "Revised"},
+                  {"op": "upsert", "entry": {"id": "summary", "kind": "question",
+                      "statement": "An entry may share a field name", "evidence": []}},
+              ]}
+    candidate, audit = state.merge_update(_task(), update, attempt_id="r1", base_revision=3,
+                                          project=tmp_path, provenance=_provenance())
+    assert candidate["summary"] == "Revised"
+    assert candidate["entries"][0]["id"] == "summary"
+    assert [item["id"] for item in audit] == ["summary", "summary"]
+
+
+def test_reserved_packet_counts_returned_checkpoint_and_review_metadata():
+    state = _state_module()
+    goal_state = _goal_state(_task())
+    goal_state["checkpoints"] = [{"turn": 1, "tree_hash": "a" * 64, "gate": "pass",
+                                  "gate_output": "ok", "metadata": "x" * 23000}]
+    goal_state["reviews"] = [{"turn": 1, "result": "pass", "metadata": "y" * 1000}]
+    with pytest.raises(state.StateError, match=r"packet.*24576"):
+        state.build_packet(goal_state, attempt_id="a1", base_revision=2,
+                           current_hash="a" * 64, runtime="codex", reserve_verdicts=True)
