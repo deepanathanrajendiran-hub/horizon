@@ -371,3 +371,49 @@ def test_a_coverage_gate_carries_the_hash_it_was_evaluated_against(tmp_path):
         gate.run_gate_at(state)
 
     assert excinfo.value.tree_hash == tree_hash.compute(repo, [str(repo)])
+
+def test_spawn_callback_failure_reaps_its_owned_child(tmp_path):
+    state = {"cwd": str(tmp_path), "gate": {"kind": "command", "value": "sleep 30"},
+             "watch_paths": [str(tmp_path)], "checkpoints": []}
+    spawned = []
+    def reject(proc):
+        spawned.append(proc)
+        raise RuntimeError("metadata unavailable")
+    with pytest.raises(gate.GateUnrunnable, match="Could not record"):
+        gate.run_gate(state, on_spawn=reject)
+    assert len(spawned) == 1
+    assert spawned[0].poll() is not None
+
+def test_unrunnable_gate_carries_pre_gate_hash(tmp_path):
+    (tmp_path / "source.txt").write_text("before")
+    state = {"cwd": str(tmp_path), "gate": {"kind": "command", "value": "missing_horizon_command"},
+             "watch_paths": [str(tmp_path)], "checkpoints": []}
+    expected = tree_hash.compute(str(tmp_path), [str(tmp_path)])
+    with pytest.raises(gate.GateUnrunnable) as raised:
+        gate.run_gate_at(state)
+    assert raised.value.tree_hash == expected
+
+def test_callback_failure_signals_owned_group_after_shell_exits(tmp_path, monkeypatch):
+    import os
+    import time
+
+    state = {"cwd": str(tmp_path), "gate": {"kind": "command", "value": "true"},
+             "watch_paths": [str(tmp_path)], "checkpoints": []}
+    owned = []
+    signaled = []
+    original = os.killpg
+    def record_signal(pgid, sig):
+        signaled.append(pgid)
+        try:
+            return original(pgid, sig)
+        except (ProcessLookupError, PermissionError):
+            return None
+    monkeypatch.setattr(os, "killpg", record_signal)
+    def reject(proc):
+        owned.append(proc)
+        time.sleep(0.05)  # The shell exits, but this invocation has not reaped it.
+        assert proc.returncode is None
+        raise RuntimeError("metadata unavailable")
+    with pytest.raises(gate.GateUnrunnable, match="Could not record"):
+        gate.run_gate(state, on_spawn=reject)
+    assert signaled == [owned[0].pid]

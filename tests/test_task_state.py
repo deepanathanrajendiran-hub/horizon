@@ -331,15 +331,22 @@ def test_set_and_upsert_use_separate_operation_namespaces(tmp_path):
     assert [item["id"] for item in audit] == ["summary", "summary"]
 
 
-def test_reserved_packet_counts_returned_checkpoint_and_review_metadata():
+def test_packet_bounds_verdict_metadata_and_points_to_durable_records():
     state = _state_module()
     goal_state = _goal_state(_task())
     goal_state["checkpoints"] = [{"turn": 1, "tree_hash": "a" * 64, "gate": "pass",
-                                  "gate_output": "ok", "metadata": "x" * 23000}]
-    goal_state["reviews"] = [{"turn": 1, "result": "pass", "metadata": "y" * 1000}]
-    with pytest.raises(state.StateError, match=r"packet.*24576"):
-        state.build_packet(goal_state, attempt_id="a1", base_revision=2,
-                           current_hash="a" * 64, runtime="codex", reserve_verdicts=True)
+                                  "gate_output": "ok" * 3000, "metadata": "x" * 23000}]
+    goal_state["reviews"] = [{"turn": 1, "tree_hash": "a" * 64,
+                              "result": "pass", "evidence": "y" * 4000,
+                              "metadata": "y" * 1000}]
+    packet = state.build_packet(goal_state, attempt_id="a1", base_revision=2,
+                                current_hash="a" * 64, runtime="codex",
+                                reserve_verdicts=True)
+    assert "metadata" not in packet["latest_checkpoint"]
+    assert packet["latest_checkpoint"]["verdict"]["truncated"]
+    assert packet["latest_checkpoint"]["verdict"]["record"] == "checkpoint:1"
+    assert packet["latest_review"]["verdict"]["record"] == "review:1"
+    assert len(state.canonical_bytes(packet)) <= state.PACKET_LIMIT
 
 def test_execution_rejects_nonstring_status_and_worker_runtime_as_state_errors():
     state = _state_module()
@@ -351,3 +358,90 @@ def test_execution_rejects_nonstring_status_and_worker_runtime_as_state_errors()
     execution["attempts"] = [_attempt(status="attached", worker={"runtime": ["codex"], "handle": "h"})]
     with pytest.raises(state.StateError, match="runtime"):
         state.validate_execution(execution)
+
+def test_reserved_packet_covers_future_checkpoint_and_review():
+    state = _state_module()
+    goal_state = _goal_state(_task())
+    goal_state["gate"]["review_criterion"] = "Independent review"
+    before = state.build_packet(goal_state, attempt_id="a1", base_revision=2,
+                                current_hash="a" * 64, runtime="codex",
+                                reserve_verdicts=True)
+    reservation = state._with_packet_reservations(before)
+    goal_state["checkpoints"] = [{
+        "turn": 1, "at": "2026-09-19T00:00:00Z", "did": "x" * 1024,
+        "next": "x" * 1024, "tree_hash": "a" * 64, "gate": "pass",
+        "gate_output": "x" * 4000, "gate_spec": dict(goal_state["gate"]),
+    }]
+    goal_state["reviews"] = [{
+        "turn": 1, "tree_hash": "a" * 64, "at": "2026-09-19T00:00:00Z",
+        "judge": "reviewer", "criterion": "Independent review", "result": "pass",
+        "evidence": "x" * 4000,
+    }]
+    after = state.build_packet(goal_state, attempt_id="a1", base_revision=2,
+                               current_hash="a" * 64, runtime="codex")
+    assert len(state.canonical_bytes(after)) <= len(state.canonical_bytes(reservation))
+    assert after["latest_checkpoint"]["verdict"]["truncated"]
+    assert after["latest_review"]["verdict"]["truncated"]
+
+
+def test_reserved_packet_covers_future_missing_evidence_reasons(tmp_path):
+    state = _state_module()
+    evidence = tmp_path / "evidence.txt"
+    evidence.write_text("present")
+    digest = hashlib.sha256(evidence.read_bytes()).hexdigest()
+    entry = {"id": "q", "kind": "question", "statement": "Question",
+             "evidence": [{"path": "evidence.txt", "sha256": digest}],
+             "provenance": _provenance()}
+    goal_state = _goal_state(_task([entry]))
+    goal_state["cwd"] = str(tmp_path)
+    before = state.build_packet(goal_state, attempt_id="a1", base_revision=2,
+                                current_hash="a" * 64, runtime="codex",
+                                reserve_verdicts=True)
+    reservation = state._with_packet_reservations(before)
+    evidence.unlink()
+    after = state.build_packet(goal_state, attempt_id="a1", base_revision=2,
+                               current_hash="a" * 64, runtime="codex")
+    assert after["task"]["entries"][0]["freshness"] == "unverified"
+    assert after["task"]["entries"][0]["freshness_reasons"]
+    assert len(state.canonical_bytes(after["task"])) + len(state.canonical_bytes(after["snapshot"])) <= len(state.canonical_bytes(reservation["task"])) + len(state.canonical_bytes(reservation["snapshot"]))
+
+def test_freshness_reservation_covers_longer_untruncated_boolean(monkeypatch):
+    state = _state_module()
+    entry = {"id": "q", "kind": "question", "statement": "Question",
+             "evidence": [], "provenance": _provenance()}
+    goal_state = _goal_state(_task([entry]))
+    before = state.build_packet(goal_state, attempt_id="a1", base_revision=2,
+                                current_hash="a" * 64, runtime="codex",
+                                reserve_verdicts=True)
+    reservation = state._with_packet_reservations(before)
+    monkeypatch.setattr(state, "inspect_evidence",
+                        lambda item, project, digest: {
+                            "id": item["id"], "freshness": "unverified",
+                            "reasons": ["x" * 252]})
+    after = state.build_packet(goal_state, attempt_id="a1", base_revision=2,
+                               current_hash="a" * 64, runtime="codex")
+    assert after["task"]["entries"][0]["freshness_reasons_truncated"] is False
+    actual = len(state.canonical_bytes(after["task"])) + len(state.canonical_bytes(after["snapshot"]))
+    reserved = len(state.canonical_bytes(reservation["task"])) + len(state.canonical_bytes(reservation["snapshot"]))
+    assert actual <= reserved
+
+def test_truncated_freshness_reasons_point_to_durable_entry(monkeypatch):
+    state = _state_module()
+    entry = {"id": "q", "kind": "question", "statement": "Question",
+             "evidence": [], "provenance": _provenance()}
+    goal_state = _goal_state(_task([entry]))
+    goal_state["audit_path"] = ".codex/horizon/goals/parser.json"
+    monkeypatch.setattr(state, "inspect_evidence",
+                        lambda item, project, digest: {
+                            "id": item["id"], "freshness": "unverified",
+                            "reasons": ["x" * 1000]})
+    packet = state.build_packet(goal_state, attempt_id="a1", base_revision=2,
+                                current_hash="a" * 64, runtime="codex",
+                                reserve_verdicts=True)
+    task_entry = packet["task"]["entries"][0]
+    annotation = packet["snapshot"]["evidence"][0]
+    assert task_entry["freshness_reasons_truncated"] is True
+    assert annotation["reasons_truncated"] is True
+    assert task_entry["freshness_reasons_record"] == "execution.task.entries[q]"
+    assert annotation["reasons_record"] == "execution.task.entries[q]"
+    assert packet["audit_path"] == goal_state["audit_path"]

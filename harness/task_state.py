@@ -131,7 +131,7 @@ def validate_entry(entry: dict, *, accepted: bool) -> None:
         fields.add("provenance")
     _require_keys(entry, fields, "entry")
     _require_id(entry["id"], "entry.id")
-    if entry["kind"] not in _KINDS:
+    if not isinstance(entry["kind"], str) or entry["kind"] not in _KINDS:
         raise StateError("entry.kind must be observation, question, hypothesis, or failed_approach")
     _require_text(entry["statement"], "entry.statement", TEXT_LIMIT, nonempty=True)
     evidence = entry["evidence"]
@@ -399,7 +399,7 @@ def _validate_operation(operation: dict) -> None:
         raise StateError("update operation must be an object with op")
     if operation["op"] == "set":
         _require_keys(operation, {"op", "field", "value"}, "set operation")
-        if operation["field"] not in {"summary", "next_action"}:
+        if not isinstance(operation["field"], str) or operation["field"] not in {"summary", "next_action"}:
             raise StateError("set operation field must be summary or next_action")
         limit = SUMMARY_LIMIT if operation["field"] == "summary" else TEXT_LIMIT
         _require_text(operation["value"], f"task.{operation['field']}", limit,
@@ -430,51 +430,70 @@ def _packet_excerpt(value, record: str, reserve: bool) -> dict:
     return {"text": text[:low], "truncated": low < len(text), "record": record}
 
 
+def _packet_reasons(reasons: list[str], *, reserve: bool = False) -> tuple[list[str], bool]:
+    """Bound diagnostic reasons while leaving durable evidence in the audit file."""
+    if not reasons and not reserve:
+        return [], False
+    source = "\\x00" * 256 if reserve else "; ".join(reasons)
+    low, high = 0, len(source)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if len(canonical_bytes([source[:middle]])) <= 256:
+            low = middle
+        else:
+            high = middle - 1
+    return [source[:low]], low < len(source)
+
 def _latest_checkpoint(state: dict, reserve: bool):
     checkpoints = state.get("checkpoints", [])
     if not checkpoints:
         return None
-    checkpoint = copy.deepcopy(checkpoints[-1])
-    output = checkpoint.pop("gate_output", None)
-    checkpoint["verdict"] = _packet_excerpt(output, f"checkpoint:{checkpoint.get('turn', 'latest')}", reserve)
-    return checkpoint
+    checkpoint = checkpoints[-1]
+    return {
+        "turn": checkpoint["turn"],
+        "tree_hash": checkpoint["tree_hash"],
+        "gate": checkpoint["gate"],
+        "verdict": _packet_excerpt(
+            checkpoint.get("gate_output"), f"checkpoint:{checkpoint['turn']}", reserve),
+    }
 
 
 def _latest_review(state: dict, reserve: bool):
     reviews = state.get("reviews", [])
     if not reviews:
         return None
-    review = copy.deepcopy(reviews[-1])
-    for key in ("evidence", "result", "output", "verdict"):
-        if key in review and isinstance(review[key], str):
-            review[key] = _packet_excerpt(review[key], f"review:{review.get('turn', 'latest')}", reserve)
-            break
-    return review
+    review = reviews[-1]
+    return {
+        "turn": review["turn"],
+        "tree_hash": review["tree_hash"],
+        "result": review["result"],
+        "verdict": _packet_excerpt(
+            review.get("evidence", review.get("output", review.get("verdict"))),
+            f"review:{review['turn']}", reserve),
+    }
 
 def _with_packet_reservations(packet: dict) -> dict:
     reserved = copy.deepcopy(packet)
-    checkpoint = reserved["latest_checkpoint"]
-    if checkpoint is None:
-        reserved["latest_checkpoint"] = _packet_excerpt(None, "checkpoint:reserved", True)
-    else:
-        checkpoint["verdict"] = _packet_excerpt(
-            None, f"checkpoint:{checkpoint.get('turn', 'latest')}", True)
-    review = reserved["latest_review"]
-    if review is None:
-        reserved["latest_review"] = _packet_excerpt(None, "review:reserved", True)
-    else:
-        for field in ("evidence", "result", "output", "verdict"):
-            if field in review and isinstance(review[field], dict):
-                review[field] = _packet_excerpt(
-                    None, f"review:{review.get('turn', 'latest')}", True)
-                break
-        else:
-            review["verdict"] = _packet_excerpt(
-                None, f"review:{review.get('turn', 'latest')}", True)
+    maximum_turn = 10**20 - 1
+    reserved["snapshot"]["tree_hash"] = "f" * 64
+    reserved["latest_checkpoint"] = {
+        "turn": maximum_turn, "tree_hash": "f" * 64, "gate": "skipped",
+        "verdict": _packet_excerpt(None, f"checkpoint:{maximum_turn}", True),
+    }
+    reserved["latest_review"] = {
+        "turn": maximum_turn, "tree_hash": "f" * 64, "result": "pass",
+        "verdict": _packet_excerpt(None, f"review:{maximum_turn}", True),
+    }
+    reserved["latest_checkpoint"]["verdict"]["truncated"] = False
+    reserved["latest_review"]["verdict"]["truncated"] = False
     for entry in reserved["task"]["entries"]:
         entry["freshness"] = "unverified"
+        entry["freshness_reasons"], _ = _packet_reasons([], reserve=True)
+        entry["freshness_reasons_truncated"] = False
     for entry in reserved["snapshot"]["evidence"]:
         entry["freshness"] = "unverified"
+        entry["reasons"], _ = _packet_reasons([], reserve=True)
+        entry["reasons_truncated"] = False
     return reserved
 
 
@@ -522,8 +541,15 @@ def build_packet(goal_state: dict, *, attempt_id: str, base_revision: int,
                    for entry in execution["task"]["entries"]]
     packet_task = copy.deepcopy(execution["task"])
     for entry, annotation in zip(packet_task["entries"], annotations):
+        reasons, truncated = _packet_reasons(annotation["reasons"])
+        annotation["reasons"] = reasons
+        annotation["reasons_truncated"] = truncated
         entry["freshness"] = annotation["freshness"]
-        entry["freshness_reasons"] = annotation["reasons"]
+        entry["freshness_reasons"] = reasons
+        entry["freshness_reasons_truncated"] = truncated
+        record = f"execution.task.entries[{entry['id']}]"
+        entry["freshness_reasons_record"] = record
+        annotation["reasons_record"] = record
     packet = {
         "schema_version": 1,
         "attempt_id": attempt_id,
@@ -536,8 +562,8 @@ def build_packet(goal_state: dict, *, attempt_id: str, base_revision: int,
         "procedure": procedure(runtime),
         "task": packet_task,
         "snapshot": {"tree_hash": current_hash, "evidence": annotations},
-        "latest_checkpoint": _latest_checkpoint(goal_state, reserve_verdicts),
-        "latest_review": _latest_review(goal_state, reserve_verdicts),
+        "latest_checkpoint": _latest_checkpoint(goal_state, False),
+        "latest_review": _latest_review(goal_state, False),
         "audit_path": goal_state.get("audit_path"),
     }
     actual_size = len(canonical_bytes(packet))

@@ -12,6 +12,9 @@ import goal
 import paths
 import task_state
 import tree_hash
+import copy
+import secrets
+import gate
 
 
 
@@ -262,3 +265,168 @@ def attach(slug: str, attempt_id: str, worker: str, *, expected_revision: int) -
         attempt["status"] = "attached"
         state = goal.commit_revision(state, expected_revision=expected_revision)
     return report(state, attempt)
+
+def finish(slug: str, attempt_id: str, *, expected_revision: int,
+           update_file: Path, worker_evidence_file: Path,
+           timeout: int = gate.DEFAULT_TIMEOUT, force: bool = False) -> dict:
+    _require_slug(slug)
+    _require_id(attempt_id, "attempt_id")
+    if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 0:
+        raise StepError("expected_revision must be a nonnegative integer")
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
+        raise StepError("timeout must be a positive integer")
+    if not isinstance(force, bool):
+        raise StepError("force must be boolean")
+    runner = goal._path(slug).with_name(f"{slug}.{attempt_id}.runner")
+    try:
+        with filelock.goal_locked(runner, timeout=0):
+            state = _state(slug)
+            attempt = _attempt(state, attempt_id)
+            if attempt is None:
+                raise StepConflict(f"unknown attempt: {attempt_id}")
+            update = task_state.read_update(Path(update_file))
+            update_bytes = task_state.canonical_bytes(update)
+            update_sha = hashlib.sha256(update_bytes).hexdigest()
+            if attempt["status"] in {"accepted", "recovered"}:
+                if attempt["update_sha256"] != update_sha:
+                    raise StepConflict("terminal replay update differs from accepted update")
+                return report(state, attempt, replayed=True)
+            if attempt["status"] != "attached" or state["execution"]["active_attempt"] != attempt_id:
+                raise StepConflict("attempt is not attached for finishing")
+            if state["execution"]["revision"] != expected_revision:
+                raise goal.RevisionConflict("Execution revision changed before finishing")
+            _saved_packet(state, attempt)
+            if task_state.procedure(paths.runtime())["sha256"] != attempt["procedure_sha256"]:
+                raise StepConflict("Horizon procedure changed since reservation")
+            try:
+                evidence_bytes = Path(worker_evidence_file).read_bytes()
+            except OSError as error:
+                raise StepError(f"cannot read worker terminal evidence: {error}") from error
+            if not evidence_bytes.strip():
+                raise StepError("worker terminal evidence must be nonempty")
+            try:
+                evidence_bytes.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise StepError("worker terminal evidence must be UTF-8") from error
+            project = Path(state["cwd"])
+            try:
+                current_hash = tree_hash.compute(state["cwd"], state["watch_paths"])
+            except Exception:
+                current_hash = gate.UNKNOWN_HASH
+            candidate, audit = task_state.merge_update(
+                state["execution"]["task"], update, attempt_id=attempt_id,
+                base_revision=attempt["base_revision"], project=project,
+                provenance={"attempt_id": attempt_id, "tree_hash": current_hash, "at": goal._now()},
+            )
+            candidate_state = copy.deepcopy(state)
+            candidate_state["execution"]["task"] = candidate
+            candidate_state["checkpoints"].append({
+                "turn": attempt["turn"], "at": goal._now(), "did": update["did"],
+                "next": candidate["next_action"], "tree_hash": current_hash,
+                "gate": "fail", "gate_output": "", "gate_spec": dict(state["gate"]),
+            })
+            candidate_state["audit_path"] = str(goal._path(slug).relative_to(paths.project_root()))
+            task_state.build_packet(
+                candidate_state, attempt_id=attempt_id,
+                base_revision=expected_revision + 2, current_hash=current_hash,
+                runtime=paths.runtime(), reserve_verdicts=True,
+            )
+            update_ref = store_blob(slug, "update", update_bytes)
+            candidate_ref = store_blob(slug, "candidate", task_state.canonical_bytes(candidate))
+            audit_ref = store_blob(slug, "audit", task_state.canonical_bytes(audit))
+            evidence_ref = store_blob(slug, "worker_evidence", evidence_bytes)
+            nonce = secrets.token_hex(16)
+            with filelock.goal_locked(goal._path(slug)):
+                state = _state(slug)
+                attempt = _attempt(state, attempt_id)
+                if (attempt is None or attempt["status"] != "attached"
+                        or state["execution"]["active_attempt"] != attempt_id):
+                    raise StepConflict("attempt changed during finish preflight")
+                if state["execution"]["revision"] != expected_revision:
+                    raise goal.RevisionConflict("Execution revision changed during finish preflight")
+                _saved_packet(state, attempt)
+                attempt["status"] = "finishing"
+                attempt["finish_nonce"] = nonce
+                attempt["update_sha256"] = update_sha
+                attempt["pending"] = {
+                    "update": update_ref, "candidate": candidate_ref,
+                    "audit": audit_ref, "worker_evidence": evidence_ref,
+                }
+                state = goal.commit_revision(state, expected_revision=expected_revision)
+                finishing_revision = state["execution"]["revision"]
+
+            def record_spawn(proc):
+                nonlocal finishing_revision
+                with filelock.goal_locked(goal._path(slug)):
+                    current = _state(slug)
+                    running = _attempt(current, attempt_id)
+                    if (running is None or running["status"] != "finishing"
+                            or running["finish_nonce"] != nonce
+                            or current["execution"]["revision"] != finishing_revision):
+                        raise StepConflict("finish ownership changed before gate spawn")
+                    running["gate_process"] = {
+                        "pid": proc.pid, "pgid": proc.pid,
+                        "started_at": goal._now(), "finish_nonce": nonce,
+                    }
+                    current = goal.commit_revision(current, expected_revision=finishing_revision)
+                    finishing_revision = current["execution"]["revision"]
+
+            gate_state = copy.deepcopy(state)
+            if force:
+                gate_state["checkpoints"] = []
+            try:
+                result, output, digest = gate.run_gate_at(
+                    gate_state, timeout=timeout, on_spawn=record_spawn)
+                exit_code = 0 if result == "pass" else 1
+                error_message = None
+            except gate.CoverageGate as error:
+                result, output = "fail", "awaiting independent coverage review"
+                digest = getattr(error, "tree_hash", gate.UNKNOWN_HASH)
+                exit_code, error_message = 1, None
+            except gate.GateUnrunnable as error:
+                result, output = "fail", str(error)
+                digest = getattr(error, "tree_hash", gate.UNKNOWN_HASH)
+                exit_code, error_message = 2, str(error)
+
+            if digest == gate.UNKNOWN_HASH:
+                result, exit_code = "fail", 2
+                error_message = "Could not fingerprint the watched project snapshot"
+                if not output:
+                    output = error_message
+
+            with filelock.goal_locked(goal._path(slug)):
+                state = _state(slug)
+                attempt = _attempt(state, attempt_id)
+                if (attempt is None or attempt["status"] != "finishing"
+                        or attempt["finish_nonce"] != nonce
+                        or state["execution"]["revision"] != finishing_revision):
+                    raise StepConflict("finish ownership changed before terminal commit")
+                checkpoint = {
+                    "turn": attempt["turn"], "at": goal._now(), "did": update["did"],
+                    "next": candidate["next_action"], "tree_hash": digest,
+                    "gate": result, "gate_output": goal._bounded(output),
+                    "gate_spec": dict(state["gate"]),
+                }
+                state["checkpoints"].append(checkpoint)
+                state["execution"]["task"] = candidate
+                state["execution"]["active_attempt"] = None
+                attempt["status"] = "accepted"
+                attempt["events"].append({
+                    "type": "accepted_update", "at": goal._now(),
+                    "changes": audit, "update": update_ref,
+                })
+                review_required = state["gate"]["kind"] == "coverage" or bool(
+                    state["gate"].get("review_criterion"))
+                attempt["result"] = {
+                    "exit_code": exit_code, "checkpoint": checkpoint,
+                    "update_accepted": True, "attempt_closed": True,
+                    "review_required": review_required,
+                }
+                if error_message is not None:
+                    attempt["result"]["error"] = error_message
+                state = goal.commit_revision(state, expected_revision=finishing_revision)
+            return report(state, attempt)
+    except filelock.LockTimeout as error:
+        raise StepBusy("another finish invocation owns this attempt") from error
+    except task_state.StateError as error:
+        raise StepError(f"invalid worker update or candidate: {error}") from error

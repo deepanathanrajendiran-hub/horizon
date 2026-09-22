@@ -9,6 +9,7 @@ import signal
 import subprocess
 
 import tree_hash
+from typing import Callable
 
 MAX_OUTPUT = 4000
 # Below the Bash tool's 600s ceiling that hosts these calls. At 900 the
@@ -85,8 +86,20 @@ def last_hash(state: dict) -> str | None:
 # on the process it kills — is now the only thing here that signals anyone.
 
 
+def _stop_owned_process(proc: subprocess.Popen) -> None:
+    # Only an unreaped process handle pins this PID to the child we started.
+    if proc.returncode is None:
+        try:
+            # The child leads its new session; its PID is the owned group.
+            # Signal before wait/poll so an exited shell cannot hide descendants.
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    proc.wait()
+
 def run_gate(state: dict, timeout: int = DEFAULT_TIMEOUT,
-             current_hash: str | None = None) -> tuple[str, str]:
+             current_hash: str | None = None, *,
+             on_spawn: Callable[[subprocess.Popen], None] | None = None) -> tuple[str, str]:
     """Run the goal's gate. Returns (result, output).
 
     result is "pass", "fail", or "skipped". Skipping happens only when the
@@ -143,17 +156,17 @@ def run_gate(state: dict, timeout: int = DEFAULT_TIMEOUT,
     except OSError as e:
         raise GateUnrunnable(f"gate could not execute: {command}: {e}") from e
 
+    if on_spawn is not None:
+        try:
+            on_spawn(proc)
+        except Exception as exc:
+            _stop_owned_process(proc)
+            raise GateUnrunnable(f"Could not record the running gate: {exc}") from exc
+
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as e:
-        try:
-            # Safe to signal by group here, unlike the removed reaper: this
-            # pgid comes from a live Popen handle we own, not from a file
-            # written by some earlier process.
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass  # already dead
-        proc.wait()  # reap; avoid leaving a zombie behind
+        _stop_owned_process(proc)
         raise GateUnrunnable(f"gate timed out after {timeout}s: {command}") from e
 
     if proc.returncode in (SHELL_NOT_FOUND, SHELL_NOT_EXECUTABLE):
@@ -169,7 +182,8 @@ def run_gate(state: dict, timeout: int = DEFAULT_TIMEOUT,
     return ("pass" if proc.returncode == 0 else "fail"), output
 
 
-def run_gate_at(state: dict, timeout: int = DEFAULT_TIMEOUT) -> tuple[str, str, str]:
+def run_gate_at(state: dict, timeout: int = DEFAULT_TIMEOUT, *,
+                on_spawn: Callable[[subprocess.Popen], None] | None = None) -> tuple[str, str, str]:
     """`run_gate`, plus the tree hash the gate was actually evaluated against.
 
     A checkpoint must record the state the gate *judged*, not the state left
@@ -195,7 +209,10 @@ def run_gate_at(state: dict, timeout: int = DEFAULT_TIMEOUT) -> tuple[str, str, 
     # the same tree twice per turn, and on this repo the second walk was
     # pure waste.
     try:
-        result, output = run_gate(state, timeout=timeout, current_hash=evaluated)
+        result, output = run_gate(state, timeout=timeout, current_hash=evaluated, on_spawn=on_spawn)
+    except GateUnrunnable as e:
+        e.tree_hash = evaluated
+        raise
     except CoverageGate as e:
         # The hash is the one thing this call produced that the caller
         # cannot get back any other way. Attach it rather than losing it
