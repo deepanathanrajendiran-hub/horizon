@@ -32,9 +32,13 @@ def _require_id(value: str, field: str) -> None:
     if not isinstance(value, str) or not task_state._ID_RE.fullmatch(value):
         raise StepError(f"{field} must match [A-Za-z0-9][A-Za-z0-9_-]{{0,63}}")
 
+def _require_slug(slug: str) -> None:
+    if not isinstance(slug, str) or not re.fullmatch(r"[\w-]+", slug, re.UNICODE):
+        raise StepError("slug must be a single goal name component")
+
 
 def _state(slug: str) -> dict:
-    _require_id(slug, "slug")
+    _require_slug(slug)
     state = goal.load(slug)
     if goal.execution_mode(state) != "state":
         raise StepError("step commands require a state-mode goal")
@@ -57,7 +61,7 @@ def _admit(state: dict) -> None:
 
 def store_blob(slug: str, kind: str, payload: bytes) -> dict:
     """Save immutable bytes by SHA-256 under the project-local goal objects."""
-    _require_id(slug, "slug")
+    _require_slug(slug)
     if not isinstance(kind, str) or not kind:
         raise StepError("blob kind must be nonempty text")
     if not isinstance(payload, bytes):
@@ -227,6 +231,7 @@ def begin(slug: str, request_id: str) -> dict:
 
 def attach(slug: str, attempt_id: str, worker: str, *, expected_revision: int) -> dict:
     """Record the actual native worker handle for a reserved attempt."""
+    _require_slug(slug)
     _require_id(attempt_id, "attempt_id")
     if not isinstance(worker, str) or not worker.strip():
         raise StepError("worker handle must be nonempty text")

@@ -206,3 +206,23 @@ def test_closed_attempt_still_spends_its_turn(make_state_goal):
     with pytest.raises(goal.BudgetExhausted):
         steps.begin(state["slug"], "r2")
     assert goal.load(state["slug"])["used"]["turns"] == 1
+
+def test_attach_rejects_path_like_slug_before_creating_lock_file(make_state_goal):
+    state = make_state_goal()
+    escaped = Path(state["cwd"]) / "escaped"
+    assert not escaped.exists()
+
+    with pytest.raises(steps.StepError):
+        steps.attach("../../../escaped/nested", "r1", "worker-1",
+                     expected_revision=0)
+
+    assert not escaped.exists()
+
+@pytest.mark.parametrize("title", ["修复 解析器", "__parser"])
+def test_created_unicode_and_underscore_slugs_round_trip(make_state_goal, title):
+    state = make_state_goal(goal=title)
+    begun = steps.begin(state["slug"], "r1")
+    attached = steps.attach(state["slug"], "r1", "worker-1",
+                            expected_revision=begun["execution_revision"])
+    assert attached["attempt_status"] == "attached"
+    assert goal.load(state["slug"])["execution"]["attempts"][0]["worker"]["handle"] == "worker-1"
