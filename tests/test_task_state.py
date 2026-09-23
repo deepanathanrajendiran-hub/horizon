@@ -464,3 +464,32 @@ def test_complete_verification_excerpt_exact_boundary(record, status_key, status
     complete = {**envelope, "verdict": excerpt}
     assert len(state.canonical_bytes(complete)) == state.EXCERPT_LIMIT
     assert complete["verdict"]["truncated"] is True
+
+def test_packet_reservation_includes_mandatory_recovery_next_action():
+    state = _state_module()
+    goal_state = _goal_state(_task())
+    goal_state["execution"]["task"]["next_action"] = (
+        "Inspect the project and establish the next useful increment."
+    )
+    before = state.build_packet(
+        goal_state, attempt_id="a1", base_revision=2,
+        current_hash="a" * 64, runtime="codex", reserve_verdicts=True,
+    )
+    reserved_size = len(state.canonical_bytes(state._with_packet_reservations(before)))
+    goal_state["goal"] += "x" * (state.PACKET_LIMIT - reserved_size)
+    exact = state.build_packet(
+        goal_state, attempt_id="a1", base_revision=2,
+        current_hash="a" * 64, runtime="codex", reserve_verdicts=True,
+    )
+    assert len(state.canonical_bytes(state._with_packet_reservations(exact))) == (
+        state.PACKET_LIMIT
+    )
+
+    goal_state["execution"]["task"]["next_action"] = (
+        "Inspect the current workspace and saved evidence before continuing."
+    )
+    recovered = state.build_packet(
+        goal_state, attempt_id="a1", base_revision=3,
+        current_hash="a" * 64, runtime="codex", reserve_verdicts=True,
+    )
+    assert len(state.canonical_bytes(recovered)) <= state.PACKET_LIMIT

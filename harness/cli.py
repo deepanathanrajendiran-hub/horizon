@@ -146,13 +146,15 @@ def apply_proposal(args) -> dict:
 
 def check(args) -> tuple[dict, int]:
     state = goal.load(args.slug)
+    if goal.execution_mode(state) == "state":
+        raise goal.GoalStateError(
+            "state-mode goals use step commands; legacy check is unavailable"
+        )
     if state["status"] != "active":
         raise goal.GoalClosed(f"Goal is already {state['status']}")
     turns = state["budget"].get("max_turns")
     if turns is not None and state["used"]["turns"] >= turns:
         raise goal.BudgetExhausted("Turn budget exhausted; no new increment may start.")
-    # status is the pre-work admission check. An increment already performed
-    # must still checkpoint if its wall-clock deadline passed during the work.
     if args.timeout <= 0:
         raise ValueError("Timeout must be positive")
     evaluated = dict(state, checkpoints=[]) if args.force else state
@@ -160,18 +162,23 @@ def check(args) -> tuple[dict, int]:
     try:
         result, output, digest = gate.run_gate_at(evaluated, timeout=args.timeout)
     except gate.CoverageGate as exc:
-        result, output, digest = "fail", "Awaiting independent coverage review", exc.tree_hash
+        result, output, digest = (
+            "fail", "Awaiting independent coverage review", exc.tree_hash
+        )
     except gate.GateUnrunnable as exc:
         result, output, digest = "fail", str(exc), gate.UNKNOWN_HASH
         error = str(exc)
     if digest == gate.UNKNOWN_HASH and error is None:
         error = "Watched inputs could not be fingerprinted; verification is incomplete."
         result, output = "fail", error + "\n" + output
-    state = goal.checkpoint(args.slug, args.did, args.next_action, digest, result, output)
+    state = goal.checkpoint(
+        args.slug, args.did, args.next_action, digest, result, output
+    )
     report = status(state)
     report["review_required"] = not error and (
-        state["gate"]["kind"] == "coverage" or (
-            result == "pass" and bool(state["gate"].get("review_criterion"))))
+        state["gate"]["kind"] == "coverage"
+        or (result == "pass" and bool(state["gate"].get("review_criterion")))
+    )
     if error:
         report["error"] = error
     return report, (2 if error else 0 if result == "pass" else 1)

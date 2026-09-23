@@ -789,3 +789,194 @@ def test_load_rejects_nonfinite_saved_numbers(isolated_goals, number):
     path.write_text(raw.replace('"turns": 0', f'"turns": {number}', 1))
     with pytest.raises(goal.GoalStateError, match="non-finite"):
         goal.load(state["slug"])
+
+def _make_step_state(isolated_goals, monkeypatch, **overrides):
+    project = isolated_goals.parent / "state-project"
+    project.mkdir(exist_ok=True)
+    directory = project / ".claude" / "harness" / "goals"
+    directory.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(goal.paths, "project_root", lambda: project)
+    monkeypatch.setattr(goal.paths, "goals_dir", lambda: directory)
+    args = {
+        "goal": "Refactor the auth module",
+        "cwd": str(project),
+        "gate_kind": "command",
+        "gate_value": "true",
+        "max_turns": 3,
+        "execution": "state",
+    }
+    args.update(overrides)
+    return goal.create(**args)
+
+def test_state_public_writers_require_recovery_and_revisioned_persistence(
+        isolated_goals, monkeypatch):
+    import steps
+
+    state = _make_step_state(isolated_goals, monkeypatch)
+    begun = steps.begin(state["slug"], "r1")
+    digest = _digest(state)
+    evidence_text = (
+        "Independent fixture review inspected every requested behavior and found it correct."
+    )
+    guarded_calls = [
+        lambda: goal.checkpoint(state["slug"], "did", "next", digest, "pass", "ok"),
+        lambda: goal.record_review(
+            state["slug"], "pass", evidence_text, "judge-fixture", digest
+        ),
+        lambda: goal.complete(state["slug"], ""),
+        lambda: goal.abandon(state["slug"], "Stopping."),
+        lambda: goal.add_subagent(
+            state["slug"], "judge", "judge-fixture", "Inspect the snapshot."
+        ),
+    ]
+    for call in guarded_calls:
+        with pytest.raises(goal.AttemptOpen):
+            call()
+    assert goal.load(state["slug"])["execution"]["revision"] == begun["execution_revision"]
+
+    evidence_file = isolated_goals.parent / "dispatch-evidence.txt"
+    evidence_file.write_text(
+        "Dispatch records confirm no worker was started or bound, and no gate was launched."
+    )
+    recovered = steps.recover(
+        state["slug"], "r1", expected_revision=begun["execution_revision"],
+        reason="Dispatch did not create a worker.", worker_state="not-started",
+        evidence_file=evidence_file,
+    )
+    abandoned = goal.abandon(state["slug"], "Stopping after recovery.")
+    reopened = goal.reopen(state["slug"], "Continue later.")
+    assert abandoned["execution"]["revision"] == recovered["execution_revision"] + 1
+    assert reopened["execution"]["revision"] == abandoned["execution"]["revision"] + 1
+    assert reopened["status"] == "active"
+    subagented = goal.add_subagent(
+        state["slug"], "worker", "worker-fixture", "Inspect the next increment."
+    )
+    assert subagented["execution"]["revision"] == reopened["execution"]["revision"] + 1
+
+
+def test_state_checkpoint_and_cli_check_refuse_even_when_idle(
+        isolated_goals, monkeypatch):
+    import cli
+    from types import SimpleNamespace
+
+    state = _make_step_state(isolated_goals, monkeypatch)
+    with pytest.raises(goal.GoalStateError, match="step"):
+        goal.checkpoint(state["slug"], "did", "next", _digest(state), "pass", "ok")
+
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("state-mode check must refuse before running a gate")
+
+    monkeypatch.setattr(cli.gate, "run_gate_at", must_not_run)
+    args = SimpleNamespace(
+        slug=state["slug"], timeout=30, force=False,
+        did="did", next_action="next",
+    )
+    with pytest.raises(goal.GoalStateError, match="step"):
+        cli.check(args)
+
+
+def test_completion_rejects_goal_mutated_while_snapshot_is_hashed(
+        monkeypatch, tmp_path, isolated_goals):
+    import steps
+
+    state = _make_step_state(isolated_goals, monkeypatch, gate_value="true")
+    begun = steps.begin(state["slug"], "r1")
+    attached = steps.attach(
+        state["slug"], "r1", "worker-fixture",
+        expected_revision=begun["execution_revision"],
+    )
+    update = tmp_path / "update.json"
+    update.write_text(json.dumps({
+        "schema_version": 1,
+        "attempt_id": "r1",
+        "base_revision": begun["packet"]["base_revision"],
+        "did": "Prepared completion.",
+        "ops": [],
+    }))
+    evidence = tmp_path / "terminal.txt"
+    evidence.write_text("The fixture host confirms worker-fixture exited normally.")
+    steps.finish(
+        state["slug"], "r1",
+        expected_revision=attached["execution_revision"],
+        update_file=update, worker_evidence_file=evidence,
+    )
+
+    original_compute = goal.tree_hash.compute
+    mutated = False
+
+    def mutate_during_hash(cwd, watch_paths):
+        nonlocal mutated
+        digest = original_compute(cwd, watch_paths)
+        if not mutated:
+            mutated = True
+            with goal.filelock.goal_locked(goal._path(state["slug"])):
+                current = goal.load(state["slug"])
+                current["execution"]["task"]["summary"] = "Concurrent mutation"
+                goal.commit_revision(
+                    current,
+                    expected_revision=current["execution"]["revision"],
+                )
+        return digest
+
+    monkeypatch.setattr(goal.tree_hash, "compute", mutate_during_hash)
+    with pytest.raises(goal.RevisionConflict, match="changed"):
+        goal.complete(state["slug"], "")
+    assert goal.load(state["slug"])["status"] == "active"
+
+
+def test_state_review_and_completion_use_revisioned_transactions(
+        tmp_path, isolated_goals, monkeypatch):
+    import steps
+
+    state = _make_step_state(
+        isolated_goals, monkeypatch, gate_value="true",
+        review_criterion="Inspect the exact accepted snapshot.",
+    )
+    begun = steps.begin(state["slug"], "r1")
+    attached = steps.attach(
+        state["slug"], "r1", "worker-fixture",
+        expected_revision=begun["execution_revision"],
+    )
+    update = tmp_path / "update.json"
+    update.write_text(json.dumps({
+        "schema_version": 1,
+        "attempt_id": "r1",
+        "base_revision": begun["packet"]["base_revision"],
+        "did": "Prepared reviewed completion.",
+        "ops": [],
+    }))
+    terminal = tmp_path / "terminal.txt"
+    terminal.write_text("The fixture host confirms worker-fixture exited normally.")
+    finished = steps.finish(
+        state["slug"], "r1",
+        expected_revision=attached["execution_revision"],
+        update_file=update, worker_evidence_file=terminal,
+    )
+    checkpoint = finished["checkpoint"]
+    failed = goal.record_review(
+        state["slug"], "fail",
+        "The independent fixture found one unresolved issue in the accepted snapshot.",
+        "judge-fixture", checkpoint["tree_hash"],
+    )
+    with pytest.raises(goal.GateNotPassed):
+        goal.complete(state["slug"], "")
+    passed = goal.record_review(
+        state["slug"], "pass",
+        "The independent fixture rechecked the accepted snapshot and found the issue resolved.",
+        "judge-fixture", checkpoint["tree_hash"],
+    )
+    completed = goal.complete(state["slug"], "")
+    assert failed["execution"]["revision"] == finished["execution_revision"] + 1
+    assert passed["execution"]["revision"] == failed["execution"]["revision"] + 1
+    assert completed["execution"]["revision"] == passed["execution"]["revision"] + 1
+    assert completed["status"] == "complete"
+
+
+def test_commit_revision_wraps_malformed_candidate_execution():
+    state = _make(execution="state")
+    candidate = goal.load(state["slug"])
+    candidate["execution"] = None
+    with goal.filelock.goal_locked(goal._path(state["slug"])):
+        with pytest.raises(goal.GoalStateError, match="invalid execution candidate"):
+            goal.commit_revision(candidate, expected_revision=0)
+    assert goal.load(state["slug"]) == state

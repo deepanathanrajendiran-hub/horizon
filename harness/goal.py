@@ -16,6 +16,7 @@ import paths
 import tree_hash
 import copy
 import task_state
+from typing import Callable
 
 MAX_GATE_OUTPUT = 4000
 SLUG_MAX = 60
@@ -422,6 +423,10 @@ def checkpoint(slug, did, next_action, tree_hash_value,
 def _checkpoint_locked(slug, did, next_action, tree_hash_value,
                        gate_result, gate_output) -> dict:
     state = load(slug)
+    if execution_mode(state) == "state":
+        raise AttemptOpen(
+            "state-mode goals use step commands; legacy checkpoint is unavailable"
+        )
     if state["status"] != "active":
         raise GoalClosed(f"cannot checkpoint: goal status is {state['status']!r}")
     max_turns = state["budget"].get("max_turns")
@@ -451,88 +456,140 @@ def budget_exhausted(state: dict) -> bool:
     return False
 
 
-def _assert_current_snapshot(state: dict, digest: str) -> None:
-    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
-        raise GateNotPassed("No verified snapshot; run the gate again.")
+
+
+def _persist_mutation_locked(state: dict) -> dict:
+    if execution_mode(state) == "state":
+        return commit_revision(
+            state, expected_revision=state["execution"]["revision"]
+        )
+    return _save(state)
+
+
+def _snapshot_transaction(
+        slug: str, apply: Callable[[dict, str], None]) -> dict:
+    before = load(slug)
+    require_idle(before)
     try:
-        current = tree_hash.compute(state["cwd"], state.get("watch_paths"))
+        observed = tree_hash.compute(before["cwd"], before.get("watch_paths"))
     except Exception as exc:
         raise GateNotPassed(f"Cannot verify the current snapshot: {exc}") from exc
-    if current != digest:
-        raise GateNotPassed("Artifacts changed after verification; run the gate again.")
+    with filelock.goal_locked(_path(slug)):
+        current = load(slug)
+        if task_state.canonical_bytes(current) != task_state.canonical_bytes(before):
+            raise RevisionConflict("Goal changed while its artifacts were checked")
+        require_idle(current)
+        apply(current, observed)
+        return _persist_mutation_locked(current)
 
 
-def record_review(slug: str, result: str, evidence: str, judge: str,
-                  digest: str) -> dict:
-    """Record the fresh reviewer's verdict for one exact checkpoint."""
+def _apply_review(state: dict, observed_hash: str, *, result: str,
+                  evidence: str, judge: str, digest: str) -> None:
     if result not in ("pass", "fail"):
         raise ValueError("Review result must be pass or fail")
     if not isinstance(judge, str) or not judge.strip():
         raise JudgeNotRecorded("Supply the fresh reviewer's actual handle")
     if not isinstance(evidence, str) or len(evidence.strip()) < MIN_COVERAGE_EVIDENCE:
         raise EvidenceInsufficient("Supply the reviewer's substantive reasoning")
-    with filelock.goal_locked(_path(slug)):
-        state = load(slug)
-        if state["status"] != "active":
-            raise GoalClosed(f"Goal is {state['status']}")
-        criterion = (state["gate"]["value"] if state["gate"]["kind"] == "coverage"
-                     else state["gate"].get("review_criterion"))
-        if not criterion:
-            raise GateNotPassed("This goal has no configured review criterion")
-        last = state["checkpoints"][-1] if state["checkpoints"] else None
-        if not last or last["tree_hash"] != digest or last.get("gate_spec") != state["gate"]:
-            raise GateNotPassed("The review does not match the current checkpoint")
-        if state["gate"]["kind"] == "command" and last["gate"] != "pass":
-            raise GateNotPassed("The command gate must pass before review")
-        _assert_current_snapshot(state, digest)
-        state.setdefault("reviews", []).append({
-            "turn": last["turn"], "tree_hash": digest, "at": _now(),
-            "judge": judge.strip(), "criterion": criterion,
-            "result": result, "evidence": _bounded(evidence.strip()),
+    if state["status"] != "active":
+        raise GoalClosed(f"Goal is {state['status']}")
+    criterion = (
+        state["gate"]["value"] if state["gate"]["kind"] == "coverage"
+        else state["gate"].get("review_criterion")
+    )
+    if not criterion:
+        raise GateNotPassed("This goal has no configured review criterion")
+    last = state["checkpoints"][-1] if state["checkpoints"] else None
+    if not last or last["tree_hash"] != digest or last.get("gate_spec") != state["gate"]:
+        raise GateNotPassed("The review does not match the current checkpoint")
+    if state["gate"]["kind"] == "command" and last["gate"] != "pass":
+        raise GateNotPassed("The command gate must pass before review")
+    if (not isinstance(digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+        raise GateNotPassed("No verified snapshot; run the gate again.")
+    if observed_hash != digest:
+        raise GateNotPassed("Artifacts changed after verification; run the gate again.")
+    state.setdefault("reviews", []).append({
+        "turn": last["turn"], "tree_hash": digest, "at": _now(),
+        "judge": judge.strip(), "criterion": criterion,
+        "result": result, "evidence": _bounded(evidence.strip()),
+    })
+    if state["gate"]["kind"] == "coverage":
+        last["gate"], last["gate_output"] = result, _bounded(evidence.strip())
+        state["subagents"].append({
+            "role": "coverage-judge", "name": judge.strip(),
+            "brief": criterion, "last_seen_turn": last["turn"] - 1,
         })
-        if state["gate"]["kind"] == "coverage":
-            last["gate"], last["gate_output"] = result, _bounded(evidence.strip())
-            state["subagents"].append({
-                "role": "coverage-judge", "name": judge.strip(),
-                "brief": criterion, "last_seen_turn": last["turn"] - 1,
-            })
-        return _save(state)
 
 
-
-def _complete_locked(slug: str, gate_output: str) -> dict:
-    state = load(slug)
+def _apply_completion(state: dict, observed_hash: str, gate_output: str) -> None:
     if state["status"] != "active":
         raise GoalClosed(f"cannot complete: goal status is {state['status']!r}")
     last = state["checkpoints"][-1] if state["checkpoints"] else None
     if last is None or last["gate"] != "pass":
-        raise GateNotPassed("The last gate did not pass; budget exhaustion is not success.")
-    # Evidence belongs to the checkpoint, never to replacement text from the caller.
+        raise GateNotPassed(
+            "The last gate did not pass; budget exhaustion is not success."
+        )
     evidence = (last.get("gate_output", gate_output) or "").strip()
     if state["gate"]["kind"] == "coverage":
         floor = last["turn"] - 1
-        if not any(JUDGE_ROLE_MARKER in (s.get("role") or "").lower()
-                   and (s.get("last_seen_turn") or 0) >= floor
-                   for s in state.get("subagents", [])):
+        if not any(
+                JUDGE_ROLE_MARKER in (item.get("role") or "").lower()
+                and (item.get("last_seen_turn") or 0) >= floor
+                for item in state.get("subagents", [])):
             raise JudgeNotRecorded("No independent judge recorded for this turn")
         if len(evidence) < MIN_COVERAGE_EVIDENCE:
-            raise EvidenceInsufficient("The coverage verdict has no substantive reasoning")
+            raise EvidenceInsufficient(
+                "The coverage verdict has no substantive reasoning"
+            )
     criterion = state["gate"].get("review_criterion")
     if criterion:
-        reviews = [r for r in state.get("reviews", [])
-                   if r["turn"] == last["turn"] and r["tree_hash"] == last["tree_hash"]
-                   and r["criterion"] == criterion]
+        reviews = [
+            review for review in state.get("reviews", [])
+            if review["turn"] == last["turn"]
+            and review["tree_hash"] == last["tree_hash"]
+            and review["criterion"] == criterion
+        ]
         if not reviews or reviews[-1]["result"] != "pass":
-            raise GateNotPassed("The required independent review has not passed for this snapshot.")
+            raise GateNotPassed(
+                "The required independent review has not passed for this snapshot."
+            )
     if last.get("gate_spec") != state["gate"]:
-        raise GateNotPassed("The gate definition changed or predates verification; run it again.")
-    _assert_current_snapshot(state, last["tree_hash"])
+        raise GateNotPassed(
+            "The gate definition changed or predates verification; run it again."
+        )
+    digest = last["tree_hash"]
+    if (not isinstance(digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+        raise GateNotPassed("No verified snapshot; run the gate again.")
+    if observed_hash != digest:
+        raise GateNotPassed("Artifacts changed after verification; run the gate again.")
     if not evidence:
         evidence = f"{state['gate']['value']} -> exit 0 (gate produced no output)"
     state["status"] = "complete"
     state["gate_evidence"] = _bounded(evidence)
     state["completed_at"] = _now()
-    return _save(state)
+
+def record_review(slug: str, result: str, evidence: str, judge: str,
+                  digest: str) -> dict:
+    """Record the fresh reviewer's verdict for one exact checkpoint."""
+    return _snapshot_transaction(
+        slug,
+        lambda state, observed: _apply_review(
+            state, observed, result=result, evidence=evidence,
+            judge=judge, digest=digest,
+        ),
+    )
+
+
+
+def _complete_locked(slug: str, gate_output: str) -> dict:
+    return _snapshot_transaction(
+        slug,
+        lambda state, observed: _apply_completion(
+            state, observed, gate_output
+        ),
+    )
 
 
 def _abandon_locked(slug: str, reason: str) -> dict:
@@ -541,44 +598,32 @@ def _abandon_locked(slug: str, reason: str) -> dict:
         raise GoalClosed(
             f"cannot abandon: goal status is {state['status']!r}, not active"
         )
+    require_idle(state)
     state["status"] = "abandoned"
     state["abandoned_reason"] = reason
     state["abandoned_at"] = _now()
-    return _save(state)
+    return _persist_mutation_locked(state)
 
 
 def _reopen_locked(slug: str, reason: str,
                    extra_turns: int | None = None,
                    extra_minutes: int | None = None) -> dict:
-    """Return an abandoned goal to active — the inverse `abandon()` lacked.
-
-    Abandonment was terminal, so a goal abandoned by mistake, or one
-    abandoned for a blocker that later cleared, could only be replaced by
-    a new goal that started with no checkpoints: the record of what had
-    already been done was still on disk and no longer reachable.
-
-    Only from `abandoned`. A completed goal has a passing gate on record,
-    and reopening it would let that evidence stand for later work it never
-    judged — start a new goal instead.
-
-    Budget is not refreshed implicitly. A goal abandoned at its turn limit
-    reopens still exhausted, which is correct: the caller has to say how
-    much more it is worth. `extra_turns` raises the turn ceiling;
-    `extra_minutes` replaces the wall-clock allowance and restarts it from
-    now, since the original window has usually long since elapsed.
-    """
+    """Return an abandoned goal to active without implicitly refreshing its budget."""
     for name_, value in (("extra_turns", extra_turns),
                          ("extra_minutes", extra_minutes)):
         if value is None:
             continue
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-            raise BudgetInvalid(f"{name_} must be a positive integer or None, got {value!r}")
+            raise BudgetInvalid(
+                f"{name_} must be a positive integer or None, got {value!r}"
+            )
 
     state = load(slug)
     if state["status"] != "abandoned":
         raise GoalClosed(
             f"cannot reopen: goal status is {state['status']!r}, not abandoned"
         )
+    require_idle(state)
     state["status"] = "active"
     now = _now()
     state.setdefault("reopen_history", []).append({
@@ -590,10 +635,6 @@ def _reopen_locked(slug: str, reason: str,
     })
     state.pop("abandoned_at", None)
     if extra_turns is not None:
-        # On a minutes-only goal this used to be silently dropped while
-        # `reopen_history` recorded the grant as honoured: the user granted
-        # five turns, the record agreed, and the goal stopped on the next
-        # check. "Five more turns" means five more than have been used.
         if state["budget"].get("max_turns") is None:
             state["budget"]["max_turns"] = state["used"]["turns"] + extra_turns
         else:
@@ -601,23 +642,18 @@ def _reopen_locked(slug: str, reason: str,
     if extra_minutes is not None:
         state["budget"]["max_minutes"] = extra_minutes
         state["used"]["started"] = now
-    return _save(state)
+    return _persist_mutation_locked(state)
 
 
 def _add_subagent_locked(slug: str, role: str, name: str, brief: str,
                   last_seen_turn: int | None = None) -> dict:
-    """Append a subagent entry, guarded the same way as every other mutator.
-
-    Writing to the state file any other way (e.g. reaching for the
-    private save helper directly) skips this terminal-state guard,
-    letting bookkeeping for a subagent silently land on a goal that
-    already completed or was abandoned.
-    """
+    """Append one subagent entry through the guarded lifecycle writer."""
     state = load(slug)
     if state["status"] != "active":
         raise GoalClosed(
             f"cannot add subagent: goal status is {state['status']!r}, not active"
         )
+    require_idle(state)
     if last_seen_turn is None:
         last_seen_turn = state["used"]["turns"]
     state["subagents"].append({
@@ -626,7 +662,7 @@ def _add_subagent_locked(slug: str, role: str, name: str, brief: str,
         "brief": _bounded(brief),
         "last_seen_turn": last_seen_turn,
     })
-    return _save(state)
+    return _persist_mutation_locked(state)
 
 
 def _with_lock(fn):
@@ -646,6 +682,9 @@ reopen = _with_lock(_reopen_locked)
 add_subagent = _with_lock(_add_subagent_locked)
 
 
+# Completion performs its fingerprint before acquiring the goal lock.
+complete = _complete_locked
+
 def execution_mode(state: dict) -> str:
     block = state.get("execution")
     return "conversation" if block is None else block["mode"]
@@ -663,9 +702,9 @@ def commit_revision(state: dict, *, expected_revision: int) -> dict:
         raise GoalStateError("revision commits require a state-mode goal")
     if current["execution"]["revision"] != expected_revision:
         raise RevisionConflict("Execution revision changed; inspect status")
-    candidate = copy.deepcopy(state)
-    candidate["execution"]["revision"] = expected_revision + 1
     try:
+        candidate = copy.deepcopy(state)
+        candidate["execution"]["revision"] = expected_revision + 1
         _validate_state_execution(candidate)
     except (KeyError, TypeError, task_state.StateError) as error:
         raise GoalStateError(f"invalid execution candidate: {error}") from error

@@ -10,6 +10,8 @@ import task_state
 import tree_hash
 
 
+import json
+
 def test_begin_and_attach_replay_without_spending_another_turn(make_state_goal):
     state = make_state_goal(max_turns=1)
     begun = steps.begin(state["slug"], "r1")
@@ -439,20 +441,31 @@ def test_unknown_gate_hash_saves_failed_checkpoint(make_state_goal, tmp_path, mo
 
 def test_finish_replay_keeps_original_checkpoint_after_coverage_review(make_state_goal, tmp_path):
     state, attached, update_file, evidence = _finish_fixture(
-        make_state_goal, tmp_path, gate_kind="coverage", gate_value="Independent review")
-    first = steps.finish(state["slug"], "r1", expected_revision=attached["execution_revision"],
-                         update_file=update_file, worker_evidence_file=evidence)
-    goal.record_review(state["slug"], "pass",
-                       "Independent reviewer inspected the exact checkpoint and accepts it.",
-                       "reviewer-fixture", first["checkpoint"]["tree_hash"])
-    replay = steps.finish(state["slug"], "r1", expected_revision=attached["execution_revision"],
-                          update_file=update_file, worker_evidence_file=evidence)
+        make_state_goal, tmp_path,
+        gate_kind="coverage", gate_value="Independent review",
+    )
+    first = steps.finish(
+        state["slug"], "r1",
+        expected_revision=attached["execution_revision"],
+        update_file=update_file, worker_evidence_file=evidence,
+    )
+    reviewed = goal.record_review(
+        state["slug"], "pass",
+        "Independent reviewer inspected the exact checkpoint and accepts it.",
+        "reviewer-fixture", first["checkpoint"]["tree_hash"],
+    )
+    replay = steps.finish(
+        state["slug"], "r1",
+        expected_revision=attached["execution_revision"],
+        update_file=update_file, worker_evidence_file=evidence,
+    )
     assert replay["replayed"] is True
     assert replay["exit_code"] == 1
     assert replay["checkpoint"] == first["checkpoint"]
     assert replay["checkpoint"]["gate"] == "fail"
     assert replay["last_checkpoint"]["gate"] == "pass"
-    assert goal.load(state["slug"])["execution"]["revision"] == first["execution_revision"]
+    assert reviewed["execution"]["revision"] == first["execution_revision"] + 1
+    assert replay["execution_revision"] == reviewed["execution"]["revision"]
 
 def test_next_packet_keeps_actual_gate_and_review_verdicts(make_state_goal, tmp_path):
     state, attached, update_file, evidence = _finish_fixture(
@@ -586,3 +599,439 @@ def test_terminal_evidence_can_exceed_worker_update_limit(make_state_goal, tmp_p
     assert result["exit_code"] == 0
     ref = goal.load(state["slug"])["execution"]["attempts"][0]["pending"]["worker_evidence"]
     assert steps.read_blob(ref, Path(state["cwd"])) == evidence.read_bytes()
+
+def test_recovery_keeps_work_and_spends_the_attempt(make_state_goal, tmp_path):
+    state = make_state_goal(max_turns=1)
+    begun = steps.begin(state["slug"], "r1")
+    attached = steps.attach(
+        state["slug"], "r1", "worker-fixture",
+        expected_revision=begun["execution_revision"],
+    )
+    artifact = Path(state["cwd"]) / "partial.txt"
+    artifact.write_text("Preserve this partial result.\n")
+    evidence = tmp_path / "stopped.txt"
+    evidence.write_text(
+        "The fixture host confirms worker-fixture stopped; no gate was launched."
+    )
+    kwargs = {
+        "expected_revision": attached["execution_revision"],
+        "reason": "Worker stopped before returning its update.",
+        "worker_state": "stopped",
+        "evidence_file": evidence,
+    }
+    recovered = steps.recover(state["slug"], "r1", **kwargs)
+    replay = steps.recover(state["slug"], "r1", **kwargs)
+    assert recovered["exit_code"] == 1
+    assert replay["replayed"] is True
+    assert artifact.read_text() == "Preserve this partial result.\n"
+    saved = goal.load(state["slug"])
+    assert saved["used"]["turns"] == 1
+    assert saved["execution"]["active_attempt"] is None
+    assert saved["execution"]["task"]["next_action"] == (
+        "Inspect the current workspace and saved evidence before continuing."
+    )
+    assert saved["checkpoints"][-1]["gate"] == "fail"
+    with pytest.raises(goal.BudgetExhausted):
+        steps.begin(state["slug"], "r2")
+
+
+def test_recovery_replay_rejects_contradictions_and_accepted_attempts(
+        make_state_goal, tmp_path):
+    state = make_state_goal()
+    begun = steps.begin(state["slug"], "r1")
+    attached = steps.attach(
+        state["slug"], "r1", "worker-fixture",
+        expected_revision=begun["execution_revision"],
+    )
+    evidence = tmp_path / "stopped.txt"
+    evidence.write_text(
+        "The fixture host confirms worker-fixture stopped; no gate was launched."
+    )
+    recovered = steps.recover(
+        state["slug"], "r1", expected_revision=attached["execution_revision"],
+        reason="Worker stopped before returning its update.",
+        worker_state="stopped", evidence_file=evidence,
+    )
+    revision = recovered["execution_revision"]
+
+    changed = tmp_path / "changed.txt"
+    changed.write_text(
+        "The fixture host confirms worker-fixture stopped after a different observation; "
+        "no gate was launched."
+    )
+    contradictions = [
+        {"reason": "A different reason.", "worker_state": "stopped", "evidence_file": evidence},
+        {"reason": "Worker stopped before returning its update.",
+         "worker_state": "not-started", "evidence_file": evidence},
+        {"reason": "Worker stopped before returning its update.",
+         "worker_state": "stopped", "evidence_file": changed},
+    ]
+    for values in contradictions:
+        with pytest.raises(steps.StepConflict):
+            steps.recover(
+                state["slug"], "r1", expected_revision=revision, **values
+            )
+    assert goal.load(state["slug"])["execution"]["revision"] == revision
+
+    second = steps.begin(state["slug"], "r2")
+    attached_second = steps.attach(
+        state["slug"], "r2", "worker-two",
+        expected_revision=second["execution_revision"],
+    )
+    update_file = tmp_path / "update.json"
+    update_file.write_text(json.dumps({
+        "schema_version": 1,
+        "attempt_id": "r2",
+        "base_revision": second["packet"]["base_revision"],
+        "did": "Finished the reserved work.",
+        "ops": [],
+    }))
+    terminal = tmp_path / "terminal.txt"
+    terminal.write_text("The fixture host confirms worker-two exited normally.")
+    steps.finish(
+        state["slug"], "r2",
+        expected_revision=attached_second["execution_revision"],
+        update_file=update_file, worker_evidence_file=terminal,
+    )
+    accepted_evidence = tmp_path / "accepted-stopped.txt"
+    accepted_evidence.write_text(
+        "The fixture host confirms worker-two stopped; no gate remains running."
+    )
+    with pytest.raises(steps.StepConflict):
+        steps.recover(
+            state["slug"], "r2",
+            expected_revision=goal.load(state["slug"])["execution"]["revision"],
+            reason="Trying to rewrite an accepted attempt.",
+            worker_state="stopped", evidence_file=accepted_evidence,
+        )
+
+
+def test_not_started_recovery_requires_reserved_unbound_attempt_and_dispatch_evidence(
+        make_state_goal, tmp_path):
+    state = make_state_goal()
+    begun = steps.begin(state["slug"], "r1")
+    weak = tmp_path / "weak.txt"
+    weak.write_text("Not started.")
+    with pytest.raises(steps.StepError):
+        steps.recover(
+            state["slug"], "r1", expected_revision=begun["execution_revision"],
+            reason="Dispatch did not start.", worker_state="not-started",
+            evidence_file=weak,
+        )
+    assert goal.load(state["slug"])["execution"]["active_attempt"] == "r1"
+
+    evidence = tmp_path / "not-started.txt"
+    evidence.write_text(
+        "Dispatch records confirm no worker was started or bound, and no gate was launched."
+    )
+    recovered = steps.recover(
+        state["slug"], "r1", expected_revision=begun["execution_revision"],
+        reason="Dispatch did not create a worker.", worker_state="not-started",
+        evidence_file=evidence,
+    )
+    assert recovered["attempt_status"] == "recovered"
+
+    second = steps.begin(state["slug"], "r2")
+    attached = steps.attach(
+        state["slug"], "r2", "worker-two",
+        expected_revision=second["execution_revision"],
+    )
+    with pytest.raises(steps.StepConflict):
+        steps.recover(
+            state["slug"], "r2", expected_revision=attached["execution_revision"],
+            reason="Dispatch uncertainty.", worker_state="not-started",
+            evidence_file=evidence,
+        )
+
+
+def _force_finishing(state, attached, *, gate_process):
+    import filelock
+
+    with filelock.goal_locked(goal._path(state["slug"])):
+        current = goal.load(state["slug"])
+        attempt = current["execution"]["attempts"][0]
+        reference = {"path": "objects/pending.json", "sha256": "a" * 64}
+        attempt["status"] = "finishing"
+        attempt["finish_nonce"] = "nonce"
+        attempt["update_sha256"] = "b" * 64
+        attempt["pending"] = {
+            "update": reference,
+            "candidate": reference,
+            "audit": reference,
+            "worker_evidence": reference,
+        }
+        attempt["gate_process"] = gate_process
+        return goal.commit_revision(
+            current, expected_revision=attached["execution_revision"]
+        )
+
+def test_finishing_recovery_requires_free_runner_and_resolved_gate_liveness(
+        make_state_goal, tmp_path):
+    import filelock
+
+    state = make_state_goal()
+    begun = steps.begin(state["slug"], "r1")
+    attached = steps.attach(
+        state["slug"], "r1", "worker-fixture",
+        expected_revision=begun["execution_revision"],
+    )
+    current = _force_finishing(
+        state, attached,
+        gate_process={
+            "pid": 12345, "pgid": 12345,
+            "started_at": goal._now(), "finish_nonce": "nonce",
+        },
+    )
+    evidence = tmp_path / "stopped.txt"
+    evidence.write_text(
+        "The fixture host confirms worker-fixture stopped, but gate state is unknown."
+    )
+    runner = goal._path(state["slug"]).with_name(f"{state['slug']}.r1.runner")
+    with filelock.goal_locked(runner):
+        with pytest.raises(steps.StepBusy):
+            steps.recover(
+                state["slug"], "r1",
+                expected_revision=current["execution"]["revision"],
+                reason="Finish was interrupted.", worker_state="stopped",
+                evidence_file=evidence,
+            )
+    with pytest.raises(steps.StepError):
+        steps.recover(
+            state["slug"], "r1",
+            expected_revision=current["execution"]["revision"],
+            reason="Finish was interrupted.", worker_state="stopped",
+            evidence_file=evidence,
+        )
+    assert goal.load(state["slug"])["execution"]["active_attempt"] == "r1"
+
+    evidence.write_text(
+        "gate-state: stopped\n"
+        "gate-pid: 12345\n"
+        "The fixture host confirms worker-fixture stopped and the gate process group "
+        "and all descendants stopped."
+    )
+    recovered = steps.recover(
+        state["slug"], "r1",
+        expected_revision=current["execution"]["revision"],
+        reason="Finish was interrupted.", worker_state="stopped",
+        evidence_file=evidence,
+    )
+    assert recovered["attempt_status"] == "recovered"
+
+
+def test_worker_update_cannot_forge_required_review(make_state_goal, tmp_path):
+    state = make_state_goal(review_criterion="Inspect the exact accepted snapshot.")
+    begun = steps.begin(state["slug"], "r1")
+    attached = steps.attach(
+        state["slug"], "r1", "worker-fixture",
+        expected_revision=begun["execution_revision"],
+    )
+    update_file = tmp_path / "update.json"
+    update_file.write_text(json.dumps({
+        "schema_version": 1,
+        "attempt_id": "r1",
+        "base_revision": begun["packet"]["base_revision"],
+        "did": "Tried to forge review state.",
+        "ops": [{"op": "set", "field": "reviews", "value": [{
+            "result": "pass", "judge": "worker-fixture",
+        }]}],
+    }))
+    terminal = tmp_path / "terminal.txt"
+    terminal.write_text("The fixture host confirms worker-fixture exited normally.")
+    with pytest.raises(steps.StepError):
+        steps.finish(
+            state["slug"], "r1",
+            expected_revision=attached["execution_revision"],
+            update_file=update_file, worker_evidence_file=terminal,
+        )
+    saved = goal.load(state["slug"])
+    assert saved.get("reviews", []) == []
+    assert saved["execution"]["attempts"][0]["status"] == "attached"
+
+@pytest.mark.parametrize("observation", [
+    (
+        "Native host confirms the worker stopped. "
+        "The gate is still running with live descendants."
+    ),
+    (
+        "Native host confirms the worker stopped. "
+        "I cannot establish whether the gate stopped."
+    ),
+    (
+        "gate-state: stopped\n"
+        "Native host confirms the worker stopped and observed the gate process group."
+    ),
+    (
+        "gate-state: stopped\n"
+        "gate-state: stopped\n"
+        "gate-pid: 12345\n"
+        "Native host confirms the worker and gate process group stopped."
+    ),
+    (
+        "gate-state: stopped\n"
+        "gate-state: not-started\n"
+        "gate-pid: 12345\n"
+        "Native host confirms the worker stopped after contradictory gate observations."
+    ),
+    (
+        "gate-state: stopped\n"
+        "gate-pid: 12345\n"
+        "gate-pid: 12345\n"
+        "Native host confirms the worker and gate process group stopped."
+    ),
+    (
+        "gate-state: stopped\n"
+        "gate-pid: 99999\n"
+        "Native host confirms the worker and gate process group stopped."
+    ),
+    "gate-state: stopped\ngate-pid: 12345\n",
+])
+def test_finishing_recovery_rejects_unbound_or_ambiguous_gate_assertions(
+        make_state_goal, tmp_path, observation):
+    state = make_state_goal()
+    begun = steps.begin(state["slug"], "r1")
+    attached = steps.attach(
+        state["slug"], "r1", "worker-fixture",
+        expected_revision=begun["execution_revision"],
+    )
+    current = _force_finishing(
+        state, attached,
+        gate_process={
+            "pid": 12345, "pgid": 12345,
+            "started_at": goal._now(), "finish_nonce": "nonce",
+        },
+    )
+    evidence = tmp_path / "gate-evidence.txt"
+    evidence.write_text(observation)
+    with pytest.raises(steps.StepError):
+        steps.recover(
+            state["slug"], "r1",
+            expected_revision=current["execution"]["revision"],
+            reason="Finish was interrupted.", worker_state="stopped",
+            evidence_file=evidence,
+        )
+    saved = goal.load(state["slug"])
+    assert saved["execution"]["active_attempt"] == "r1"
+    assert saved["execution"]["attempts"][0]["status"] == "finishing"
+
+
+def test_finishing_recovery_without_gate_record_accepts_explicit_not_started(
+        make_state_goal, tmp_path):
+    state = make_state_goal()
+    begun = steps.begin(state["slug"], "r1")
+    attached = steps.attach(
+        state["slug"], "r1", "worker-fixture",
+        expected_revision=begun["execution_revision"],
+    )
+    current = _force_finishing(state, attached, gate_process=None)
+    evidence = tmp_path / "no-gate.txt"
+    evidence.write_text(
+        "gate-state: not-started\n"
+        "The native host confirms the worker stopped before a gate process or "
+        "any gate descendants were launched."
+    )
+    recovered = steps.recover(
+        state["slug"], "r1",
+        expected_revision=current["execution"]["revision"],
+        reason="Finish stopped before gate launch.", worker_state="stopped",
+        evidence_file=evidence,
+    )
+    assert recovered["attempt_status"] == "recovered"
+
+def test_near_limit_recovery_still_allows_the_next_packet(
+        make_state_goal, tmp_path):
+    import filelock
+
+    state = make_state_goal(max_turns=2)
+    current_hash = tree_hash.compute(state["cwd"], state["watch_paths"])
+    candidate = goal.load(state["slug"])
+    candidate["audit_path"] = str(
+        goal._path(state["slug"]).relative_to(Path(state["cwd"]))
+    )
+    preview = task_state.build_packet(
+        candidate, attempt_id="r1", base_revision=2,
+        current_hash=current_hash, runtime=paths.runtime(),
+        reserve_verdicts=True,
+    )
+    reserved_size = len(task_state.canonical_bytes(
+        task_state._with_packet_reservations(preview)
+    ))
+    candidate.pop("audit_path")
+    candidate["goal"] += "x" * (task_state.PACKET_LIMIT - reserved_size)
+    with filelock.goal_locked(goal._path(state["slug"])):
+        state = goal.commit_revision(candidate, expected_revision=0)
+
+    begun = steps.begin(state["slug"], "r1")
+    evidence = tmp_path / "not-started.txt"
+    evidence.write_text(
+        "Dispatch records confirm no worker was started or bound, and no gate was launched."
+    )
+    recovered = steps.recover(
+        state["slug"], "r1", expected_revision=begun["execution_revision"],
+        reason="Dispatch did not create a worker.", worker_state="not-started",
+        evidence_file=evidence,
+    )
+    following = steps.begin(state["slug"], "r2")
+    assert recovered["attempt_status"] == "recovered"
+    assert following["attempt_status"] == "reserved"
+    assert len(task_state.canonical_bytes(following["packet"])) <= (
+        task_state.PACKET_LIMIT
+    )
+
+def test_finishing_recovery_rejects_not_started_for_saved_gate(
+        make_state_goal, tmp_path):
+    state = make_state_goal()
+    begun = steps.begin(state["slug"], "r1")
+    attached = steps.attach(
+        state["slug"], "r1", "worker-fixture",
+        expected_revision=begun["execution_revision"],
+    )
+    current = _force_finishing(
+        state, attached,
+        gate_process={
+            "pid": 12345, "pgid": 12345,
+            "started_at": goal._now(), "finish_nonce": "nonce",
+        },
+    )
+    evidence = tmp_path / "contradictory-gate.txt"
+    evidence.write_text(
+        "gate-state: not-started\n"
+        "gate-pid: 12345\n"
+        "The native host confirms the worker stopped but contradicts the saved "
+        "record showing that a gate process launched."
+    )
+    with pytest.raises(steps.StepError):
+        steps.recover(
+            state["slug"], "r1",
+            expected_revision=current["execution"]["revision"],
+            reason="Finish was interrupted.", worker_state="stopped",
+            evidence_file=evidence,
+        )
+
+
+def test_recovery_remains_available_when_the_procedure_changes(
+        make_state_goal, tmp_path, monkeypatch):
+    state = make_state_goal()
+    begun = steps.begin(state["slug"], "r1")
+    attached = steps.attach(
+        state["slug"], "r1", "worker-fixture",
+        expected_revision=begun["execution_revision"],
+    )
+    monkeypatch.setattr(
+        steps.task_state, "procedure",
+        lambda runtime: (_ for _ in ()).throw(
+            AssertionError("recovery must not validate the current procedure")
+        ),
+    )
+    evidence = tmp_path / "stopped-after-procedure-change.txt"
+    evidence.write_text(
+        "The native host confirms worker-fixture stopped before returning an "
+        "update and no gate was launched."
+    )
+    recovered = steps.recover(
+        state["slug"], "r1",
+        expected_revision=attached["execution_revision"],
+        reason="Worker stopped under an older procedure.",
+        worker_state="stopped", evidence_file=evidence,
+    )
+    assert recovered["attempt_status"] == "recovered"

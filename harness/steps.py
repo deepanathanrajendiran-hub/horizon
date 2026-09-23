@@ -430,3 +430,161 @@ def finish(slug: str, attempt_id: str, *, expected_revision: int,
         raise StepBusy("another finish invocation owns this attempt") from error
     except task_state.StateError as error:
         raise StepError(f"invalid worker update or candidate: {error}") from error
+
+RECOVERY_EVIDENCE_MIN = 40
+
+
+def _read_recovery_evidence(path: Path) -> tuple[bytes, str]:
+    try:
+        payload = Path(path).read_bytes()
+    except OSError as error:
+        raise StepError(f"cannot read recovery evidence: {error}") from error
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise StepError("recovery evidence must be UTF-8") from error
+    if len(text.strip().encode("utf-8")) < RECOVERY_EVIDENCE_MIN:
+        raise StepError("recovery evidence must contain a substantive liveness observation")
+    return payload, text
+
+
+def _gate_liveness_resolved(evidence: str, gate_process: dict | None) -> bool:
+    """Validate coordinator gate assertions without probing or signaling processes.
+
+    A ``gate-state: stopped`` assertion means the gate and its complete
+    process group, including descendants, are stopped. A saved PID binds the
+    assertion to the diagnostic record; it is not identity authentication.
+    """
+    states = []
+    pids = []
+    supporting_lines = []
+    for line in evidence.splitlines():
+        state_match = re.fullmatch(
+            r"\s*gate-state\s*:\s*([^\s]+)\s*", line, re.IGNORECASE
+        )
+        if state_match:
+            states.append(state_match.group(1).lower())
+            continue
+        pid_match = re.fullmatch(
+            r"\s*gate-pid\s*:\s*([^\s]+)\s*", line, re.IGNORECASE
+        )
+        if pid_match:
+            pids.append(pid_match.group(1))
+            continue
+        supporting_lines.append(line)
+    supporting = "\n".join(supporting_lines).strip().encode("utf-8")
+    if len(supporting) < RECOVERY_EVIDENCE_MIN or len(states) != 1:
+        return False
+    if states[0] not in {"stopped", "not-started"}:
+        return False
+    if gate_process is None:
+        return not pids
+    if states[0] != "stopped" or len(pids) != 1 or not pids[0].isdigit():
+        return False
+    return int(pids[0]) == gate_process["pid"]
+
+
+def recover(slug: str, attempt_id: str, *, expected_revision: int,
+            reason: str, worker_state: str, evidence_file: Path) -> dict:
+    _require_slug(slug)
+    _require_id(attempt_id, "attempt_id")
+    if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 0:
+        raise StepError("expected_revision must be a nonnegative integer")
+    try:
+        task_state._require_text(
+            reason, "recovery reason", task_state.TEXT_LIMIT, nonempty=True
+        )
+    except task_state.StateError as error:
+        raise StepError(str(error)) from error
+    if worker_state not in {"stopped", "not-started"}:
+        raise StepError("worker_state must be stopped or not-started")
+
+    evidence_bytes, evidence_text = _read_recovery_evidence(Path(evidence_file))
+    evidence_ref = store_blob(slug, "recovery_evidence", evidence_bytes)
+    initial = _state(slug)
+    try:
+        observed_hash = tree_hash.compute(initial["cwd"], initial["watch_paths"])
+    except Exception:
+        observed_hash = gate.UNKNOWN_HASH
+
+    runner = goal._path(slug).with_name(f"{slug}.{attempt_id}.runner")
+    try:
+        with filelock.goal_locked(runner, timeout=0):
+            with filelock.goal_locked(goal._path(slug)):
+                state = _state(slug)
+                attempt = _attempt(state, attempt_id)
+                if attempt is None:
+                    raise StepConflict(f"unknown attempt: {attempt_id}")
+                if attempt["status"] == "recovered":
+                    event = next(
+                        (item for item in reversed(attempt["events"])
+                         if item.get("type") == "recovery"),
+                        None,
+                    )
+                    if event is None or (
+                            event.get("reason") != reason
+                            or event.get("worker_state") != worker_state
+                            or event.get("evidence") != evidence_ref):
+                        raise StepConflict(
+                            "recovery replay differs from the saved recovery"
+                        )
+                    return report(state, attempt, replayed=True)
+                if attempt["status"] == "accepted":
+                    raise StepConflict("accepted attempts cannot be recovered")
+                if state["execution"]["revision"] != expected_revision:
+                    raise goal.RevisionConflict(
+                        "Execution revision changed before recovery"
+                    )
+                if state["execution"]["active_attempt"] != attempt_id:
+                    raise StepConflict("attempt is not active")
+                if worker_state == "not-started":
+                    if (attempt["status"] != "reserved"
+                            or attempt["worker"] is not None
+                            or attempt["gate_process"] is not None):
+                        raise StepConflict(
+                            "not-started recovery requires an unbound reserved attempt"
+                        )
+                elif attempt["status"] not in {"attached", "finishing"}:
+                    raise StepConflict(
+                        "stopped recovery requires an attached or finishing attempt"
+                    )
+                if attempt["status"] == "finishing" and not _gate_liveness_resolved(
+                        evidence_text, attempt["gate_process"]):
+                    raise StepError(
+                        "finishing recovery evidence must include one gate-state "
+                        "assertion and bind any saved gate PID"
+                    )
+
+                task = state["execution"]["task"]
+                task["next_action"] = task_state.RECOVERY_NEXT_ACTION
+                checkpoint = {
+                    "turn": attempt["turn"],
+                    "at": goal._now(),
+                    "did": "Recovered interrupted attempt: " + reason,
+                    "next": task["next_action"],
+                    "tree_hash": observed_hash,
+                    "gate": "fail",
+                    "gate_output": "Interrupted work; no accepted verification.",
+                    "gate_spec": dict(state["gate"]),
+                }
+                state["checkpoints"].append(checkpoint)
+                state["execution"]["active_attempt"] = None
+                attempt["status"] = "recovered"
+                attempt["events"].append({
+                    "type": "recovery",
+                    "reason": reason,
+                    "worker_state": worker_state,
+                    "evidence": evidence_ref,
+                })
+                attempt["result"] = {
+                    "exit_code": 1,
+                    "checkpoint": checkpoint,
+                    "update_accepted": False,
+                    "attempt_closed": True,
+                }
+                state = goal.commit_revision(
+                    state, expected_revision=expected_revision
+                )
+            return report(state, attempt)
+    except filelock.LockTimeout as error:
+        raise StepBusy("another finish invocation owns this attempt") from error

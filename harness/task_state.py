@@ -82,6 +82,10 @@ re.compile(r"[0-9a-f]{64}\Z")
 _KINDS = {"observation", "question", "hypothesis", "failed_approach"}
 
 
+RECOVERY_NEXT_ACTION = (
+    "Inspect the current workspace and saved evidence before continuing."
+)
+
 def canonical_bytes(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"),
                       ensure_ascii=False, allow_nan=False).encode("utf-8")
@@ -481,6 +485,9 @@ def _latest_review(state: dict, reserve: bool):
 def _with_packet_reservations(packet: dict) -> dict:
     reserved = copy.deepcopy(packet)
     maximum_turn = 10**20 - 1
+    if len(canonical_bytes(RECOVERY_NEXT_ACTION)) > len(
+            canonical_bytes(reserved["task"]["next_action"])):
+        reserved["task"]["next_action"] = RECOVERY_NEXT_ACTION
     reserved["snapshot"]["tree_hash"] = "f" * 64
     checkpoint_envelope = {
         "turn": maximum_turn, "tree_hash": "f" * 64, "gate": "skipped",
