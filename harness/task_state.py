@@ -415,7 +415,7 @@ def _validate_operation(operation: dict) -> None:
         raise StateError(f"unknown update operation: {operation['op']}")
 
 
-def _packet_excerpt(value, record: str, reserve: bool) -> dict:
+def _packet_excerpt(value, record: str, reserve: bool, *, envelope: dict | None = None) -> dict:
     text = "" if value is None else str(value)
     if reserve:
         text = "\\x00" * EXCERPT_LIMIT
@@ -423,7 +423,8 @@ def _packet_excerpt(value, record: str, reserve: bool) -> dict:
     while low < high:
         middle = (low + high + 1) // 2
         candidate = {"text": text[:middle], "truncated": middle < len(text), "record": record}
-        if len(canonical_bytes(candidate)) <= EXCERPT_LIMIT:
+        measured = candidate if envelope is None else {**envelope, "verdict": candidate}
+        if len(canonical_bytes(measured)) <= EXCERPT_LIMIT:
             low = middle
         else:
             high = middle - 1
@@ -449,13 +450,16 @@ def _latest_checkpoint(state: dict, reserve: bool):
     if not checkpoints:
         return None
     checkpoint = checkpoints[-1]
-    return {
+    envelope = {
         "turn": checkpoint["turn"],
         "tree_hash": checkpoint["tree_hash"],
         "gate": checkpoint["gate"],
-        "verdict": _packet_excerpt(
-            checkpoint.get("gate_output"), f"checkpoint:{checkpoint['turn']}", reserve),
+        "verdict": None,
     }
+    envelope["verdict"] = _packet_excerpt(
+        checkpoint.get("gate_output"), f"checkpoint:{checkpoint['turn']}", reserve,
+        envelope=envelope)
+    return envelope
 
 
 def _latest_review(state: dict, reserve: bool):
@@ -463,29 +467,37 @@ def _latest_review(state: dict, reserve: bool):
     if not reviews:
         return None
     review = reviews[-1]
-    return {
+    envelope = {
         "turn": review["turn"],
         "tree_hash": review["tree_hash"],
         "result": review["result"],
-        "verdict": _packet_excerpt(
-            review.get("evidence", review.get("output", review.get("verdict"))),
-            f"review:{review['turn']}", reserve),
+        "verdict": None,
     }
+    envelope["verdict"] = _packet_excerpt(
+        review.get("evidence", review.get("output", review.get("verdict"))),
+        f"review:{review['turn']}", reserve, envelope=envelope)
+    return envelope
 
 def _with_packet_reservations(packet: dict) -> dict:
     reserved = copy.deepcopy(packet)
     maximum_turn = 10**20 - 1
     reserved["snapshot"]["tree_hash"] = "f" * 64
-    reserved["latest_checkpoint"] = {
+    checkpoint_envelope = {
         "turn": maximum_turn, "tree_hash": "f" * 64, "gate": "skipped",
-        "verdict": _packet_excerpt(None, f"checkpoint:{maximum_turn}", True),
+        "verdict": None,
     }
-    reserved["latest_review"] = {
+    checkpoint_envelope["verdict"] = _packet_excerpt(
+        None, f"checkpoint:{maximum_turn}", True, envelope=checkpoint_envelope)
+    checkpoint_envelope["verdict"]["truncated"] = False
+    reserved["latest_checkpoint"] = checkpoint_envelope
+    review_envelope = {
         "turn": maximum_turn, "tree_hash": "f" * 64, "result": "pass",
-        "verdict": _packet_excerpt(None, f"review:{maximum_turn}", True),
+        "verdict": None,
     }
-    reserved["latest_checkpoint"]["verdict"]["truncated"] = False
-    reserved["latest_review"]["verdict"]["truncated"] = False
+    review_envelope["verdict"] = _packet_excerpt(
+        None, f"review:{maximum_turn}", True, envelope=review_envelope)
+    review_envelope["verdict"]["truncated"] = False
+    reserved["latest_review"] = review_envelope
     for entry in reserved["task"]["entries"]:
         entry["freshness"] = "unverified"
         entry["freshness_reasons"], _ = _packet_reasons([], reserve=True)

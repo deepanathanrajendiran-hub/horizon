@@ -346,6 +346,8 @@ def test_packet_bounds_verdict_metadata_and_points_to_durable_records():
     assert packet["latest_checkpoint"]["verdict"]["truncated"]
     assert packet["latest_checkpoint"]["verdict"]["record"] == "checkpoint:1"
     assert packet["latest_review"]["verdict"]["record"] == "review:1"
+    assert len(state.canonical_bytes(packet["latest_checkpoint"])) <= state.EXCERPT_LIMIT
+    assert len(state.canonical_bytes(packet["latest_review"])) <= state.EXCERPT_LIMIT
     assert len(state.canonical_bytes(packet)) <= state.PACKET_LIMIT
 
 def test_execution_rejects_nonstring_status_and_worker_runtime_as_state_errors():
@@ -367,6 +369,8 @@ def test_reserved_packet_covers_future_checkpoint_and_review():
                                 current_hash="a" * 64, runtime="codex",
                                 reserve_verdicts=True)
     reservation = state._with_packet_reservations(before)
+    assert len(state.canonical_bytes(reservation["latest_checkpoint"])) <= state.EXCERPT_LIMIT
+    assert len(state.canonical_bytes(reservation["latest_review"])) <= state.EXCERPT_LIMIT
     goal_state["checkpoints"] = [{
         "turn": 1, "at": "2026-09-19T00:00:00Z", "did": "x" * 1024,
         "next": "x" * 1024, "tree_hash": "a" * 64, "gate": "pass",
@@ -445,3 +449,18 @@ def test_truncated_freshness_reasons_point_to_durable_entry(monkeypatch):
     assert task_entry["freshness_reasons_record"] == "execution.task.entries[q]"
     assert annotation["reasons_record"] == "execution.task.entries[q]"
     assert packet["audit_path"] == goal_state["audit_path"]
+
+@pytest.mark.parametrize(("record", "status_key", "status"), [
+    ("checkpoint:99999999999999999999", "gate", "skipped"),
+    ("review:99999999999999999999", "result", "pass"),
+])
+def test_complete_verification_excerpt_exact_boundary(record, status_key, status):
+    state = _state_module()
+    envelope = {"turn": 99999999999999999999, "tree_hash": "f" * 64,
+                status_key: status, "verdict": None}
+    excerpt = state._packet_excerpt(
+        "x" * state.EXCERPT_LIMIT, record, False,
+        envelope=envelope)
+    complete = {**envelope, "verdict": excerpt}
+    assert len(state.canonical_bytes(complete)) == state.EXCERPT_LIMIT
+    assert complete["verdict"]["truncated"] is True
