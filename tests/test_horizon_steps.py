@@ -1035,3 +1035,134 @@ def test_recovery_remains_available_when_the_procedure_changes(
         worker_state="stopped", evidence_file=evidence,
     )
     assert recovered["attempt_status"] == "recovered"
+
+def test_real_cli_reserves_attaches_finishes_reviews_and_completes(state_client, tmp_path):
+    project, _, run = state_client
+    code, state = run(
+        "start", "Create a ready marker", "--execution", "state",
+        "--gate", "test -f ready.txt", "--review", "Inspect the ready marker.",
+        "--max-turns", "1",
+    )
+    assert code == 0, state
+    assert state["execution_mode"] == "state"
+    assert state["turn_unit"] == "worker_attempt"
+    code, begun = run("step-begin", state["slug"], "--request-id", "r1")
+    assert code == 0, begun
+    assert begun["packet"]["attempt_id"] == "r1"
+    assert not (project / "ready.txt").exists()
+    assert run("status", state["slug"])[1]["used"]["turns"] == 1
+
+    code, error = run(
+        "check", state["slug"], "--did", "Unreserved work", "--next", "Continue",
+    )
+    assert code == 2
+    assert "step" in error["message"].lower()
+
+    code, stale = run(
+        "step-attach", state["slug"], "--attempt", "r1", "--worker", "worker-1",
+        "--expected-revision", "0",
+    )
+    assert code == 2
+    assert stale["attempt_id"] == "r1"
+    assert stale["update_accepted"] is False
+
+    code, attached = run(
+        "step-attach", state["slug"], "--attempt", "r1", "--worker", "worker-1",
+        "--expected-revision", str(begun["execution_revision"]),
+    )
+    assert code == 0, attached
+    (project / "ready.txt").write_text("ready")
+    update_file = tmp_path / "update.json"
+    update_file.write_text(json.dumps({
+        "schema_version": 1,
+        "attempt_id": "r1",
+        "base_revision": begun["packet"]["base_revision"],
+        "did": "Created the ready marker.",
+        "ops": [{"op": "set", "field": "next_action", "value": "Review ready marker."}],
+    }))
+    terminal = tmp_path / "terminal.txt"
+    terminal.write_text("The native host confirms worker-1 stopped and released its workspace.")
+
+    code, bad_timeout = run(
+        "step-finish", state["slug"], "--attempt", "r1",
+        "--expected-revision", str(attached["execution_revision"]),
+        "--update-file", str(update_file), "--worker-evidence-file", str(terminal),
+        "--timeout", "0",
+    )
+    assert code == 2
+    assert bad_timeout["attempt_id"] == "r1"
+    assert bad_timeout["update_accepted"] is False
+
+    code, finished = run(
+        "step-finish", state["slug"], "--attempt", "r1",
+        "--expected-revision", str(attached["execution_revision"]),
+        "--update-file", str(update_file), "--worker-evidence-file", str(terminal),
+        "--force",
+    )
+    assert code == 0, finished
+    assert finished["update_accepted"] is True
+    assert finished["review_required"] is True
+    code, replay = run(
+        "step-finish", state["slug"], "--attempt", "r1",
+        "--expected-revision", str(attached["execution_revision"]),
+        "--update-file", str(update_file), "--worker-evidence-file", str(terminal),
+    )
+    assert code == 0, replay
+    assert replay["replayed"] is True
+
+    review_evidence = tmp_path / "review.txt"
+    review_evidence.write_text("Independent reviewer inspected ready.txt and the accepted checkpoint.")
+    code, reviewed = run(
+        "review", state["slug"], "--result", "pass", "--judge", "reviewer-1",
+        "--hash", finished["checkpoint"]["tree_hash"],
+        "--evidence-file", str(review_evidence),
+    )
+    assert code == 0, reviewed
+    (project / "ready.txt").write_text("stale")
+    assert run("complete", state["slug"])[0] == 2
+    (project / "ready.txt").write_text("ready")
+    code, complete = run("complete", state["slug"])
+    assert code == 0, complete
+    assert complete["status"] == "complete"
+
+
+def test_real_cli_recovers_reserved_attempt_and_doctor_is_read_only(state_client, tmp_path):
+    project, runtime, run = state_client
+    before = sorted(project.rglob("*"))
+    code, doctor = run("doctor")
+    assert code == 0, doctor
+    assert doctor["state_supported"] is True
+    assert "host" in doctor["worker_availability"].lower()
+    assert sorted(project.rglob("*")) == before
+
+    code, state = run(
+        "start", "Recover a missing worker", "--execution", "state",
+        "--gate", "true", "--max-turns", "2",
+    )
+    assert code == 0, state
+    code, begun = run("step-begin", state["slug"], "--request-id", "r1")
+    assert code == 0, begun
+    evidence = tmp_path / "dispatch.txt"
+    evidence.write_text(
+        "Dispatch records confirm no worker was started or bound, and no gate was launched."
+    )
+    code, recovered = run(
+        "step-recover", state["slug"], "--attempt", "r1",
+        "--expected-revision", str(begun["execution_revision"]),
+        "--reason", "Dispatch did not create a worker.", "--worker-state", "not-started",
+        "--evidence-file", str(evidence),
+    )
+    assert code == 1, recovered
+    assert recovered["attempt_status"] == "recovered"
+    assert recovered["update_accepted"] is False
+
+    folder = ".codex" if runtime == "codex" else ".claude"
+    goal_path = project / folder / "harness" / "goals" / f'{state["slug"]}.json'
+    malformed = json.loads(goal_path.read_text())
+    malformed["execution"]["schema_version"] = 99
+    goal_path.write_text(json.dumps(malformed))
+    code, error = run("step-begin", state["slug"], "--request-id", "r2")
+    assert code == 2
+    assert error["attempt_id"] == "r2"
+    assert error["update_accepted"] is False
+    assert "execution_revision" not in error

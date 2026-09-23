@@ -14,6 +14,9 @@ import goal
 import paths
 import refine_log
 import tree_hash
+import filelock
+import task_state
+import steps
 
 
 def parser() -> argparse.ArgumentParser:
@@ -35,6 +38,7 @@ def parser() -> argparse.ArgumentParser:
     start.add_argument("--max-turns", type=int, default=20)
     start.add_argument("--max-minutes", type=int)
     start.add_argument("--watch", action="append", help="Artifact path relative to the project; repeatable")
+    start.add_argument("--execution", choices=("conversation", "state"), default="conversation")
     check = commands.add_parser("check", help="Run verification and checkpoint one completed increment")
     check.add_argument("slug")
     check.add_argument("--did", required=True)
@@ -57,6 +61,29 @@ def parser() -> argparse.ArgumentParser:
     reopen.add_argument("--reason", required=True)
     reopen.add_argument("--extra-turns", type=int)
     reopen.add_argument("--extra-minutes", type=int)
+    begin = commands.add_parser("step-begin", help="Reserve one state-mode worker attempt")
+    begin.add_argument("slug")
+    begin.add_argument("--request-id", required=True)
+    attach = commands.add_parser("step-attach", help="Bind a real host worker handle")
+    attach.add_argument("slug")
+    attach.add_argument("--attempt", required=True)
+    attach.add_argument("--worker", required=True)
+    attach.add_argument("--expected-revision", required=True, type=int)
+    finish = commands.add_parser("step-finish", help="Finish a bound state-mode worker attempt")
+    finish.add_argument("slug")
+    finish.add_argument("--attempt", required=True)
+    finish.add_argument("--expected-revision", required=True, type=int)
+    finish.add_argument("--update-file", type=Path, required=True)
+    finish.add_argument("--worker-evidence-file", type=Path, required=True)
+    finish.add_argument("--timeout", type=int, default=gate.DEFAULT_TIMEOUT)
+    finish.add_argument("--force", action="store_true")
+    recover = commands.add_parser("step-recover", help="Recover an interrupted state-mode worker attempt")
+    recover.add_argument("slug")
+    recover.add_argument("--attempt", required=True)
+    recover.add_argument("--expected-revision", required=True, type=int)
+    recover.add_argument("--reason", required=True)
+    recover.add_argument("--worker-state", choices=("stopped", "not-started"), required=True)
+    recover.add_argument("--evidence-file", type=Path, required=True)
     commands.add_parser("refine-count", help="Read the rolling edit count before proposing")
     commands.add_parser("refine-history", help="Show refinements and later outcome observations")
     apply = commands.add_parser("refine-apply", help="Apply exactly the approved JSON proposal")
@@ -79,14 +106,7 @@ def parser() -> argparse.ArgumentParser:
 
 
 def status(state: dict) -> dict:
-    last = state["checkpoints"][-1] if state["checkpoints"] else None
-    return {
-        "slug": state["slug"], "goal": state["goal"], "status": state["status"],
-        "runtime": paths.runtime(), "gate": state["gate"], "budget": state["budget"],
-        "used": state["used"], "budget_exhausted": goal.budget_exhausted(state),
-        "last_checkpoint": last, "reviews": state.get("reviews", [])[-1:],
-        "gate_evidence": state.get("gate_evidence"),
-    }
+    return goal.summary(state)
 
 
 def entry_summary(entry: dict) -> dict:
@@ -183,13 +203,77 @@ def check(args) -> tuple[dict, int]:
         report["error"] = error
     return report, (2 if error else 0 if result == "pass" else 1)
 
+def _step_error(args, error: Exception) -> dict:
+    """Translate a failed state-mode command without inventing an outcome."""
+    report = {
+        "error": type(error).__name__,
+        "message": str(error),
+        "update_accepted": False,
+    }
+    slug = getattr(args, "slug", None)
+    attempt_id = getattr(args, "request_id", None) or getattr(args, "attempt", None)
+    if slug is not None:
+        report["slug"] = slug
+    if attempt_id is not None:
+        report["attempt_id"] = attempt_id
+    if hasattr(args, "expected_revision"):
+        report["expected_revision"] = args.expected_revision
+    if slug is None:
+        return report
+    try:
+        state = goal.load(slug)
+    except (goal.GoalStateError, OSError, ValueError):
+        return report
+    if goal.execution_mode(state) != "state":
+        return report
+    report["execution_revision"] = state["execution"]["revision"]
+    attempt = next(
+        (item for item in state["execution"]["attempts"] if item["id"] == attempt_id),
+        None,
+    )
+    if attempt is not None:
+        report["attempt_status"] = attempt["status"]
+    return report
+
+
+def _dispatch_step(args) -> tuple[dict, int]:
+    try:
+        if args.action == "step-begin":
+            report = steps.begin(args.slug, args.request_id)
+        elif args.action == "step-attach":
+            report = steps.attach(
+                args.slug, args.attempt, args.worker,
+                expected_revision=args.expected_revision,
+            )
+        elif args.action == "step-finish":
+            report = steps.finish(
+                args.slug, args.attempt, expected_revision=args.expected_revision,
+                update_file=args.update_file, worker_evidence_file=args.worker_evidence_file,
+                timeout=args.timeout, force=args.force,
+            )
+        else:
+            report = steps.recover(
+                args.slug, args.attempt, expected_revision=args.expected_revision,
+                reason=args.reason, worker_state=args.worker_state,
+                evidence_file=args.evidence_file,
+            )
+    except (goal.GoalStateError, task_state.StateError, OSError, ValueError) as error:
+        return _step_error(args, error), 2
+    return report, report["exit_code"]
+
 
 def dispatch(args) -> tuple[dict, int]:
     if args.action == "doctor":
-        return {"runtime": paths.runtime(), "project": str(paths.project_root()),
-                "implementation": str(Path(__file__).resolve().parent),
-                "state": str(paths.harness_root()), "targets": paths.targets(args.scope),
-                "memory_mode": "explicit recall" if paths.runtime() == "codex" else "Claude project memory"}, 0
+        return {
+            "runtime": paths.runtime(),
+            "project": str(paths.project_root()),
+            "implementation": str(Path(__file__).resolve().parent),
+            "state": str(paths.harness_root()),
+            "targets": paths.targets(args.scope),
+            "memory_mode": "explicit recall" if paths.runtime() == "codex" else "Claude project memory",
+            "state_supported": filelock.state_supported(),
+            "worker_availability": "Determined by the host; the Python CLI does not dispatch or inspect workers.",
+        }, 0
     if args.action == "status":
         if args.slug:
             return status(goal.load(args.slug)), 0
@@ -202,8 +286,12 @@ def dispatch(args) -> tuple[dict, int]:
             args.objective, str(paths.project_root()),
             "coverage" if args.coverage else "command", args.coverage or args.gate,
             max_turns=args.max_turns, max_minutes=args.max_minutes,
-            watch_paths=args.watch, review_criterion=args.review)
+            watch_paths=args.watch, review_criterion=args.review,
+            execution=args.execution,
+        )
         return status(state), 0
+    if args.action in {"step-begin", "step-attach", "step-finish", "step-recover"}:
+        return _dispatch_step(args)
     if args.action == "check":
         return check(args)
     if args.action == "review":
@@ -231,7 +319,7 @@ def dispatch(args) -> tuple[dict, int]:
         return entry_summary(refine_log.undo(force=args.force, entry_id=args.entry, scope=args.scope)), 0
     if args.action == "refine-outcome":
         entry = refine_log.record_outcome(args.entry, args.outcome, args.task,
-                                         args.evidence_file.read_text(), scope=args.scope)
+                                          args.evidence_file.read_text(), scope=args.scope)
         return entry_summary(entry), 0
     if args.action == "recall":
         return recall(args.query, args.limit), 0

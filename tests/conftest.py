@@ -30,3 +30,34 @@ def make_state_goal(tmp_path, monkeypatch, request):
         return goal.create(**args)
 
     return make
+
+@pytest.fixture(params=["codex", "claude"])
+def state_client(tmp_path, request):
+    import json
+    import os
+    import subprocess
+
+    project = tmp_path / "cli project "
+    project.mkdir()
+    runtime = request.param
+    folder = ".agents" if runtime == "codex" else ".claude"
+    (project / folder).mkdir()
+    isolated_home = tmp_path / "isolated home"
+    isolated_home.mkdir()
+    env = dict(
+        os.environ,
+        HOME=str(isolated_home),
+        CODEX_HOME=str(isolated_home / ".codex"),
+        PYTHONDONTWRITEBYTECODE="1",
+    )
+    entrypoint = ROOT / folder / "skills/horizon/scripts/harness.py"
+
+    def run(*args):
+        proc = subprocess.run(
+            [sys.executable, str(entrypoint), "--runtime", runtime,
+             "--project", str(project), *args],
+            cwd=project, env=env, capture_output=True, text=True, timeout=10,
+        )
+        return proc.returncode, json.loads(proc.stdout or proc.stderr)
+
+    return project, runtime, run

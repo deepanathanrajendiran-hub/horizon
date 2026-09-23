@@ -39,3 +39,29 @@ def test_documented_commands_parse_with_the_real_cli(runtime, folder, name):
                 assert args.runtime == runtime
                 commands += 1
     assert commands > 0
+
+@pytest.mark.parametrize("runtime", ["codex", "claude"])
+def test_state_mode_command_forms_parse(runtime):
+    parsed = cli.parser().parse_args([
+        "--runtime", runtime, "start", "Objective", "--execution", "state", "--gate", "true",
+    ])
+    assert parsed.execution == "state"
+    assert cli.parser().parse_args([
+        "--runtime", runtime, "step-begin", "goal", "--request-id", "r1",
+    ]).request_id == "r1"
+    assert cli.parser().parse_args([
+        "--runtime", runtime, "step-attach", "goal", "--attempt", "r1", "--worker", "host-1",
+        "--expected-revision", "2",
+    ]).expected_revision == 2
+    finished = cli.parser().parse_args([
+        "--runtime", runtime, "step-finish", "goal", "--attempt", "r1",
+        "--expected-revision", "2", "--update-file", "update.json",
+        "--worker-evidence-file", "terminal.txt", "--timeout", "3", "--force",
+    ])
+    assert finished.timeout == 3 and finished.force is True
+    recovered = cli.parser().parse_args([
+        "--runtime", runtime, "step-recover", "goal", "--attempt", "r1",
+        "--expected-revision", "2", "--reason", "Stopped.", "--worker-state", "stopped",
+        "--evidence-file", "terminal.txt",
+    ])
+    assert recovered.worker_state == "stopped"
