@@ -1166,3 +1166,93 @@ def test_real_cli_recovers_reserved_attempt_and_doctor_is_read_only(state_client
     assert error["attempt_id"] == "r2"
     assert error["update_accepted"] is False
     assert "execution_revision" not in error
+
+def _seed_cli_finishing_attempt(project, runtime, slug, attempt_id):
+    folder = ".codex" if runtime == "codex" else ".claude"
+    path = project / folder / "harness" / "goals" / f"{slug}.json"
+    state = json.loads(path.read_text())
+    attempt = next(item for item in state["execution"]["attempts"]
+                   if item["id"] == attempt_id)
+    reference = {"path": "objects/pending.json", "sha256": "a" * 64}
+    attempt.update({
+        "status": "finishing",
+        "gate_process": {
+            "pid": 12345,
+            "pgid": 12345,
+            "started_at": "2026-09-23T00:00:00+00:00",
+            "finish_nonce": "fixture-finish",
+        },
+        "finish_nonce": "fixture-finish",
+        "update_sha256": "b" * 64,
+        "pending": {
+            "update": reference,
+            "candidate": reference,
+            "audit": reference,
+            "worker_evidence": reference,
+        },
+    })
+    state["execution"]["revision"] += 1
+    path.write_text(json.dumps(state))
+    return state["execution"]["revision"]
+
+
+def test_real_cli_finishing_recovery_requires_bound_gate_headers(state_client, tmp_path):
+    project, runtime, run = state_client
+    code, state = run(
+        "start", "Recover a stopped gate", "--execution", "state",
+        "--gate", "true", "--max-turns", "1",
+    )
+    assert code == 0, state
+    code, begun = run("step-begin", state["slug"], "--request-id", "r1")
+    assert code == 0, begun
+    code, attached = run(
+        "step-attach", state["slug"], "--attempt", "r1", "--worker", "worker-1",
+        "--expected-revision", str(begun["execution_revision"]),
+    )
+    assert code == 0, attached
+    revision = _seed_cli_finishing_attempt(project, runtime, state["slug"], "r1")
+    evidence = tmp_path / "gate-liveness.txt"
+    rejected = [
+        "gate-state: running\ngate-pid: 12345\n"
+        "The native host confirms worker-1 stopped but reports an invalid gate state.",
+        "gate-state: stopped\ngate-state: stopped\ngate-pid: 12345\n"
+        "The native host confirms worker-1 and the gate process group stopped.",
+        "gate-state: stopped\ngate-state: not-started\ngate-pid: 12345\n"
+        "The native host confirms worker-1 and the gate process group stopped.",
+        "gate-state: stopped\ngate-pid: 12345\ngate-pid: 12345\n"
+        "The native host confirms worker-1 and the gate process group stopped.",
+        "gate-state: stopped\ngate-pid: 99999\n"
+        "The native host confirms worker-1 and the gate process group stopped.",
+    ]
+    for observation in rejected:
+        evidence.write_text(observation)
+        code, error = run(
+            "step-recover", state["slug"], "--attempt", "r1",
+            "--expected-revision", str(revision), "--reason", "Finish was interrupted.",
+            "--worker-state", "stopped", "--evidence-file", str(evidence),
+        )
+        assert code == 2
+        assert error["error"] == "StepError"
+        assert error["message"]
+        assert error["attempt_id"] == "r1"
+        assert error["expected_revision"] == revision
+        assert error["execution_revision"] == revision
+        assert error["attempt_status"] == "finishing"
+        assert error["update_accepted"] is False
+        status = run("status", state["slug"])[1]
+        assert status["active_attempt"]["status"] == "finishing"
+
+    evidence.write_text(
+        "GATE-STATE: StOpPeD\n"
+        "gate-pid: 12345\n"
+        "The native host confirms worker-1 and the complete gate process group, "
+        "including descendants, stopped before recovery."
+    )
+    code, recovered = run(
+        "step-recover", state["slug"], "--attempt", "r1",
+        "--expected-revision", str(revision), "--reason", "Finish was interrupted.",
+        "--worker-state", "stopped", "--evidence-file", str(evidence),
+    )
+    assert code == 1, recovered
+    assert recovered["attempt_status"] == "recovered"
+    assert recovered["update_accepted"] is False
