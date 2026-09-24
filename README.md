@@ -29,6 +29,9 @@ Open this project in either agent. Example requests:
 > Use horizon to finish this refactor. Run the relevant tests and have a fresh
 > reviewer check the requested behavior. Stop after five increments or 30 minutes.
 
+> Use Horizon state mode for this parser fix. Give each fresh worker one saved
+> increment, preserve its real host handle, and require independent review.
+
 > Refine what we learned from this task. Propose the smallest reusable change
 > and show me the evidence and diff.
 
@@ -43,7 +46,9 @@ python3 .claude/skills/horizon/scripts/harness.py --runtime claude doctor
 For another project, pass `--project "/absolute/project/path"` before the
 subcommand. The skill's location determines the implementation, while the
 working project determines state. See the [CLI reference](docs/harness-cli.md)
-for lifecycle commands, proposal JSON, recall, and undo.
+for conversation and state-mode lifecycle commands, packet/update schemas,
+proposal JSON, recall, and undo. State mode is explicit; goals created without
+`--execution state` keep the existing conversation behavior.
 
 ## Optional personal installation
 
@@ -85,7 +90,8 @@ from the old implementation must rerun verification before completing.
 - Refinement protects both runtimes' control files and the shared implementation.
 - History shows later helpful, ineffective, or harmful observations for each
   lesson, while preserving its undo record.
-- Each skill is under 100 lines; executable orchestration lives in tested code.
+- Runtime dispatch stays in concise skill entrypoints; shared state protocol,
+  schemas, recovery rules, and limits live in the linked CLI reference.
 
 ## Practical boundaries
 

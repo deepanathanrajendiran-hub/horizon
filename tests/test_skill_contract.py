@@ -9,6 +9,9 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "harness"))
 import cli
+from string import Template
+import json
+import task_state
 
 
 @pytest.mark.parametrize("runtime,folder", [("codex", ".agents"), ("claude", ".claude")])
@@ -29,16 +32,38 @@ def test_skill_has_resolvable_entrypoint_and_references(runtime, folder, name):
 @pytest.mark.parametrize("runtime,folder", [("codex", ".agents"), ("claude", ".claude")])
 @pytest.mark.parametrize("name", ["horizon", "refine"])
 def test_documented_commands_parse_with_the_real_cli(runtime, folder, name):
-    text = (ROOT / folder / "skills" / name / "SKILL.md").read_text()
+    skill = ROOT / folder / "skills" / name / "SKILL.md"
+    sources = [skill]
+    if name == "horizon":
+        sources.append(skill.parent / "references/commands.md")
+
     commands = 0
+    documented_state_commands = set()
     fence = chr(96) * 3
-    for block in re.findall(fence + r"bash\n(.*?)" + fence, text, re.S):
-        for line in block.replace("\\\n", "").splitlines():
-            if line.startswith('python3 "$HARNESS"'):
-                args = cli.parser().parse_args(shlex.split(line)[2:])
-                assert args.runtime == runtime
-                commands += 1
+    for source in sources:
+        text = source.read_text()
+        for block in re.findall(fence + r"bash\n(.*?)" + fence, text, re.S):
+            for line in block.replace("\\\n", "").splitlines():
+                if line.startswith('python3 "$HARNESS"') and not line.endswith(" --help"):
+                    expanded = Template(line).safe_substitute(
+                        RUNTIME=runtime,
+                        CURRENT_REVISION="2",
+                        PACKET_REVISION="1",
+                    )
+                    args = cli.parser().parse_args(shlex.split(expanded)[2:])
+                    assert args.runtime == runtime
+                    commands += 1
+                    if source.name == "commands.md":
+                        documented_state_commands.add(args.action)
+
     assert commands > 0
+    if name == "horizon":
+        assert {
+            "step-begin",
+            "step-attach",
+            "step-finish",
+            "step-recover",
+        } <= documented_state_commands
 
 @pytest.mark.parametrize("runtime", ["codex", "claude"])
 def test_state_mode_command_forms_parse(runtime):
@@ -65,3 +90,72 @@ def test_state_mode_command_forms_parse(runtime):
         "--evidence-file", "terminal.txt",
     ])
     assert recovered.worker_state == "stopped"
+
+def test_documented_state_update_examples_merge_with_real_contract(tmp_path):
+    text = (ROOT / "docs/harness-cli.md").read_text()
+    examples = [
+        json.loads(block)
+        for block in re.findall(r"\x60\x60\x60json\n(.*?)\x60\x60\x60", text, re.S)
+    ]
+    full_update = next(
+        example for example in examples
+        if example.get("schema_version") == 1 and example.get("attempt_id") == "request-001"
+    )
+    operations = {
+        example["op"]: example
+        for example in examples
+        if example.get("op") in {"upsert", "archive"}
+    }
+    assert set(operations) == {"upsert", "archive"}
+
+    task = {
+        "summary": "",
+        "entries": [{
+            "id": "obsolete-finding",
+            "kind": "question",
+            "statement": "Does the previous finding still apply?",
+            "evidence": [],
+            "provenance": {
+                "attempt_id": "prior-001",
+                "tree_hash": "seed-snapshot",
+                "at": "2026-09-24T00:00:00+00:00",
+            },
+        }],
+        "next_action": "Inspect the documented update examples.",
+    }
+    provenance = {
+        "attempt_id": "request-001",
+        "tree_hash": "current-snapshot",
+        "at": "2026-09-24T00:01:00+00:00",
+    }
+
+    candidate, _ = task_state.merge_update(
+        task,
+        full_update,
+        attempt_id="request-001",
+        base_revision=1,
+        project=tmp_path,
+        provenance=provenance,
+    )
+    assert candidate["next_action"]
+
+    for operation in operations.values():
+        update = {
+            "schema_version": 1,
+            "attempt_id": "request-001",
+            "base_revision": 1,
+            "did": "Validate the documented operation envelope.",
+            "ops": [operation],
+        }
+        candidate, _ = task_state.merge_update(
+            task,
+            update,
+            attempt_id="request-001",
+            base_revision=1,
+            project=tmp_path,
+            provenance=provenance,
+        )
+        if operation["op"] == "upsert":
+            assert any(entry["id"] == "parser-open-question" for entry in candidate["entries"])
+        else:
+            assert all(entry["id"] != "obsolete-finding" for entry in candidate["entries"])
