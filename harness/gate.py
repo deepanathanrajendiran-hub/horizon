@@ -161,7 +161,9 @@ def run_gate(state: dict, timeout: int = DEFAULT_TIMEOUT,
             on_spawn(proc)
         except Exception as exc:
             _stop_owned_process(proc)
-            raise GateUnrunnable(f"Could not record the running gate: {exc}") from exc
+            error = GateUnrunnable(f"Could not record the running gate: {exc}")
+            error.spawn_record_uncertain = True
+            raise error from exc
 
     try:
         stdout, stderr = proc.communicate(timeout=timeout)

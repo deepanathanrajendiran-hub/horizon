@@ -113,14 +113,23 @@ def test_goal_create_waits_for_process_owned_create_lock(tmp_path):
         return
     state_dir = tmp_path / "goals"
     state_dir.mkdir()
+    attempted = tmp_path / "lock-attempted"
     script = "\n".join([
+        "import contextlib",
         "import sys",
         f"sys.path.insert(0, {str(BIN)!r})",
         "from pathlib import Path",
         "import paths",
         f"paths.goals_dir = lambda: Path({str(state_dir)!r})",
+        "import filelock",
+        "original = filelock.goal_locked",
+        "@contextlib.contextmanager",
+        "def observed_lock(target, timeout=10.0):",
+        f"    Path({str(attempted)!r}).write_text('attempting')",
+        "    with original(target, timeout):",
+        "        yield",
+        "filelock.goal_locked = observed_lock",
         "import goal",
-        "print('ready', flush=True)",
         f"goal.create('shared', {str(tmp_path)!r}, 'command', 'true')",
     ])
     child = None
@@ -130,8 +139,11 @@ def test_goal_create_waits_for_process_owned_create_lock(tmp_path):
                 [sys.executable, "-u", "-c", script],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             )
-            assert child.stdout.readline().strip() == "ready", child.stderr.read()
-            time.sleep(0.2)
+            deadline = time.monotonic() + 5
+            while not attempted.exists():
+                assert child.poll() is None, child.stderr.read()
+                assert time.monotonic() < deadline, "child never reached lock acquisition"
+                time.sleep(0.01)
             assert list(state_dir.glob("*.json")) == []
         stdout, stderr = child.communicate(timeout=5)
         assert child.returncode == 0, (stdout, stderr)

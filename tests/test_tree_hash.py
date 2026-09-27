@@ -207,3 +207,6 @@ def test_goal_bookkeeping_does_not_change_hash(make_state_goal):
     before = tree_hash.compute(state["cwd"], state["watch_paths"])
     steps.begin(state["slug"], "r1")
     assert tree_hash.compute(state["cwd"], state["watch_paths"]) == before
+    source = Path(state["cwd"]) / "real-source.txt"
+    source.write_text("meaningful work")
+    assert tree_hash.compute(state["cwd"], state["watch_paths"]) != before

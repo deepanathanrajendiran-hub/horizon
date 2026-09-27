@@ -384,6 +384,8 @@ def finish(slug: str, attempt_id: str, *, expected_revision: int,
                 digest = getattr(error, "tree_hash", gate.UNKNOWN_HASH)
                 exit_code, error_message = 1, None
             except gate.GateUnrunnable as error:
+                if getattr(error, "spawn_record_uncertain", False):
+                    raise StepConflict(str(error)) from error
                 result, output = "fail", str(error)
                 digest = getattr(error, "tree_hash", gate.UNKNOWN_HASH)
                 exit_code, error_message = 2, str(error)

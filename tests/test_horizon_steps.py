@@ -1256,3 +1256,39 @@ def test_real_cli_finishing_recovery_requires_bound_gate_headers(state_client, t
     assert code == 1, recovered
     assert recovered["attempt_status"] == "recovered"
     assert recovered["update_accepted"] is False
+
+@pytest.mark.parametrize("field,value", [
+    ("gate", {"kind": "command", "value": "false"}),
+    ("review_criterion", "Worker says review passed."),
+    ("budget", {"max_turns": 999, "max_minutes": None}),
+    ("watch_paths", []),
+])
+def test_worker_update_cannot_overwrite_goal_control_fields(
+        make_state_goal, tmp_path, field, value):
+    import shlex
+
+    counter = tmp_path / f"gate-counter-{field}"
+    state, attached, update_file, evidence = _finish_fixture(
+        make_state_goal, tmp_path,
+        review_criterion="Independent reviewer must inspect the checkpoint.",
+        gate_value="printf x >> " + shlex.quote(str(counter)),
+    )
+    before = goal.load(state["slug"])
+    update = json.loads(update_file.read_text())
+    update["ops"] = [{"op": "set", "field": field, "value": value}]
+    update_file.write_text(json.dumps(update))
+
+    with pytest.raises(steps.StepError):
+        steps.finish(
+            state["slug"], "r1",
+            expected_revision=attached["execution_revision"],
+            update_file=update_file, worker_evidence_file=evidence,
+        )
+
+    after = goal.load(state["slug"])
+    assert not counter.exists()
+    assert after["gate"] == before["gate"]
+    assert after["budget"] == before["budget"]
+    assert after["watch_paths"] == before["watch_paths"]
+    assert after.get("reviews", []) == before.get("reviews", [])
+    assert after["execution"]["attempts"][0]["status"] == "attached"
