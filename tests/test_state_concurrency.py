@@ -278,6 +278,7 @@ os._exit(73)
     )
     assert recovered["attempt_status"] == "recovered"
     assert recovered["update_accepted"] is False
+    assert recovered["checkpoint"]["gate"] == "fail"
 
 def test_artifact_edit_survives_crash_and_marks_old_evidence_stale(
         make_state_goal, tmp_path):
@@ -339,6 +340,11 @@ os._exit(74)
     assert recovered["update_accepted"] is False
     next_packet = steps.begin(state["slug"], "r3")["packet"]
     assert next_packet["task"]["entries"][0]["freshness"] == "stale"
+    after_recovery = goal.load(state["slug"])
+    assert artifact.read_text() == "version two"
+    assert after_recovery["execution"]["task"]["entries"][0]["statement"] == (
+        "Artifact is version one."
+    )
 
 
 def test_crash_after_finishing_marker_records_only_recovery_failure(

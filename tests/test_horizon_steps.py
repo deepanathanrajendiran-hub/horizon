@@ -1287,6 +1287,9 @@ def test_worker_update_cannot_overwrite_goal_control_fields(
 
     after = goal.load(state["slug"])
     assert not counter.exists()
+    assert after["gate"].get("review_criterion") == before["gate"].get(
+        "review_criterion"
+    )
     assert after["gate"] == before["gate"]
     assert after["budget"] == before["budget"]
     assert after["watch_paths"] == before["watch_paths"]
