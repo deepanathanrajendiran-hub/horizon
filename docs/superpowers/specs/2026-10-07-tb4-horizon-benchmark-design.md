@@ -321,3 +321,15 @@ Reading Harbor 0.24.0's source and every Terminal-Bench v4.0.0 `task.toml` while
 - **Build cache.** It may be pruned after validation, because both images are pinned by ID and every trial checks that ID.
 - **Bundle smoke tests.** These run in Task 13 in clean `python:3.10-slim` and `python:3.12-slim` containers (doctor, start, check, status), and again in every candidate task image.
 - **Raw evidence digests.** These are committed as `evidence/raw-digests.json`, beside `results.jsonl`.
+
+## Review-stage corrections (2026-10-07)
+
+A whole-branch review of the implementation, checked against Harbor 0.24.0 and the Claude Code 2.1.293 binary, changed these rules before the freeze. Where this section disagrees with anything above, this section governs.
+
+- **Usage-limit stops.** Claude Code 2.1.293 words the stop "You've hit your session limit" (or weekly or Sonnet limit), which Harbor's patterns miss, and it ends the turn with a synthetic main-session assistant message that carries `error: "rate_limit"`. A trial counts as stopped by a usage limit when its stream has a rejected `rate_limit_event`, such an assistant error, a result with `api_error_status` 429 or `api_error` `usage_limit_reached`, or limit wording in an error result. Harbor's `ApiRateLimitError` alone is not evidence: its generic pattern matches the `rate_limit_event` line in every transcript. Such a trial is invalid ("usage limit during trial"), its partner arm is skipped, and the runner waits for the reset.
+- **API-error recovery.** Only a main-session assistant message without an error field counts as the agent continuing after an API error.
+- **Pacing.** The probe also reads the limiting window the server names (`rateLimitType`, `utilization`, `resetsAt`), such as `seven_day_sonnet`, which `unifiedWindows` omits. A rejected window is waited out until its own reset, and the weekly ceiling also applies to a limiting seven-day window.
+- **Model switches.** A trial is invalid when its init model is not Sonnet 5.5, when the stream has a `model_fallback`, `model_refusal_fallback` or `model_consent_fallback` event, or when a main-session assistant message names another model. Subagent messages are not checked, since built-in subagents may use their own default model in both arms.
+- **Horizon calls.** A command counts as a Horizon CLI call only when it names `--runtime claude` (which the bundled CLI requires), `$HARNESS`, or `skills/horizon/`, and `harness.py` must start a path component. A task's own `test_harness.py` or `harness.py` therefore never counts as the control arm invoking Horizon.
+- **Integrity scan.** `benchmark-source` also flags any GitHub URL ending in `/terminal-bench` (including the earlier `laude-institute` repository and `terminal-bench-2`) and paths to a task's `solution/` or `tests/test.sh`/`tests/test_outputs.py` inside a cloned `tasks/` tree.
+- **Report.** The report refuses to render unless the results cover exactly the manifest's measured tasks.
