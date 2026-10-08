@@ -288,3 +288,36 @@ The approved design choices are unchanged: Terminal-Bench 4.0 built natively, su
 - both arms now share a 105-minute soft deadline instead of 120;
 - effort is pinned at `high`;
 - trials run strictly one at a time.
+
+## Plan-stage corrections (2026-10-07)
+
+Reading Harbor 0.24.0's source and every Terminal-Bench v4.0.0 `task.toml` while planning changed several mechanisms. Where this section and the body above disagree, this section governs.
+
+- **Arm delivery.** Both arms share one pinned task copy. The arm text is appended with Harbor's `--extra-instruction-path` (recorded in `lock.json`), so the arms differ only in that file and in `--skill`.
+- **Deadline sentence.** Every v4.0.0 instruction ends with "You have 28800 seconds to complete this task." The pinned copy removes that one sentence in both arms, so the 105-minute paragraph is the only deadline; "Do not cheat by using online solutions or hints specific to this task." is kept.
+- **Verifier image.** Every task uses a separate verifier built from `tests/Dockerfile`, and Harbor rebuilds it in every trial unless `[verifier.environment].docker_image` is set. The copy therefore pins a second image, `tb4-local/<task>-verifier:v4.0.0`. When `[verifier.environment]` is absent, the copy first fills it with the `[environment]` keys, as Terminal-Bench's own release script does. The image checks cover both images.
+- **Image identity.** Harbor records no image ID. Each trial runs with `--ek keep_containers=true`. The runner then reads the agent and verifier containers' image IDs, copies the Horizon ledger out with `docker cp`, and removes the containers, networks, and volumes.
+- **Ledger collection.** The ledger is collected with `docker cp`, not with Harbor `artifacts`. Job-level artifacts are re-uploaded into the verifier and would change what the Horizon arm's verifier sees.
+- **Reference check 3.** Harbor's oracle cannot take `--skill`. The check therefore runs the oracle on a check-only copy whose `solve.sh` first plants a representative ledger at `<WORKDIR>/.claude/harness`, as the image user. This also proves that the agent user can write there. The bundle itself lands in `/logs/agent/sessions/skills`, which no verifier sees.
+- **Ledger location.** The ledger location is the image's `WORKDIR`, not always `/app`.
+- **Python and bundle checks.** These run inside each built image as the image user, with the network disabled.
+- **Validity.** Harbor records only the first exception, so a verifier failure after an `AgentTimeoutError` is detected from a missing `verifier_result.rewards.reward`, not from `exception_info`.
+- **Timeouts.** Harbor does not kill `claude` inside the container on timeout. `final_message` is therefore null for every timed-out trial, even if a late `result` line appears.
+- **Usage.** `tokens` and `cost_usd` come from the stream-json `result` record's `modelUsage` and `total_cost_usd`. Harbor's `agent_result` and its LiteLLM cost fallback are never used.
+- **Horizon end reasons.**
+  - "Minutes exhausted" has no CLI signal; it is derived from the ledger (`used.started` + `max_minutes` against the agent's finish time).
+  - "Turns exhausted" is `BudgetExhausted`.
+  - Any `reopen` or `--execution state` call is flagged.
+- **Usage pacing.** Before each trial the runner probes subscription usage with a one-line call to the trial model, Sonnet 5.5, so the probe sees the same windows. It waits for a window to reset when that window's utilization is above the limit `Pace` sets in `run.py` (five-hour and weekly). A failed or hung probe is retried, never read as "no limit". After a trial that hits a usage limit, the runner waits for that window's reset.
+- **Judge.** `--bare` cannot be used for the judge because it ignores OAuth. The judge instead runs with an empty `CLAUDE_CONFIG_DIR` and `HOME`, `--tools ""`, `--strict-mcp-config`, and `--json-schema`.
+- **Static filter.** The filter reads the deprecated `allow_internet = false`, since no task sets `network_mode`, and also excludes tasks that set `skills_dir`. With these predicates 43 tasks survive and 31 fall in the 2–8 h band. `react-lead-form` is expected to fail the Python check, and `risk-scorer-replay` to fail reference check 3 (its user cannot write `/app`).
+- **More invalidity causes.** A trial is also invalid when:
+  - its Claude Code version is not 2.1.293;
+  - it has no `result` record, or an erroring one, without a timeout;
+  - the Mac slept during it (`kern.sleeptime`/`kern.waketime` changed): Harbor's timer pauses during sleep but Horizon's wall clock does not;
+  - the runner was interrupted;
+  - it was skipped because its partner arm was already invalid.
+- **Freeze rule.** Measured trials need `HEAD` to descend from `tb4-pilot-freeze` with the frozen paths unchanged (including `evidence/draw.json`, which holds the seed and algorithm), so evidence and deviation commits do not lock the run. Committing `results.jsonl` closes it.
+- **Build cache.** It may be pruned after validation, because both images are pinned by ID and every trial checks that ID.
+- **Bundle smoke tests.** These run in Task 13 in clean `python:3.10-slim` and `python:3.12-slim` containers (doctor, start, check, status), and again in every candidate task image.
+- **Raw evidence digests.** These are committed as `evidence/raw-digests.json`, beside `results.jsonl`.
