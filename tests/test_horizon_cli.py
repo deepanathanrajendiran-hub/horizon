@@ -246,6 +246,7 @@ def test_check_returns_a_filled_review_brief(client):
     brief = report["review_brief"]
     assert brief.startswith(f"Review checkpoint {digest}.")
     assert "Make ready.txt say ready." in brief and 'R1 [gate] "ready.txt says ready"' in brief
+    assert "\nVERDICTS\nR1: ?\nEND VERDICTS\n" in brief
     assert report["review_file"] in brief
     assert Path(report["review_file"]).name == f"horizon-review-{slug}-{digest[:12]}-1.md"
     assert not Path(report["review_file"]).resolve().is_relative_to(project.resolve())

@@ -187,9 +187,10 @@ The reviewer writes its reply to `review_file`. Pass that file, unedited, as
 `--evidence-file`. Record every verdict, FAIL included, with
 `review --result fail|pass` before changing anything. Record `pass` only when
 every requirement line is PASS, or NOT REVIEWED on a line tagged
-`[unverifiable]`. The CLI refuses a pass whose reply has a FAIL or UNVERIFIED
-line, a FAIL headline, a requirement line without a verdict, or no echo of the
-checkpoint hash; record `fail` instead. A FAIL or UNVERIFIED line is not a pass:
+`[unverifiable]`. The brief ends with a `VERDICTS` block that the reviewer fills
+in. The CLI refuses a pass when that block is missing, incomplete or holds a
+FAIL or UNVERIFIED, when the reply has a `Rk: FAIL` line or a FAIL headline
+elsewhere, or when it does not echo the checkpoint hash; record `fail` instead. A FAIL or UNVERIFIED line is not a pass:
 spend the next increment on those lines while budget remains, or stop and report
 them as unverified. A reviewer's expectation ("should handle", "by design",
 "harmless") is not evidence. Use the real reviewer handle and the hash the

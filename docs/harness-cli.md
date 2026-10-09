@@ -57,7 +57,8 @@ below, filled in with:
 - the gate directory's request and requirements (each cut at 32,000 characters,
   with a pointer to the full file);
 - the runtime's harness directory;
-- `review_file`.
+- `review_file`;
+- a `VERDICTS` block with one `Rk: ?` line for each requirement line.
 
 ```text
 Review checkpoint {digest}. Begin your reply with `Reviewed checkpoint: {digest}`.
@@ -80,20 +81,27 @@ including the repeated, boundary and multi-step cases the request implies.
 Where the request is ambiguous, choose your own reading and say where the
 artifact's reading differs.
 
-Reply with exactly one line per requirement:
-`Rk: PASS|FAIL|UNVERIFIED - command and observed output`. A requirement you could
-not test is UNVERIFIED, and so is one where a caveat bears on whether it holds.
-Test a line tagged [unverifiable] if you can and answer it as usual; if you
-cannot, answer `Rk: NOT REVIEWED`. If a symptom the request reports still
-reproduces, that line FAILS even when a comment, docstring or design note
-justifies the behaviour. Do not repeat earlier reviewers' lines. List anything
-else under `Non-blocking:`. Keep the review under ten minutes. Before returning,
-write your complete reply to {review_file}.
+For each requirement, give the command you ran and what you observed. A
+requirement you could not test is UNVERIFIED, and so is one where a caveat
+bears on whether it holds. Test a line tagged [unverifiable] if you can; if you
+cannot, its verdict is NOT REVIEWED. If a symptom the request reports still
+reproduces, that requirement FAILS even when a comment, docstring or design
+note justifies the behaviour. Do not repeat earlier reviewers' lines. List
+anything else under `Non-blocking:`. Keep the review under ten minutes.
+
+End your reply with this block. Change each `?` to exactly one of PASS, FAIL,
+UNVERIFIED or NOT REVIEWED, and write nothing else on those lines:
+
+VERDICTS
+{verdicts}
+END VERDICTS
+
+Before returning, write your complete reply to {review_file}.
 ```
 
 The agent replaces only `<<ARTIFACTS>>` and `<<HOW_TO_RUN>>`. A goal without
-`--gate-path` also keeps `<<REQUEST>>` and `<<REQUIREMENTS>>` for the agent to
-fill. When the latest review was recorded as a fail, the brief ends with
+`--gate-path` also keeps `<<REQUEST>>`, `<<REQUIREMENTS>>` and `<<VERDICT_LINES>>`
+for the agent to fill. When the latest review was recorded as a fail, the brief ends with
 `Previous:` and that review's FAIL and UNVERIFIED lines and FAIL headlines, each
 prefixed with `> `. Do not dispatch a reviewer for a baseline check or for a last
 check before stopping; a coverage goal reports `review_required` on every check.
@@ -102,27 +110,33 @@ check before stopping; a coverage goal reports `review_required` on every check.
 keeps the reply's head and tail. A pass must contain the first 12 characters of
 `--hash`; a fail is recorded without that echo, so no reviewer's FAIL is lost.
 
-A verdict line starts with a requirement id after any heading, list, checkbox or
-numbering marker, or is a table row with the id in one of its cells. Ids may be
-listed (`R1, R2`) or given as a range (`R1-R3`). The line's worst verdict counts:
-its first verdict word, plus any all-capitals PASS, FAIL, UNVERIFIED or NOT
-REVIEWED (or a check mark or cross) later on the line. Quoted text and code spans
-are ignored, and so are counts and history such as `0 FAILED` or `was FAIL`.
-FAIL ranks above UNVERIFIED, which ranks above NOT REVIEWED and PASS. A FAIL
-headline is a line that starts with Verdict, Overall, Result, Status, Conclusion
-or Outcome and says FAIL, or a line that is only `FAIL` or `Fail` plus
-punctuation. Lines inside code fences are never headlines.
+The verdicts are read from the reply's block, which runs from a `VERDICTS` line
+to an `END VERDICTS` line. Emphasis, heading marks and code fences around the
+block are allowed. Each line inside the block must read `Rk: PASS`, `Rk: FAIL`,
+`Rk: UNVERIFIED` or `Rk: NOT REVIEWED`, with nothing else on it.
+
+The prose around the block is checked only for two unambiguous signals:
+- a `Rk: FAIL` or `Rk: UNVERIFIED` line, where tags or a sub-case in brackets
+  may follow the id;
+- a FAIL headline, that is, a label such as Verdict, Overall, Result, Status,
+  Conclusion, Outcome, Assessment or Summary followed at once by FAIL, or a
+  line that is only a bold or bare `FAIL`.
+
+Text such as "the previous FAIL is fixed", tallies like `FAILED: 0`, and test
+output inside code fences does not count. Lines quoted with `>`, an earlier
+reviewer's findings, are ignored.
 
 A pass is refused when any of these holds:
-- the last verdict for any requirement is FAIL or UNVERIFIED;
-- a line reads as a FAIL headline (`Verdict: FAIL`, or an all-caps `FAIL` as the
-  line's first word);
-- the goal has a gate directory, and its requirements.md has no requirement
-  lines, a requirement line has no verdict, or a line answers NOT REVIEWED
-  without the `[unverifiable]` tag.
+- the block holds a FAIL or UNVERIFIED, an unreadable line, or two verdicts for
+  one id, or the reply has more than one block or an unclosed one;
+- the prose has a `Rk: FAIL`/`Rk: UNVERIFIED` line or a FAIL headline;
+- the goal has a gate directory, and either its requirements.md has no
+  requirement lines, or the reply has no block, or the block misses a
+  requirement line, names an id that is not one, or answers NOT REVIEWED on a
+  line without the `[unverifiable]` tag.
 
-Lines quoted with `>` are ignored unless the whole reply is quoted. A fail needs
-only the 40-character floor and the current checkpoint.
+Without a gate directory, a block is optional. A fail needs only the
+40-character floor and the current checkpoint.
 
 ## State-mode worker protocol
 

@@ -206,6 +206,31 @@ C9, C10 and N1 with these adjustments:
 - Every change was designed from the same 10 TB4 trials, and some of the design
   drew on EvoCode material. P8 handles the contamination.
 
+## Revision after the parser probes (2026-10-09, supersedes the verdict grammar below)
+
+Two adversarial probes ran against the revised parser and found highly plausible
+replies that still went wrong in both directions:
+- **False passes:** a sub-case line `R2 (empty file): FAIL` followed by
+  `R2 (malformed): PASS`, `PARTIAL PASS`, `NOT PASSED`, a lowercase "fails",
+  "could not verify".
+- **False refusals:** "the previous FAIL is fixed", a validator's own FAIL
+  output, `FAILED: 0` tallies, a Previous/Now table.
+
+Reading verdicts out of free prose cannot be made reliable. Because the harness
+owns the brief (N1), the reply format changes instead:
+- The brief ends with a pre-filled `VERDICTS` ... `END VERDICTS` block holding
+  one `Rk: ?` line per requirement.
+- The reviewer replaces each `?` with exactly one of PASS, FAIL, UNVERIFIED or
+  NOT REVIEWED. The ledger reads that block strictly, and anything else on a
+  block line is refused as unreadable.
+- Prose is checked only for a `Rk: FAIL`/`Rk: UNVERIFIED` line in the
+  documented shape and for an unambiguous FAIL headline.
+- A gate-path goal's pass needs exactly one complete block. A goal without a
+  gate path needs no block, but any block it does carry must be all PASS.
+
+The reviewer's own words remain the evidence, which was C5's aim, and no verdict
+is guessed from prose.
+
 ## Revisions after the final review (2026-10-09)
 
 A four-lens review with adversarial verification (8 agents) found that the verdict

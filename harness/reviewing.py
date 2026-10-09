@@ -1,9 +1,13 @@
-"""Requirement lines and reviewer verdicts (Horizon v2).
+"""Requirement lines, reviewer verdicts and the reviewer brief (Horizon v2).
 
 In the TB4 pilot every recorded review was "pass" while four reviewer
 replies said FAIL, and every stored verdict was the author's paraphrase.
-These helpers read the reviewer's own reply one line at a time, so the
-ledger can refuse a pass the reply does not support.
+The brief therefore ends with a VERDICTS block the reviewer fills in, one
+line per requirement, and the ledger reads that block strictly. Two probes
+showed that reading verdicts out of free prose fails both ways ("PARTIAL
+PASS" passed; "the previous FAIL is fixed" was refused), so prose is only
+checked for the two unambiguous signals: a `Rk: FAIL` line and an overall
+FAIL headline.
 """
 import os
 import re
@@ -11,49 +15,43 @@ import tempfile
 from pathlib import Path
 
 HASH_ECHO = 12
+BRIEF_FILE_LIMIT = 32000
 
 _RANK = {"FAIL": 4, "UNVERIFIED": 3, "NOT REVIEWED": 2, "PASS": 1}
 
 # R1, R12, R1a, R1.2: every id a requirements file can use, read the same way
-# on both sides. Folding R1a into R1, or skipping it, let a FAIL on R1b
-# through while R1 passed.
+# in requirements.md and in the VERDICTS block.
 _ID = r"R(\d+(?:\.\d+)*[a-z]?)(?!\w)"
-# Heading, bullet, checkbox and numbering prefixes, then emphasis.
-_PREFIX = (r"^[ \t ]*(?:#{1,6}[ \t]+)?(?:[-*+•][ \t]+)?(?:\[[ xX]\][ \t]+)?"
-           r"(?:\d+[.)][ \t]+)?[*_`]*")
-_REQUIREMENT = re.compile(_PREFIX + _ID)
+_REQUIREMENT = re.compile(
+    r"^[ \t ]*(?:#{1,6}[ \t]+)?(?:[-*+•][ \t]+)?(?:\[[ xX]\][ \t]+)?"
+    r"(?:\d+[.)][ \t]+)?[*_`]*" + _ID)
 _TAG = re.compile(r"\[(gate|review|unverifiable|judgment)\]", re.I)
-# The first id, then any `, R2`, `and R3` or `-R4` (a range) that follows it.
-_HEAD = re.compile(
-    _PREFIX + _ID + r"((?:[ \t]*(?:,|&|\band\b|[-–])[ \t]*R\d+(?:\.\d+)*[a-z]?(?!\w))*)")
-_MORE = re.compile(r"(,|&|\band\b|[-–])[ \t]*R(\d+(?:\.\d+)*[a-z]?)")
-# Quoted requirement text and code spans are the reviewer citing something,
-# not giving a verdict: `grep FAIL`, "the CLI fails with exit 3".
-_SPANS = re.compile(r'"[^"\n]*"|“[^”\n]*”|`[^`\n]*`')
-_PASS_MARKS, _FAIL_MARKS = "✅✔", "❌✖"
-# What may sit between an id and its verdict word: separators and arrows,
-# emphasis, any number of [tag] and (from ...) groups, and check marks.
-_LEAD = re.compile(
-    r"(?:[\s*_:.)|\-–—>=→,~]+|\[[^\]\n]*\]|\([^)\n]*\)"
-    r"|[✅✔❌✖⚠️])*")
-_WORD = r"(PASS(?:ED|ES)?|FAIL(?:ED|S|ING|URE)?|UNVERIFIED|UNVERIFIABLE|NOT\s+REVIEWED)(?!\w)"
-_FIRST = re.compile(_WORD, re.I)
-# Later on the line only an all-capitals verdict counts, so prose such as
-# "no longer fails" after a PASS is not read as a FAIL.
-_UPPER = re.compile(r"(?<!\w)" + _WORD)
-# "0 FAILED", "was FAIL in the first review": a count or a history, not a verdict.
-_SETTLED = re.compile(r"\b(?:0|no|zero|none|previously|was|were|earlier)\s+$", re.I)
-# "Overall: FAIL", "Result: FAIL", "**Verdict:** FAIL" -- the pilot's lost FAILs
-# were headline-only verdicts with no requirement lines.
-_LABEL = re.compile(
-    r"^[\W_]*(?:(?:overall|final)\s+)?(?:verdict|overall|result|status|conclusion|outcome)\b",
-    re.I)
-_LABEL_FAIL = re.compile(r"^[\W_]*fail(?:ed|s)?\b", re.I)
-# "**FAIL.**" or "Fail." alone; not "FAIL count: 0", "FAILED tests/x.py" or
-# "--- FAIL: TestX" from a test runner, and not "Fail-safe paths ...".
-_FAIL_ALONE = re.compile(
-    r"^[ \t]*(?:#{1,6}[ \t]+)?[*_]*(?:FAIL(?:ED)?|Fail(?:ed)?)[*_]*[ \t]*"
-    r"(?:[.!:;,–—]|-(?!\w)|$)")
+_CROSS = "❌✖✗✘"
+# `Rk: VERDICT`, allowing a bullet, emphasis or backticks and one check mark
+# or cross -- nothing that could carry a second verdict. A cross makes it FAIL.
+_BLOCK_LINE = re.compile(
+    r"^[ \t]*(?:[-*+•][ \t]+)?[*_`]*" + _ID + r"[*_`]*[ \t]*:[ \t]*[*_`]*[ \t]*[*_`]*"
+    r"(PASS|FAIL|UNVERIFIED|NOT[ \t]+REVIEWED)[*_`]*[ \t]*"
+    r"([✅✔" + _CROSS + r"]️?)?[ \t]*$", re.I)
+_FENCE = re.compile(r"^[ \t]*(?:```|~~~)[\w+.-]*[ \t]*$")
+# A prose line in the `Rk: VERDICT - evidence` shape whose verdict is FAIL or
+# UNVERIFIED; tags or a sub-case may sit in brackets after the id. The verdict
+# must come right after the separator, so "R2: PASS - the old FAIL is fixed"
+# is not one.
+_OPEN = re.compile(
+    r"^[ \t]*(?:[-*+•][ \t]+)?[*_]*" + _ID + r"[*_]*"
+    r"(?:[ \t]*[\[(][^\])\n]*[\])])*[ \t]*[*_]*[ \t]*[:\-–—][ \t]*[*_]*[ \t]*"
+    r"(FAIL(?:ED|S)?|UNVERIFIED)(?!\w)", re.I)
+# "Verdict: FAIL", "1. **Overall:** FAIL", "Review verdict: FAIL", "Summary: ❌":
+# a label, then FAIL at once -- not "Status: PASS (FAIL: 0)".
+_LABEL_FAIL = re.compile(
+    r"^[\W_]*(?:\d+[.)][\W_]*)?(?:[A-Za-z]+[ \t]+)?"
+    r"(?:verdict|overall|result|status|conclusion|outcome|assessment|summary)\b"
+    r"[\W_]*?(?:fail(?:ed|s)?\b|[" + _CROSS + r"])", re.I)
+# "**FAIL.** The merged session ..." -- but not "**Failed:** 0".
+_BOLD_FAIL = re.compile(r"^[ \t#]*(?:\*\*|__)[ \t]*fail(?:ed)?[.!]?[ \t]*(?:\*\*|__)", re.I)
+# "FAIL", "Fail.", "## ❌ FAIL" alone -- not "FAIL: none" or "--- FAIL: TestX".
+_ALONE_FAIL = re.compile(r"^[ \t#*_" + _CROSS + r"]*fail(?:ed)?[ \t*_.!]*$", re.I)
 
 
 def _rid(raw: str) -> str:
@@ -77,100 +75,9 @@ def _kind(word: str) -> str:
     return "UNVERIFIED"
 
 
-def _ids(head) -> list[str]:
-    ids = [_rid(head.group(1))]
-    for separator, raw in _MORE.findall(head.group(2)):
-        previous, current = ids[-1], _rid(raw)
-        if separator in "-–" and previous[1:].isdigit() and current[1:].isdigit():
-            ids += [f"R{n}" for n in range(int(previous[1:]) + 1,
-                                           min(int(current[1:]), int(previous[1:]) + 200) + 1)]
-        else:
-            ids.append(current)
-    return ids
-
-
-def _kinds_after(text: str) -> list[str]:
-    """Every verdict the text after an id gives: the first word, then any
-    all-capitals verdict or cross mark later on."""
-    text = _SPANS.sub(" ", text)
-    lead = _LEAD.match(text)
-    kinds = []
-    first = _FIRST.match(text, lead.end())
-    if first:
-        kinds.append(_kind(first.group(1)))
-    kinds += [_kind(m.group(1)) for m in _UPPER.finditer(text)
-              if not _SETTLED.search(text[:m.start()])]
-    if any(mark in text for mark in _FAIL_MARKS):
-        kinds.append("FAIL")
-    if any(mark in lead.group(0) for mark in _PASS_MARKS):
-        kinds.append("PASS")
-    return kinds
-
-
-def _verdict_line(line: str):
-    """(ids, worst verdict) for a requirement's verdict line, else None."""
-    if line.lstrip().startswith("|"):
-        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-        for index, cell in enumerate(cells):
-            head = _HEAD.match(cell)
-            if head:
-                kinds = _kinds_after(cell[head.end():])
-                for later in cells[index + 1:]:
-                    kinds += _kinds_after(later)
-                break
-        else:
-            return None
-    else:
-        head = _HEAD.match(line)
-        if not head:
-            return None
-        kinds = _kinds_after(line[head.end():])
-    if not kinds:
-        return None
-    return _ids(head), max(kinds, key=_RANK.get)
-
-
-def _headline(line: str) -> bool:
-    label = _LABEL.match(line)
-    if label:
-        after = line[label.end():]
-        if _LABEL_FAIL.match(after):
-            return True
-        text = _SPANS.sub(" ", after)
-        return any(_kind(m.group(1)) == "FAIL" and not _SETTLED.search(text[:m.start()])
-                   for m in _UPPER.finditer(text))
-    return bool(_FAIL_ALONE.match(line))
-
-
-def _scan(evidence: str):
-    """Yield (index, rid, kind, line) for each verdict and FAIL headline.
-
-    Headlines have rid None and kind "FAIL". Lines quoted with `>` repeat an
-    earlier reviewer and are skipped, unless the whole reply is quoted. Test
-    output inside a code fence is never a headline.
-    """
-    lines = evidence.splitlines()
-    quoted_only = not any(line.strip() and not line.lstrip().startswith(">") for line in lines)
-    fenced = False
-    for index, line in enumerate(lines):
-        if line.lstrip().startswith(("```", "~~~")):
-            fenced = not fenced
-            continue
-        if line.lstrip().startswith(">"):
-            if not quoted_only:
-                continue
-            line = re.sub(r"^\s*(?:>\s?)+", "", line)
-        found = _verdict_line(line)
-        if found:
-            ids, kind = found
-            for rid in ids:
-                yield index, rid, kind, line.strip()
-        elif not fenced and _headline(line):
-            yield index, None, "FAIL", line.strip()
-
-
 def requirement_lines(text: str) -> dict[str, set[str]]:
-    """Map each requirement id (R1, R2, R1a, R1.2, ...) to the tags on its line."""
+    """Map each requirement id (R1, R2, R1a, R1.2, ...) to the tags on its line,
+    in the order the ids first appear."""
     found: dict[str, set[str]] = {}
     for line in text.splitlines():
         match = _REQUIREMENT.match(line)
@@ -180,41 +87,122 @@ def requirement_lines(text: str) -> dict[str, set[str]]:
     return found
 
 
-def verdicts(evidence: str) -> tuple[dict[str, str], list[str]]:
-    """The last verdict for each requirement, and every FAIL headline line."""
-    last: dict[str, str] = {}
-    headlines: list[str] = []
-    for _, rid, kind, line in _scan(evidence):
-        if rid is None:
-            headlines.append(line)
-        else:
-            last[rid] = kind
-    return last, headlines
+def _read(evidence: str):
+    """Split a reply into VERDICTS blocks and the prose around them.
+
+    Returns (blocks, errors, body): each block is a list of (index, line);
+    body is the prose lines that are neither quoted with `>` (an earlier
+    reviewer) nor inside a code fence (test output).
+    """
+    blocks, errors, body = [], [], []
+    current = None
+    fenced = False
+    for index, line in enumerate(evidence.splitlines()):
+        quoted = line.lstrip().startswith(">")
+        mark = re.sub(r"[\s*_#`]", "", line)
+        if not quoted and mark == "VERDICTS":
+            if current is not None:
+                errors.append("a VERDICTS block starts inside another")
+                blocks.append(current)
+            current = []
+            continue
+        if not quoted and mark == "ENDVERDICTS":
+            if current is None:
+                errors.append("END VERDICTS without a VERDICTS line")
+            else:
+                blocks.append(current)
+                current = None
+            continue
+        if current is not None:
+            if line.strip() and not _FENCE.match(line):
+                current.append((index, line))
+            continue
+        if _FENCE.match(line):
+            fenced = not fenced
+            continue
+        if not quoted and not fenced:
+            body.append((index, line))
+    if current is not None:
+        errors.append("VERDICTS block has no END VERDICTS line")
+        blocks.append(current)
+    return blocks, errors, body
 
 
-def _mention(evidence: str, rid: str) -> str | None:
-    pattern = re.compile(r"(?<!\w)" + re.escape(rid) + r"(?!\w|\.\d)")
-    for line in evidence.splitlines():
-        if not line.lstrip().startswith(">") and pattern.search(line):
-            return line.strip()
-    return None
+def _block_kind(match) -> str:
+    if match.group(3) and match.group(3)[0] in _CROSS:
+        return "FAIL"
+    return _kind(match.group(2))
+
+
+def _block_verdicts(entries, errors: list) -> dict[str, str]:
+    verdicts: dict[str, str] = {}
+    for _, line in entries:
+        match = _BLOCK_LINE.match(line)
+        if not match:
+            errors.append(f"unreadable VERDICTS line: {line.strip()[:100]}")
+            continue
+        rid, kind = _rid(match.group(1)), _block_kind(match)
+        if rid in verdicts:
+            errors.append(f"{rid}: more than one verdict in the VERDICTS block")
+            kind = max(kind, verdicts[rid], key=_RANK.get)
+        verdicts[rid] = kind
+    return verdicts
+
+
+def _open_lines(body):
+    for index, line in body:
+        match = _OPEN.match(line)
+        if match:
+            yield index, _rid(match.group(1)), _kind(match.group(2)), line.strip()
+
+
+def _headlines(body):
+    for index, line in body:
+        if not _OPEN.match(line) and (
+                _LABEL_FAIL.match(line) or _BOLD_FAIL.match(line) or _ALONE_FAIL.match(line)):
+            yield index, line.strip()
 
 
 def pass_refusals(evidence: str, requirements: dict[str, set[str]] | None) -> list[str]:
-    """Why this reply cannot be recorded as a pass; empty when it can."""
-    last, headlines = verdicts(evidence)
-    problems = [f"{rid}: {kind}" for rid, kind in sorted(last.items(), key=lambda i: _order(i[0]))
-                if kind in ("FAIL", "UNVERIFIED")]
-    problems += [f"FAIL headline: {line[:160]}" for line in headlines]
-    for rid, tags in sorted((requirements or {}).items(), key=lambda i: _order(i[0])):
-        kind = last.get(rid)
-        if kind is None:
-            mention = _mention(evidence, rid)
-            problems.append(f"{rid}: no verdict"
-                            + (f' (unread line: "{mention[:100]}")' if mention else ""))
-        elif kind == "NOT REVIEWED" and "unverifiable" not in tags:
+    """Why this reply cannot be recorded as a pass; empty when it can.
+
+    `requirements` is None for a goal without a gate directory: its reply
+    needs no VERDICTS block, but a block it does carry must be all PASS.
+    """
+    blocks, errors, body = _read(evidence)
+    problems = list(errors)
+    if len(blocks) > 1:
+        problems.append("more than one VERDICTS block")
+    block = _block_verdicts(blocks[0], problems) if blocks else None
+    if block is None and requirements is not None:
+        problems.append("no VERDICTS block")
+    for rid, kind in sorted((block or {}).items(), key=lambda item: _order(item[0])):
+        if kind in ("FAIL", "UNVERIFIED"):
+            problems.append(f"{rid}: {kind}")
+        elif (kind == "NOT REVIEWED" and requirements is not None and rid in requirements
+              and "unverifiable" not in requirements[rid]):
             problems.append(f"{rid}: NOT REVIEWED on a line not tagged [unverifiable]")
+    if block is not None and requirements is not None:
+        problems += [f"{rid}: no verdict in the VERDICTS block"
+                     for rid in sorted(requirements, key=_order) if rid not in block]
+        problems += [f"{rid}: not a requirement line"
+                     for rid in sorted(block, key=_order) if rid not in requirements]
+    problems += [f'{rid}: {kind} (line: "{line[:100]}")' for _, rid, kind, line in _open_lines(body)]
+    problems += [f"FAIL headline: {line[:160]}" for _, line in _headlines(body)]
     return problems
+
+
+def previous_lines(evidence: str) -> list[str]:
+    """A failed review's open lines, in order: FAIL/UNVERIFIED prose lines,
+    FAIL headlines, and the block's FAIL/UNVERIFIED verdicts."""
+    blocks, _, body = _read(evidence)
+    kept = [(index, line) for index, _, _, line in _open_lines(body)]
+    kept += list(_headlines(body))
+    for index, line in (blocks[0] if blocks else []):
+        match = _BLOCK_LINE.match(line)
+        if match and _block_kind(match) in ("FAIL", "UNVERIFIED"):
+            kept.append((index, line.strip()))
+    return [line for _, line in sorted(set(kept))]
 
 
 def echoes(evidence: str, digest: str) -> bool:
@@ -222,8 +210,6 @@ def echoes(evidence: str, digest: str) -> bool:
     prefix = str(digest)[:HASH_ECHO].lower()
     return bool(prefix) and prefix in evidence.lower()
 
-
-BRIEF_FILE_LIMIT = 32000
 
 # C4's neutral brief. The harness fills it so the author has no room to add
 # framing; the pilot's briefs carried paraphrase, diagnosis and leading
@@ -249,30 +235,23 @@ including the repeated, boundary and multi-step cases the request implies.
 Where the request is ambiguous, choose your own reading and say where the
 artifact's reading differs.
 
-Reply with exactly one line per requirement:
-`Rk: PASS|FAIL|UNVERIFIED - command and observed output`. A requirement you could
-not test is UNVERIFIED, and so is one where a caveat bears on whether it holds.
-Test a line tagged [unverifiable] if you can and answer it as usual; if you
-cannot, answer `Rk: NOT REVIEWED`. If a symptom the request reports still
-reproduces, that line FAILS even when a comment, docstring or design note
-justifies the behaviour. Do not repeat earlier reviewers' lines. List anything
-else under `Non-blocking:`. Keep the review under ten minutes. Before returning,
-write your complete reply to {review_file}.
+For each requirement, give the command you ran and what you observed. A
+requirement you could not test is UNVERIFIED, and so is one where a caveat
+bears on whether it holds. Test a line tagged [unverifiable] if you can; if you
+cannot, its verdict is NOT REVIEWED. If a symptom the request reports still
+reproduces, that requirement FAILS even when a comment, docstring or design
+note justifies the behaviour. Do not repeat earlier reviewers' lines. List
+anything else under `Non-blocking:`. Keep the review under ten minutes.
+
+End your reply with this block. Change each `?` to exactly one of PASS, FAIL,
+UNVERIFIED or NOT REVIEWED, and write nothing else on those lines:
+
+VERDICTS
+{verdicts}
+END VERDICTS
+
+Before returning, write your complete reply to {review_file}.
 """
-
-
-def previous_lines(evidence: str) -> list[str]:
-    """A failed review's open lines, in order: FAIL/UNVERIFIED verdicts and FAIL headlines."""
-    last: dict[str, tuple[int, str, str]] = {}
-    kept: list[tuple[int, str]] = []
-    for index, rid, kind, line in _scan(evidence):
-        if rid is None:
-            kept.append((index, line))
-        else:
-            last[rid] = (index, kind, line)
-    kept += [(index, line) for index, kind, line in last.values()
-             if kind in ("FAIL", "UNVERIFIED")]
-    return [line for _, line in sorted(set(kept))]
 
 
 def _within(path: str, root: str) -> bool:
@@ -297,10 +276,10 @@ def review_file(slug: str, digest: str, n: int, watch_paths=()) -> str:
     return os.path.join(candidates[0], name)
 
 
-def brief(*, digest: str, request: str, requirements: str, harness_dir: str,
+def brief(*, digest: str, request: str, requirements: str, verdicts: str, harness_dir: str,
           review_file: str, previous: list[str]) -> str:
     text = TEMPLATE.format(digest=digest, request=request, requirements=requirements,
-                           harness_dir=harness_dir, review_file=review_file)
+                           verdicts=verdicts, harness_dir=harness_dir, review_file=review_file)
     if previous:
         text += "\nPrevious:\n" + "".join(f"> {line}\n" for line in previous)
     return text
@@ -320,6 +299,17 @@ def _gate_text(gate_path: str | None, name: str, placeholder: str) -> str:
     return text.rstrip("\n")
 
 
+def _skeleton(gate_path: str | None) -> str:
+    if gate_path:
+        try:
+            ids = list(requirement_lines((Path(gate_path) / "requirements.md").read_text()))
+        except (OSError, UnicodeError):
+            ids = []
+        if ids:
+            return "\n".join(f"{rid}: ?" for rid in ids)
+    return "<<VERDICT_LINES: one `Rk: ?` line per requirement>>"
+
+
 def brief_for(state: dict, digest: str, review_file: str, harness_dir: str) -> str:
     """The brief for this goal's checkpoint. Never raises: `check` has already
     written the checkpoint, so a crash here would lose its report."""
@@ -330,4 +320,5 @@ def brief_for(state: dict, digest: str, review_file: str, harness_dir: str) -> s
     return brief(digest=digest,
                  request=_gate_text(gate_path, "request.md", "REQUEST"),
                  requirements=_gate_text(gate_path, "requirements.md", "REQUIREMENTS"),
+                 verdicts=_skeleton(gate_path),
                  harness_dir=harness_dir, review_file=review_file, previous=previous)

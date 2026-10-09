@@ -596,11 +596,10 @@ def _apply_review(state: dict, observed_hash: str, *, result: str,
         if refusals:
             raise EvidenceInsufficient(
                 "This reply does not support a pass: " + "; ".join(refusals)
-                + ". A pass needs every requirement line PASS (NOT REVIEWED only on lines "
-                "tagged [unverifiable]) and no FAIL headline; each requirement needs its own "
-                "line that starts with its id and gives a verdict, such as "
-                "`R1: PASS - command and output`. Record --result fail, "
-                "or fix and review again."
+                + ". A pass needs the reply's VERDICTS block to give every requirement "
+                "line PASS (NOT REVIEWED only on lines tagged [unverifiable]), and no "
+                "`Rk: FAIL` line or FAIL headline elsewhere in the reply. Record "
+                "--result fail, or fix and review again."
             )
     state.setdefault("reviews", []).append({
         "turn": last["turn"], "tree_hash": digest, "at": _now(),

@@ -1018,7 +1018,7 @@ def test_a_pass_must_echo_the_checkpoint_hash_but_a_fail_is_always_kept():
     "**Verdict: FAIL, narrowly.** The burst path still drops tool calls.",
     "**FAIL.** The merged session is force-collected.",
     "R1: PASS - ok\nR2: UNVERIFIED - no audio reference to compare",
-    "- R1: PASS\n| R2 | FAIL | m18 merges two attacks |",
+    "- R1: PASS\nR2 (attack notes): FAIL - m18 merges two attacks",
 ])
 def test_pass_is_refused_when_the_reply_does_not_support_it(reply):
     state, digest = _reviewable()
@@ -1094,18 +1094,22 @@ def test_gate_path_needs_the_request_and_requirement_lines(break_it, message):
 def test_pass_needs_a_verdict_for_every_requirement_line():
     _gates()
     state, digest = _reviewable(gate_path=".claude/harness/gates/parser")
-    head = f"Reviewed checkpoint: {digest[:12]}\n"
-    with pytest.raises(goal.EvidenceInsufficient, match="R2: no verdict"):
+    head = f"Reviewed checkpoint: {digest[:12]}\nRan the parser on every example.\n"
+
+    def block(*lines):
+        return head + "VERDICTS\n" + "\n".join(lines) + "\nEND VERDICTS"
+    with pytest.raises(goal.EvidenceInsufficient, match="no VERDICTS block"):
         goal.record_review(state["slug"], "pass",
-                           head + "R1: PASS - ran it\nR3: NOT REVIEWED", "judge-1", digest)
+                           head + "R1: PASS\nR2: PASS\nR3: NOT REVIEWED", "judge-1", digest)
+    with pytest.raises(goal.EvidenceInsufficient, match="R2: no verdict in the VERDICTS block"):
+        goal.record_review(state["slug"], "pass",
+                           block("R1: PASS", "R3: NOT REVIEWED"), "judge-1", digest)
     with pytest.raises(goal.EvidenceInsufficient, match="R2: NOT REVIEWED on a line not tagged"):
         goal.record_review(state["slug"], "pass",
-                           head + "R1: PASS - ran it\nR2: NOT REVIEWED\nR3: NOT REVIEWED",
+                           block("R1: PASS", "R2: NOT REVIEWED", "R3: NOT REVIEWED"),
                            "judge-1", digest)
-    passed = goal.record_review(
-        state["slug"], "pass",
-        head + "R1: PASS - ran it\nR2: PASS - exit 3\nR3: NOT REVIEWED - no reference",
-        "judge-1", digest)
+    passed = goal.record_review(state["slug"], "pass",
+                                block("R1: PASS", "R2: PASS", "R3: NOT REVIEWED"), "judge-1", digest)
     assert passed["reviews"][-1]["result"] == "pass"
 
 
@@ -1151,14 +1155,20 @@ def test_row_is_short_and_carries_what_a_new_session_needs():
     assert (row["status"], row["turns_used"], row["last_gate"], row["last_review"]) == (
         "abandoned", 1, "pass", None)
 
-def test_a_split_verdict_line_cannot_complete_a_gate_path_goal():
+def test_a_split_verdict_cannot_complete_a_gate_path_goal():
     _gates()
     state, digest = _reviewable(gate_path=".claude/harness/gates/parser")
-    reply = (f"Reviewed checkpoint: {digest[:12]}\nR1: PASS - ran it\n"
-             "R2: PASS for valid files, FAIL for the empty file (exit 0, expected 3)\n"
-             "R3: NOT REVIEWED - no reference")
+    head = f"Reviewed checkpoint: {digest[:12]}\n"
+    split_in_block = (head + "VERDICTS\nR1: PASS\n"
+                      "R2: PASS for valid files, FAIL for the empty file\n"
+                      "R3: NOT REVIEWED\nEND VERDICTS")
+    with pytest.raises(goal.EvidenceInsufficient, match="unreadable VERDICTS line"):
+        goal.record_review(state["slug"], "pass", split_in_block, "judge-1", digest)
+    split_in_body = (head + "R2 (empty file): FAIL - exit 0, expected 3\n"
+                     "R2 (malformed input): PASS - exit 3\n"
+                     "VERDICTS\nR1: PASS\nR2: PASS\nR3: NOT REVIEWED\nEND VERDICTS")
     with pytest.raises(goal.EvidenceInsufficient, match="R2: FAIL"):
-        goal.record_review(state["slug"], "pass", reply, "judge-1", digest)
+        goal.record_review(state["slug"], "pass", split_in_body, "judge-1", digest)
 
 
 def test_pass_is_refused_when_requirements_lose_their_lines():
