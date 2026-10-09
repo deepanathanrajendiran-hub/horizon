@@ -192,3 +192,22 @@ def test_nested_projects_keep_runtime_and_global_routes(client):
     if runtime == "codex":
         assert Path(global_doctor["targets"]["rho"]).parent.name == ".codex"
         assert Path(global_doctor["targets"]["G"]).parent.name == ".agents"
+
+def _gate_dir(run, project, runtime, name="ready"):
+    _, doctor = run("doctor")
+    gates = Path(doctor["gates"]) / name
+    assert gates.parent == project / (".codex" if runtime == "codex" else ".claude") / "harness" / "gates"
+    gates.mkdir(parents=True)
+    (gates / "request.md").write_text("Make ready.txt say ready.\n")
+    (gates / "requirements.md").write_text('R1 [gate] "ready.txt says ready"\n')
+    return gates
+
+
+def test_start_takes_a_gate_path_from_doctor(client):
+    project, runtime, run = client
+    gates = _gate_dir(run, project, runtime)
+    code, state = run("start", "Ready file", "--gate", "true", "--gate-path", str(gates))
+    assert code == 0, state
+    assert state["gate_path"] == str(gates)
+    code, error = run("start", "Missing gates", "--gate", "true", "--gate-path", "nowhere")
+    assert code == 2 and error["error"] == "GateRequired"

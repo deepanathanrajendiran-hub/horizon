@@ -39,6 +39,7 @@ def parser() -> argparse.ArgumentParser:
     start.add_argument("--max-minutes", type=int)
     start.add_argument("--watch", action="append", help="Artifact path relative to the project; repeatable")
     start.add_argument("--execution", choices=("conversation", "state"), default="conversation")
+    start.add_argument("--gate-path", help="Directory holding request.md, requirements.md and the gate; watched automatically")
     check = commands.add_parser("check", help="Run verification and checkpoint one completed increment")
     check.add_argument("slug")
     check.add_argument("--did", required=True)
@@ -269,6 +270,7 @@ def dispatch(args) -> tuple[dict, int]:
             "project": str(paths.project_root()),
             "implementation": str(Path(__file__).resolve().parent),
             "state": str(paths.harness_root()),
+            "gates": str(paths.harness_root() / "gates"),
             "targets": paths.targets(args.scope),
             "memory_mode": "explicit recall" if paths.runtime() == "codex" else "Claude project memory",
             "state_supported": filelock.state_supported(),
@@ -287,7 +289,7 @@ def dispatch(args) -> tuple[dict, int]:
             "coverage" if args.coverage else "command", args.coverage or args.gate,
             max_turns=args.max_turns, max_minutes=args.max_minutes,
             watch_paths=args.watch, review_criterion=args.review,
-            execution=args.execution,
+            execution=args.execution, gate_path=args.gate_path,
         )
         return status(state), 0
     if args.action in {"step-begin", "step-attach", "step-finish", "step-recover"}:

@@ -18,6 +18,7 @@ import copy
 import task_state
 from typing import Callable
 import reviewing
+from pathlib import Path
 
 MAX_GATE_OUTPUT = 4000
 
@@ -274,8 +275,51 @@ def _save(state: dict) -> dict:
     return state
 
 
+def _covers(root: str, path: str) -> bool:
+    return os.path.commonpath([root, path]) == root
+
+
+def _resolve_gate_path(cwd, gate_path) -> str:
+    """The goal's gate directory, refused unless the request and its lines exist.
+
+    C1 asks for the request verbatim and a quoted requirement list before
+    `start`; checking for them here is the one place prose can be enforced.
+    """
+    resolved = os.path.abspath(os.path.join(os.path.abspath(str(cwd)), str(gate_path)))
+    directory = Path(resolved)
+    if not directory.is_dir():
+        raise GateRequired(
+            f"--gate-path {resolved} is not a directory; write request.md and "
+            f"requirements.md there before start")
+    texts = {}
+    for name in ("request.md", "requirements.md"):
+        try:
+            texts[name] = (directory / name).read_text()
+        except (OSError, UnicodeError) as exc:
+            raise GateRequired(f"{directory / name} is missing or unreadable: {exc}") from exc
+    if not texts["request.md"].strip():
+        raise GateRequired(f"{directory / 'request.md'} is blank; save the request verbatim")
+    if not reviewing.requirement_lines(texts["requirements.md"]):
+        raise GateRequired(
+            f"{directory / 'requirements.md'} has no requirement lines (R1, R2, ...)")
+    return resolved
+
+
+def _requirements(state: dict) -> dict | None:
+    """The goal's requirement lines, or None when it has no gate directory."""
+    gate_path = state.get("gate_path")
+    if not gate_path:
+        return None
+    target = Path(gate_path) / "requirements.md"
+    try:
+        return reviewing.requirement_lines(target.read_text())
+    except (OSError, UnicodeError) as exc:
+        raise EvidenceInsufficient(
+            f"{target} is unreadable ({exc}); restore it, run check, and review again"
+        ) from exc
+
 def _initial_state(goal, cwd, gate_kind, gate_value, max_turns,
-                   max_minutes, watch_paths, review_criterion):
+                   max_minutes, watch_paths, review_criterion, gate_path=None):
     cwd = os.path.abspath(str(cwd))
     state = {
         "slug": slugify(goal), "goal": goal, "cwd": cwd,
@@ -288,6 +332,11 @@ def _initial_state(goal, cwd, gate_kind, gate_value, max_turns,
     }
     if review_criterion is not None:
         state["gate"]["review_criterion"] = review_criterion.strip()
+    if gate_path is not None:
+        # Top-level, never in state["gate"]: checkpoints compare that dict.
+        state["gate_path"] = gate_path
+        if not any(_covers(watch, gate_path) for watch in state["watch_paths"]):
+            state["watch_paths"].append(gate_path)
     return state
 
 
@@ -311,7 +360,7 @@ def _validate_state_execution(state: dict) -> None:
 
 def create(goal, cwd, gate_kind, gate_value,
            max_turns=20, max_minutes=None, watch_paths=None, review_criterion=None,
-           *, execution: str = "conversation") -> dict:
+           *, execution: str = "conversation", gate_path=None) -> dict:
     if execution not in ("conversation", "state"):
         raise GoalStateError(f"unsupported execution mode: {execution!r}")
     if execution == "state" and not filelock.state_supported():
@@ -330,9 +379,11 @@ def create(goal, cwd, gate_kind, gate_value,
             raise BudgetInvalid(f"{name} must be a positive integer or None")
     if max_turns is None and max_minutes is None:
         raise BudgetInvalid("A goal needs at least one of max_turns or max_minutes")
+    if gate_path is not None:
+        gate_path = _resolve_gate_path(cwd, gate_path)
     if execution == "state":
         state = _initial_state(goal, cwd, gate_kind, gate_value, max_turns,
-                               max_minutes, watch_paths, review_criterion)
+                               max_minutes, watch_paths, review_criterion, gate_path)
         state["execution"] = task_state.new_execution()
         try:
             task_state.build_packet(
@@ -347,13 +398,14 @@ def create(goal, cwd, gate_kind, gate_value,
             return _save(state)
     with filelock.goal_locked(paths.goals_dir() / "CREATE"):
         return _create_locked(goal, cwd, gate_kind, gate_value, max_turns,
-                              max_minutes, watch_paths, review_criterion)
+                              max_minutes, watch_paths, review_criterion, gate_path)
 
 
 def _create_locked(goal, cwd, gate_kind, gate_value,
-                   max_turns, max_minutes, watch_paths, review_criterion=None) -> dict:
+                   max_turns, max_minutes, watch_paths, review_criterion=None,
+                   gate_path=None) -> dict:
     state = _initial_state(goal, cwd, gate_kind, gate_value, max_turns,
-                           max_minutes, watch_paths, review_criterion)
+                           max_minutes, watch_paths, review_criterion, gate_path)
     state["slug"] = _unique_slug(state["slug"])
     return _save(state)
 
@@ -529,7 +581,7 @@ def _apply_review(state: dict, observed_hash: str, *, result: str,
             f"(the first {reviewing.HASH_ECHO} hash characters, {digest[:reviewing.HASH_ECHO]})."
         )
     if result == "pass":
-        refusals = reviewing.pass_refusals(evidence, None)
+        refusals = reviewing.pass_refusals(evidence, _requirements(state))
         if refusals:
             raise EvidenceInsufficient(
                 "This reply does not support a pass: " + "; ".join(refusals)
@@ -748,7 +800,8 @@ def summary(state: dict) -> dict:
         active = {key: item[key] for key in ("id", "status", "worker", "packet")}
     return {
         "slug": state["slug"], "goal": state["goal"], "status": state["status"],
-        "runtime": paths.runtime(), "gate": state["gate"], "budget": state["budget"],
+        "runtime": paths.runtime(), "gate": state["gate"], "gate_path": state.get("gate_path"),
+        "budget": state["budget"],
         "used": state["used"], "budget_exhausted": budget_exhausted(state),
         "last_checkpoint": last, "reviews": state.get("reviews", [])[-1:],
         "gate_evidence": state.get("gate_evidence"),

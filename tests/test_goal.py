@@ -11,6 +11,7 @@ import goal  # noqa: E402
 import tree_hash
 import os
 import subprocess
+import shutil
 
 
 @pytest.fixture(autouse=True)
@@ -1041,3 +1042,72 @@ def test_review_evidence_keeps_16k_whole_and_head_and_tail_beyond():
     kept = goal.record_review(state["slug"], "pass", long, "judge-1", digest)["reviews"][-1]["evidence"]
     assert kept.startswith(head) and kept.endswith("R9: PASS - last line")
     assert "[truncated]" in kept and len(kept) < goal.MAX_REVIEW_EVIDENCE + 100
+
+def _project():
+    return goal.paths.goals_dir().parent / "project"
+
+
+def _gates(name="parser"):
+    gates = _project() / ".claude" / "harness" / "gates" / name
+    gates.mkdir(parents=True)
+    (gates / "request.md").write_text("Fix the parser.\nKeep exit status 3 on bad input.\n")
+    (gates / "requirements.md").write_text(
+        'R1 [gate] "Fix the parser."\n'
+        'R2 [review] "Keep exit status 3 on bad input."\n'
+        'R3 [unverifiable] "Exact output matches the reference."\n')
+    return gates
+
+
+def test_gate_path_is_stored_and_watched():
+    gates = _gates()
+    state = _make(gate_path=".claude/harness/gates/parser", watch_paths=["src"])
+    assert state["gate_path"] == str(gates)
+    assert state["watch_paths"] == [str(_project() / "src"), str(gates)]
+    assert "gate_path" not in state["gate"]
+
+
+def test_gate_path_inside_a_watch_path_is_not_added_twice():
+    gates = _gates()
+    assert _make(gate_path=str(gates))["watch_paths"] == [str(_project())]
+
+
+@pytest.mark.parametrize("break_it, message", [
+    (lambda g: shutil.rmtree(g), "not a directory"),
+    (lambda g: (g / "request.md").unlink(), "request.md"),
+    (lambda g: (g / "request.md").write_text("  \n"), "request.md"),
+    (lambda g: (g / "requirements.md").write_text("Prose, no numbered lines."), "requirement lines"),
+])
+def test_gate_path_needs_the_request_and_requirement_lines(break_it, message):
+    gates = _gates()
+    break_it(gates)
+    with pytest.raises(goal.GateRequired, match=message):
+        _make(gate_path=str(gates))
+
+
+def test_pass_needs_a_verdict_for_every_requirement_line():
+    _gates()
+    state, digest = _reviewable(gate_path=".claude/harness/gates/parser")
+    head = f"Reviewed checkpoint: {digest[:12]}\n"
+    with pytest.raises(goal.EvidenceInsufficient, match="R2: no verdict"):
+        goal.record_review(state["slug"], "pass",
+                           head + "R1: PASS - ran it\nR3: NOT REVIEWED", "judge-1", digest)
+    with pytest.raises(goal.EvidenceInsufficient, match="R2: NOT REVIEWED on a line not tagged"):
+        goal.record_review(state["slug"], "pass",
+                           head + "R1: PASS - ran it\nR2: NOT REVIEWED\nR3: NOT REVIEWED",
+                           "judge-1", digest)
+    passed = goal.record_review(
+        state["slug"], "pass",
+        head + "R1: PASS - ran it\nR2: PASS - exit 3\nR3: NOT REVIEWED - no reference",
+        "judge-1", digest)
+    assert passed["reviews"][-1]["result"] == "pass"
+
+
+def test_pass_is_refused_when_the_requirements_file_is_gone():
+    gates = _gates()
+    state = _make(gate_value="true", review_criterion="Every line holds.", gate_path=str(gates))
+    (gates / "requirements.md").unlink()
+    digest = _digest(state)
+    goal.checkpoint(state["slug"], "did", "review", digest, "pass", "")
+    with pytest.raises(goal.EvidenceInsufficient, match="requirements.md"):
+        goal.record_review(state["slug"], "pass",
+                           f"Reviewed checkpoint: {digest[:12]}\nR1: PASS - ok", "judge-1", digest)
