@@ -211,3 +211,10 @@ def test_start_takes_a_gate_path_from_doctor(client):
     assert state["gate_path"] == str(gates)
     code, error = run("start", "Missing gates", "--gate", "true", "--gate-path", "nowhere")
     assert code == 2 and error["error"] == "GateRequired"
+
+def test_status_prints_a_deadline_for_timed_goals(client):
+    _, _, run = client
+    slug = start(run, "--gate", "true", "--max-minutes", "25")
+    code, report = run("status", slug)
+    assert code == 0
+    assert report["deadline"] and 24.0 <= report["minutes_left"] <= 25.0

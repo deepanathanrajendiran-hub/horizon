@@ -12,6 +12,7 @@ import tree_hash
 import os
 import subprocess
 import shutil
+from datetime import datetime, timedelta, timezone
 
 
 @pytest.fixture(autouse=True)
@@ -1111,3 +1112,18 @@ def test_pass_is_refused_when_the_requirements_file_is_gone():
     with pytest.raises(goal.EvidenceInsufficient, match="requirements.md"):
         goal.record_review(state["slug"], "pass",
                            f"Reviewed checkpoint: {digest[:12]}\nR1: PASS - ok", "judge-1", digest)
+
+def test_summary_prints_the_deadline_and_minutes_left():
+    state = _make(max_minutes=25)
+    report = goal.summary(state)
+    started = datetime.fromisoformat(state["used"]["started"])
+    assert datetime.fromisoformat(report["deadline"]) == started + timedelta(minutes=25)
+    assert 24.0 <= report["minutes_left"] <= 25.0
+
+
+def test_minutes_left_stops_at_zero_and_is_null_without_a_clock():
+    state = _make(max_minutes=5)
+    state["used"]["started"] = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+    assert goal.summary(state)["minutes_left"] == 0
+    untimed = goal.summary(_make(goal="Untimed work"))
+    assert untimed["deadline"] is None and untimed["minutes_left"] is None

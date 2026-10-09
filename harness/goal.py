@@ -9,7 +9,7 @@ import json
 import os
 import re
 import shlex
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import filelock
 import paths
@@ -791,6 +791,17 @@ def commit_revision(state: dict, *, expected_revision: int) -> dict:
     return _save(candidate)
 
 
+def deadline(state: dict) -> datetime | None:
+    """When the wall-clock budget ends: `used.started` plus `max_minutes`.
+
+    The agent otherwise computes this by hand, and in the pilot three Horizon
+    trials ran past the 30-minute mark that EvoCode kills a round at.
+    """
+    max_minutes = state["budget"].get("max_minutes")
+    if max_minutes is None:
+        return None
+    return datetime.fromisoformat(state["used"]["started"]) + timedelta(minutes=max_minutes)
+
 def summary(state: dict) -> dict:
     last = state["checkpoints"][-1] if state["checkpoints"] else None
     block = state.get("execution")
@@ -798,11 +809,15 @@ def summary(state: dict) -> dict:
     if block and block["active_attempt"] is not None:
         item = next(a for a in block["attempts"] if a["id"] == block["active_attempt"])
         active = {key: item[key] for key in ("id", "status", "worker", "packet")}
+    end = deadline(state)
     return {
         "slug": state["slug"], "goal": state["goal"], "status": state["status"],
         "runtime": paths.runtime(), "gate": state["gate"], "gate_path": state.get("gate_path"),
         "budget": state["budget"],
         "used": state["used"], "budget_exhausted": budget_exhausted(state),
+        "deadline": end.isoformat() if end else None,
+        "minutes_left": (round(max(0.0, (end - datetime.now(timezone.utc)).total_seconds() / 60), 1)
+                         if end else None),
         "last_checkpoint": last, "reviews": state.get("reviews", [])[-1:],
         "gate_evidence": state.get("gate_evidence"),
         "execution_mode": execution_mode(state),
