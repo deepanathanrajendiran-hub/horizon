@@ -17,8 +17,14 @@ import tree_hash
 import copy
 import task_state
 from typing import Callable
+import reviewing
 
 MAX_GATE_OUTPUT = 4000
+
+# A reviewer's reply leads with the checkpoint echo and the first requirement
+# verdicts; the pilot's longest replies ran past 5,000 characters, so the
+# 4,000-character tail kept for gate output would have dropped exactly those.
+MAX_REVIEW_EVIDENCE = 16000
 SLUG_MAX = 60
 # Long enough to require a sentence, short enough never to reject a real
 # verdict. Calibrated against the degenerate ones actually observed ("Test").
@@ -165,6 +171,13 @@ def _bounded(text: str) -> str:
     if len(text) > MAX_GATE_OUTPUT:
         return "[truncated]...\n" + text[-MAX_GATE_OUTPUT:]
     return text
+
+def _bounded_review(text: str) -> str:
+    """Keep a long reviewer reply's head and tail; both carry verdicts."""
+    if len(text) <= MAX_REVIEW_EVIDENCE:
+        return text
+    half = MAX_REVIEW_EVIDENCE // 2
+    return text[:half] + "\n[truncated]...\n" + text[-half:]
 
 
 # Shell operators that replace the gate's exit status with something
@@ -509,13 +522,28 @@ def _apply_review(state: dict, observed_hash: str, *, result: str,
         raise GateNotPassed("No verified snapshot; run the gate again.")
     if observed_hash != digest:
         raise GateNotPassed("Artifacts changed after verification; run the gate again.")
+    evidence = evidence.strip()
+    if not reviewing.echoes(evidence, digest):
+        raise EvidenceInsufficient(
+            "The evidence must be the reviewer's reply naming the reviewed checkpoint "
+            f"(the first {reviewing.HASH_ECHO} hash characters, {digest[:reviewing.HASH_ECHO]})."
+        )
+    if result == "pass":
+        refusals = reviewing.pass_refusals(evidence, None)
+        if refusals:
+            raise EvidenceInsufficient(
+                "This reply does not support a pass: " + "; ".join(refusals)
+                + ". A pass needs every requirement line PASS (NOT REVIEWED only on lines "
+                "tagged [unverifiable]) and no FAIL headline. Record --result fail, "
+                "or fix and review again."
+            )
     state.setdefault("reviews", []).append({
         "turn": last["turn"], "tree_hash": digest, "at": _now(),
         "judge": judge.strip(), "criterion": criterion,
-        "result": result, "evidence": _bounded(evidence.strip()),
+        "result": result, "evidence": _bounded_review(evidence),
     })
     if state["gate"]["kind"] == "coverage":
-        last["gate"], last["gate_output"] = result, _bounded(evidence.strip())
+        last["gate"], last["gate_output"] = result, _bounded(evidence)
         state["subagents"].append({
             "role": "coverage-judge", "name": judge.strip(),
             "brief": criterion, "last_seen_turn": last["turn"] - 1,

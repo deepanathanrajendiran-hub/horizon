@@ -955,6 +955,7 @@ def test_state_review_and_completion_use_revisioned_transactions(
     checkpoint = finished["checkpoint"]
     failed = goal.record_review(
         state["slug"], "fail",
+        f"Reviewed checkpoint: {checkpoint['tree_hash'][:12]}. "
         "The independent fixture found one unresolved issue in the accepted snapshot.",
         "judge-fixture", checkpoint["tree_hash"],
     )
@@ -962,6 +963,7 @@ def test_state_review_and_completion_use_revisioned_transactions(
         goal.complete(state["slug"], "")
     passed = goal.record_review(
         state["slug"], "pass",
+        f"Reviewed checkpoint: {checkpoint['tree_hash'][:12]}. "
         "The independent fixture rechecked the accepted snapshot and found the issue resolved.",
         "judge-fixture", checkpoint["tree_hash"],
     )
@@ -980,3 +982,62 @@ def test_commit_revision_wraps_malformed_candidate_execution():
         with pytest.raises(goal.GoalStateError, match="invalid execution candidate"):
             goal.commit_revision(candidate, expected_revision=0)
     assert goal.load(state["slug"]) == state
+
+def _reviewable(**kw):
+    state = _make(gate_value="true", review_criterion="Every requirement line holds.", **kw)
+    digest = _digest(state)
+    state = goal.checkpoint(state["slug"], "did", "review", digest, "pass", "")
+    return state, digest
+
+
+def test_review_must_echo_the_checkpoint_hash():
+    state, digest = _reviewable()
+    with pytest.raises(goal.EvidenceInsufficient, match="naming the reviewed checkpoint"):
+        goal.record_review(state["slug"], "pass",
+                           "R1: PASS - the reviewer never said which checkpoint it saw.",
+                           "judge-1", digest)
+    other = "f" * 12 if not digest.startswith("f" * 12) else "e" * 12
+    with pytest.raises(goal.EvidenceInsufficient, match="naming the reviewed checkpoint"):
+        goal.record_review(state["slug"], "fail",
+                           f"Reviewed checkpoint: {other}\nR1: FAIL - another snapshot",
+                           "judge-1", digest)
+    reviewed = goal.record_review(state["slug"], "pass",
+                                  f"Reviewed checkpoint: {digest[:12]}\nR1: PASS - ran it",
+                                  "judge-1", digest)
+    assert reviewed["reviews"][-1]["result"] == "pass"
+
+
+@pytest.mark.parametrize("reply", [
+    "**Verdict: FAIL, narrowly.** The burst path still drops tool calls.",
+    "**FAIL.** The merged session is force-collected.",
+    "R1: PASS - ok\nR2: UNVERIFIED - no audio reference to compare",
+    "- R1: PASS\n| R2 | FAIL | m18 merges two attacks |",
+])
+def test_pass_is_refused_when_the_reply_does_not_support_it(reply):
+    state, digest = _reviewable()
+    evidence = f"Reviewed checkpoint: {digest[:12]}\n{reply}"
+    with pytest.raises(goal.EvidenceInsufficient, match="Record --result fail"):
+        goal.record_review(state["slug"], "pass", evidence, "judge-1", digest)
+    failed = goal.record_review(state["slug"], "fail", evidence, "judge-1", digest)
+    assert failed["reviews"][-1]["result"] == "fail"
+
+
+def test_pass_with_caveats_headline_is_not_a_fail():
+    state, digest = _reviewable()
+    evidence = (f"Reviewed checkpoint: {digest[:12]}\n**Verdict: PASS, with caveats.**\n"
+                "R1: PASS - ran the CLI")
+    reviewed = goal.record_review(state["slug"], "pass", evidence, "judge-1", digest)
+    assert reviewed["reviews"][-1]["result"] == "pass"
+
+
+def test_review_evidence_keeps_16k_whole_and_head_and_tail_beyond():
+    state, digest = _reviewable()
+    head = f"Reviewed checkpoint: {digest[:12]}\nR1: PASS - first line"
+    medium = head + "\n" + "y" * 9000
+    stored = goal.record_review(state["slug"], "pass", medium, "judge-1", digest)
+    assert stored["reviews"][-1]["evidence"] == medium
+    long = head + "\n" + ("x" * 79 + "\n") * 300 + "R9: PASS - last line"
+    assert len(long) > goal.MAX_REVIEW_EVIDENCE
+    kept = goal.record_review(state["slug"], "pass", long, "judge-1", digest)["reviews"][-1]["evidence"]
+    assert kept.startswith(head) and kept.endswith("R9: PASS - last line")
+    assert "[truncated]" in kept and len(kept) < goal.MAX_REVIEW_EVIDENCE + 100

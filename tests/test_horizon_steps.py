@@ -451,6 +451,7 @@ def test_finish_replay_keeps_original_checkpoint_after_coverage_review(make_stat
     )
     reviewed = goal.record_review(
         state["slug"], "pass",
+        f"Reviewed checkpoint: {first['checkpoint']['tree_hash'][:12]}. "
         "Independent reviewer inspected the exact checkpoint and accepts it.",
         "reviewer-fixture", first["checkpoint"]["tree_hash"],
     )
@@ -473,7 +474,8 @@ def test_next_packet_keeps_actual_gate_and_review_verdicts(make_state_goal, tmp_
         gate_value="printf verified-output", review_criterion="Independent review")
     first = steps.finish(state["slug"], "r1", expected_revision=attached["execution_revision"],
                          update_file=update_file, worker_evidence_file=evidence)
-    review_text = "Independent reviewer examined the verified source and accepted the result."
+    review_text = (f"Reviewed checkpoint: {first['checkpoint']['tree_hash'][:12]}. "
+                   "Independent reviewer examined the verified source and accepted the result.")
     goal.record_review(state["slug"], "pass", review_text,
                        "reviewer-fixture", first["checkpoint"]["tree_hash"])
     next_begin = steps.begin(state["slug"], "r2")
@@ -1111,7 +1113,8 @@ def test_real_cli_reserves_attaches_finishes_reviews_and_completes(state_client,
     assert replay["replayed"] is True
 
     review_evidence = tmp_path / "review.txt"
-    review_evidence.write_text("Independent reviewer inspected ready.txt and the accepted checkpoint.")
+    review_evidence.write_text(f"Reviewed checkpoint: {finished['checkpoint']['tree_hash'][:12]}. "
+                               "Independent reviewer inspected ready.txt and the accepted checkpoint.")
     code, reviewed = run(
         "review", state["slug"], "--result", "pass", "--judge", "reviewer-1",
         "--hash", finished["checkpoint"]["tree_hash"],

@@ -118,13 +118,13 @@ def _review_goal(project):
 
 def test_current_independent_review_allows_completion(project):
     state, digest = _review_goal(project)
-    goal.record_review(state['slug'], 'pass', REVIEW, 'fresh-judge-1', digest)
+    goal.record_review(state['slug'], 'pass', f"Reviewed checkpoint: {digest[:12]}. {REVIEW}", 'fresh-judge-1', digest)
     assert goal.complete(state['slug'], '')['status'] == 'complete'
 
 
 def test_failed_review_blocks_completion(project):
     state, digest = _review_goal(project)
-    goal.record_review(state['slug'], 'fail', REVIEW, 'fresh-judge-1', digest)
+    goal.record_review(state['slug'], 'fail', f"Reviewed checkpoint: {digest[:12]}. {REVIEW}", 'fresh-judge-1', digest)
     with pytest.raises(goal.GateNotPassed):
         goal.complete(state['slug'], '')
 
@@ -133,12 +133,12 @@ def test_review_refuses_changed_snapshot(project):
     state, digest = _review_goal(project)
     (project / 'changed.txt').write_text('new work')
     with pytest.raises(goal.GateNotPassed):
-        goal.record_review(state['slug'], 'pass', REVIEW, 'fresh-judge-1', digest)
+        goal.record_review(state['slug'], 'pass', f"Reviewed checkpoint: {digest[:12]}. {REVIEW}", 'fresh-judge-1', digest)
 
 
 def test_old_review_does_not_cover_another_turn(project):
     state, digest = _review_goal(project)
-    goal.record_review(state['slug'], 'pass', REVIEW, 'fresh-judge-1', digest)
+    goal.record_review(state['slug'], 'pass', f"Reviewed checkpoint: {digest[:12]}. {REVIEW}", 'fresh-judge-1', digest)
     goal.checkpoint(state['slug'], 'new attempt', 'review', digest, 'pass', '')
     with pytest.raises(goal.GateNotPassed):
         goal.complete(state['slug'], '')
@@ -185,7 +185,7 @@ def test_cli_command_review_completion_flow(project, runtime):
     cp = json.loads(checked.stdout)['last_checkpoint']
     assert _cli(project, runtime, 'complete', slug).returncode != 0
     evidence = project.parent / 'review.txt'
-    evidence.write_text(REVIEW)
+    evidence.write_text(f"Reviewed checkpoint: {cp['tree_hash'][:12]}. " + REVIEW)
     reviewed = _cli(project, runtime, 'review', slug, '--result', 'pass', '--judge', 'judge-1',
                     '--hash', cp['tree_hash'], '--evidence-file', str(evidence))
     assert reviewed.returncode == 0, reviewed.stderr

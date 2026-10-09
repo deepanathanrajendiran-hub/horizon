@@ -87,7 +87,8 @@ def test_coverage_records_work_before_review_and_completes(client):
     assert report["budget_exhausted"] is True
     assert run("complete", slug)[0] == 2
     evidence = project.parent / "review.txt"
-    evidence.write_text("Inspected report.md: all three required acceptance items are present.")
+    evidence.write_text(f"Reviewed checkpoint: {report['last_checkpoint']['tree_hash'][:12]}. "
+                        "Inspected report.md: all three required acceptance items are present.")
     code, reviewed = run("review", slug, "--result", "pass", "--judge", "independent-test-fixture",
                          "--hash", report["last_checkpoint"]["tree_hash"],
                          "--evidence-file", str(evidence))
