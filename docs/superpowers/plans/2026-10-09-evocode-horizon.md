@@ -9957,8 +9957,8 @@ feat(evo): pre-registration freeze, reserves, bundle verification and freeze pin
 3. **Step 9 reads more than `ok`.** For every validated task it prints whether python3 3.10 or later runs in the image, how many rounds lack case counts, how many bundled Go tarballs were replaced and which user each round runs as. It STOPs on any of them, and on an unknown amd64 pattern, instead of letting the walk swap the task.
 4. **Step 12 also measures the goal start offset and the usage per round**, as the spec's dry run requires. It prints offsets and utilizations only, never goal text.
 5. **A dropped main task is replaced by a reserve (Step 14).** `prereg.json` pre-registers the reserves (spec rule 7), and on relaunch the runner runs the next unused one. The skeleton could only drop.
-6. **A post-run integrity check is added (Step 16).** It checks every planned task against `prereg.json`, including any reserve in play: prompt-file digests, agent-copy digests, image IDs, the freeze commit and the versions of every main record.
-7. **A contamination check runs before both commits (Steps 13 and 19).** It prints counts and line numbers only, never task content.
+6. **A post-run integrity check is added (Step 16).** It checks every planned task against `prereg.json`, including any reserve in play: prompt-file digests, agent-copy digests, image IDs, the freeze commit of every main record, and the versions of every main record that ran a trial.
+7. **A contamination check runs before both commits (Steps 13 and 19).** It prints counts and line numbers only, never task content. A host-path check runs with it.
 
 **Files:**
 - Created by running the steps, and committed:
@@ -9966,8 +9966,8 @@ feat(evo): pre-registration freeze, reserves, bundle verification and freeze pin
   - `docs/evaluations/evocode-horizon/report.md` and `deviations.md` (Steps 18-19).
 - Run data, never committed:
   - everything under `$RUNS`, including `$RUNS/bin/contamination-check.py` (Step 1) and `$RUNS/timing.json` (Step 12);
-  - `$RUNS/findings.md`, the operator's STOP notes before the freeze;
-  - `$RUNS/deviations.md`, after the freeze.
+  - `$RUNS/findings.md`, the operator's STOP notes before the freeze, and the runner's dry-phase drop lines;
+  - `$RUNS/deviations.md`, after the freeze, with the runner's main-phase drop lines.
 
 **Interfaces:**
 - Consumes these commands and names, all run from `$WT`:
@@ -9980,18 +9980,29 @@ feat(evo): pre-registration freeze, reserves, bundle verification and freeze pin
   - Task 6:
     - `python3 -m bench.evo.validate --n N`, which prints `{"selected", "swaps", "complete", "python_missing"}`, and `python3 -m bench.evo.validate --task TASK`;
     - each `validation/<task>.json` carries `python`, `oracle_cases`, `arm_patch`, `user` (from `validate.agent_users(task_toml, image_user)`) and `code` (`validate.CODE_DIGEST`). A saved record whose `code` differs is validated again;
+    - a task whose image holds `setup.sh` in its working directory fails validation with the reason `project file setup.sh in the working directory would be overwritten by the round hook`, before any Harbor job;
+    - `validate_task` and `--task` raise `ValueError` for a task name that is empty or absolute, or that holds `/`, `\` or `..`, before anything is deleted;
     - `steps.read_trial` (Step 12).
   - Task 7: `python3 -m bench.evo.harborcheck check [--agent oracle]`, `vtimeout`, `probe` and `canary --skill DIR`. The findings land in `$RUNS/checks/<job>/findings.json`. The dummy image is `FROM ubuntu:22.04` with no apt step.
-  - Task 8: `python3 -m bench.evo.run --phase dry|main [--print-commands]`. It exits 3 with `stopped: ...` when a task is dropped. For `main`:
+  - Task 8: `python3 -m bench.evo.run --phase dry|main [--print-commands]`. It exits 3 with `stopped: ...` when a task is dropped. In both phases:
+    - a drop line goes to `$RUNS/deviations.md` for `main` and to `$RUNS/findings.md` for `dry`. Only a main drop is skipped on a relaunch, so a dry relaunch with the next `--attempt` runs the walkthrough again;
+    - when the usage probe that gates a job returns no `five_hour` or `seven_day` utilization, it raises `InfrastructureFailure: usage probe returned no rate-limit data`. No job starts, no record is written and no attempt is spent;
+    - a Harbor model-outcome type (`run.MODEL_OUTCOMES`, for example `AgentSafetyRefusalError` or `ContextWindowExceededError`) keeps a run valid even when the stream ends on the API error line Harbor read it from. Any Harbor type it does not know is `infrastructure`.
+
+    For `main`:
     - it runs `run.main_tasks(prereg, dropped)`, which is `prereg["tasks"]` plus `prereg["reserve"][:len(set(dropped))]`, with `dropped = run.dropped_tasks(run.Paths(RUNS), "main")`;
-    - before reading the token, it raises `ImageChanged("<task>: validated image differs from the pre-registered one")` when any of those tasks has a validated image that differs from `prereg.json`'s `task_details`.
-  - Task 9: `python3 -m bench.evo.score --phase dry|main`, and `score.ledger_goals` (Step 12).
-  - Task 10: `python3 -m bench.evo.analysis timing|label|report`. `report` plans the same `main_tasks` list and shows a dropped task as `dropped`.
+    - before reading the token, it raises `ImageChanged("<task>: validated image differs from the pre-registered one")` when any of those tasks has a validated image that differs from `prereg.json`'s `task_details`;
+    - it then calls `prereg.verify_runs` (Task 11).
+  - Task 9: `python3 -m bench.evo.score --phase dry|main`, and `score.ledger_goals` (Step 12), which returns `None` for a round whose ledger copy was not collected. Each row has the 26 keys of `score.ROW_FIELDS`; the last, `exception`, is the round's Harbor exception type or `null`. A valid record whose `<trial_dir>/result.json` cannot be read raises `ValueError` naming the job.
+  - Task 10: `python3 -m bench.evo.analysis timing|label|report`. `report` plans the same `main_tasks` list and shows a dropped task as `dropped`. It calls `analysis.summarize(rows, records, tasks, rounds_by_task, dropped, preregistered=len(prereg["tasks"]))`, so the report states the analysed count, the pre-registered N and the reserves used. It exits 2 when a main record's `freeze` differs from the commit `require_freeze` returned. It renders `deviations.md` with the `--runs` path, the worktree and the home directory written as `$RUNS`, `$WT` and `~`.
   - Task 11: `python3 -m bench.evo.prereg bundle|write|check`:
     - `write` prints `{"n", "tasks", "replaced", "reserve", "json", "md"}`;
+    - `write` refuses (`FreezeError`) a Harbor check whose latest attempt is not `ok`, and a timeout probe whose latest attempt has `ok` false or any `failures`;
     - `prereg.json` holds `reserve` (from `prereg.reserve_tasks`) and `task_details` for every measured task and every reserve;
     - `OUTCOMES["running"]` states the reserve rule;
-    - `prereg.md` has a `### Reserve` subsection.
+    - `prereg.md` has a `### Reserve` subsection;
+    - `prereg.verify_runs(prereg, runs, tasks)` raises `NotFrozen` when the bundle, an existing prompt file or an agent copy differs from `prereg.json`, or an agent copy is missing;
+    - `prereg.require_frozen_record(path, run)` raises `NotFrozen` unless the file holds exactly the tagged `prereg.json`. `run --phase main` and `analysis report` call it, and `score --phase main`, `analysis label` and `analysis report` call `require_freeze`.
   - TB4, unchanged:
     - `bench.tb4.run.read_token` and `probe_usage`;
     - `bench.tb4.copies.tree_digest`;
@@ -10018,15 +10029,21 @@ feat(evo): pre-registration freeze, reserves, bundle verification and freeze pin
   - any `tests/` or `solution/` file, or any `instruction.md`;
   - verifier output (`verifier/test-stdout.txt`), or per-case results under `$RUNS/jobs` or `$RUNS/checks`.
 
-  There are three exceptions:
+  There are four exceptions:
   - While debugging the dry run, you may read up to the first 200 characters of one of the walkthrough task's round instructions.
   - An agent transcript (`agent/claude-code.txt`) may be read to diagnose an invalid run, but never quoted.
   - Step 9 may count `CASE_SUMMARY` lines with `grep -c`, which prints one count per file and nothing else.
+  - Step 9 may scan each selected task's `environment/Dockerfile` for language toolchains, printing and recording only the toolchain names, never file contents.
 - **Before every commit**, two checks must pass:
   - `python3 -m bench.tb4.leakcheck` prints `no token in staged files`;
   - the contamination check reports zero hits.
 - **STOP** means three things:
-  1. Append a dated line to `$RUNS/findings.md` before the freeze, or to `$RUNS/deviations.md` after it. Give the step, the command and the error message, with no task content. Start each line with `- YYYY-MM-DD:`. The runner reads lines that start `- main <task>: dropped` as drops, so a hand-written line must never look like one.
+  1. Append a dated line to `$RUNS/findings.md` before the freeze, or to `$RUNS/deviations.md` after it. `analysis report` copies `deviations.md` into `report.md`, and Step 19 commits it, so every line must be fit to publish:
+     - give the step, the exception type and a paraphrase of the message, never the command line or the raw message;
+     - write `$RUNS`, `$WT` and `~` in place of the run directory, the worktree and the home directory, never an absolute path;
+     - never name a file under `tests/` or `solution/`, never quote an instruction, and never give per-case results.
+
+     Start each line with `- YYYY-MM-DD:`. The runner writes its own drop lines, `- dry <task>: dropped ...` to `$RUNS/findings.md` and `- main <task>: dropped ...` to `$RUNS/deviations.md`. It reads lines that start `- main <task>: dropped` as drops, so a hand-written line must never look like one.
   2. Ask the user.
   3. Do not continue until they answer.
 - **The user's only manual step** is refreshing the token. It is needed when a step prints any of these:
@@ -10044,7 +10061,7 @@ feat(evo): pre-registration freeze, reserves, bundle verification and freeze pin
 ```bash
 WT="/Users/deeps/Documents/NEW STUFF/fun /.superpowers/worktrees/evocode"; RUNS="$HOME/Documents/evocode-horizon-runs"; REV=9fcae3e5539d1c0e85e2481fe06bd6af42cc4bc6
 mkdir -p "$RUNS/logs" "$RUNS/bin"
-cd "$WT" && git status --short && git log --oneline -1
+cd "$WT" && git branch --show-current && git status --short && git log --oneline -1
 docker info --format '{{.NCPU}} {{.MemTotal}} {{.Architecture}}'
 harbor --version
 COLUMNS=200 harbor run --help | grep -oE -- '--(extra-instruction-path|skill|agent-timeout-multiplier|agent-setup-timeout-multiplier|no-force-build|job-name)\b' | sort -u | wc -l
@@ -10080,19 +10097,20 @@ EOF
 ```
 
 Expected:
-- `git status --short` prints nothing. The last commit is Task 11's, `feat(evo): pre-registration freeze, reserves, bundle verification and freeze pins`.
+- The branch is `eval/evocode-horizon` and `git status --short` prints nothing, so the code is the branch tip as committed. The last commit's hash is not checked; the suite count below is.
 - Docker prints `8`, a memory value of at least `12000000000`, and `aarch64`.
 - `harbor --version` prints `0.24.0`, the flag count is `6`, and the schema check prints `['disable_web_search', 'reasoning_effort', 'version']`.
 - `claude --version` prints the host version. Note it: the judge runs on the host, and Step 17 compares against it.
 - `zstd --version` prints a version, and Python prints `3.11` or later.
 - The token byte count is above `20`.
 - `docker system df` shows images using well under half of Docker Desktop's disk limit.
-- The suite ends with `1123 passed, 7 skipped`, Task 11's count; the time varies. The 7 skips are the freeze pins in `tests/test_evo_prereg.py`.
+- The suite ends with `1226 passed, 8 skipped`, the count after the final-review fixes; the time varies. The 8 skips are the freeze pins in `tests/test_evo_prereg.py`.
 
 If anything differs:
 - **Docker is not running:** start Docker Desktop and repeat.
 - **The token is missing or the count is 0:** do the user's manual step.
-- **The worktree is dirty or a test fails:** fix it through the owning task's tests first.
+- **The branch is not `eval/evocode-horizon`, the worktree is dirty, or a test fails:** fix it through the owning task's tests first.
+- **The suite passes with other counts:** STOP. Other work has landed, and the counts in Steps 13 and 19 no longer hold.
 - **Harbor is not 0.24.0:** STOP.
 - **The architecture is not `aarch64`:** STOP.
 - **Docker's disk is more than half full:** STOP, and ask the user to raise the disk limit. Validation builds about 11 images, each with a Go toolchain.
@@ -10100,7 +10118,8 @@ If anything differs:
 - [ ] **Step 2: Token and usage probe** (one one-word reply from the probe model)
 
 Run: `cd "$WT" && python3 -c 'from bench.tb4 import run; info = run.probe_usage(run.read_token()) or {}; print({k: info.get(k) for k in ("status", "five_hour", "seven_day")})'`
-Expected: a dict whose `status` starts with `allowed`, or whose values are `None` when the API sent no rate-limit data. Note `seven_day`. The main run needs roughly 0.76 of a week (60 agent-hours at about 0.0127 per agent-hour). The runner waits on its own whenever usage leaves too little headroom.
+Expected: a dict whose `status` starts with `allowed` and whose `five_hour` and `seven_day` are numbers. Note `seven_day`. The main run needs roughly 0.76 of a week (60 agent-hours at about 0.0127 per agent-hour). The runner waits on its own whenever usage leaves too little headroom.
+If `five_hour` or `seven_day` is `None`, the probe returned no rate-limit data: STOP. The runner refuses to start a job without it (`InfrastructureFailure: usage probe returned no rate-limit data`), because its pacing would run blind.
 If it raises `RuntimeError: no token in Keychain service tb4-horizon-claude-token; see plan step A2`, or a `ProbeError` that mentions authentication, do the user's manual step, then repeat. For any other `ProbeError`, wait 10 minutes and repeat once; if it fails again, STOP.
 
 - [ ] **Step 3: Fetch and list the dataset**
@@ -10207,7 +10226,7 @@ Expected:
   - `user` is `root` and `pwd` is `/app`;
   - `rewards` is `{'round-1': 1.0, 'round-2': 1.0}`;
   - `round_2_claude_like` holds exactly one `claude ...` line.
-- **`probe`:** exits 0 with `"ok": null`. Its `recorded` block shows:
+- **`probe`:** exits 0 with `"ok": null` and `"failures": []`. The exit code is 0 even when `failures` lists something, so read the array. Its `recorded` block shows:
   - `round_1_exception.type` is `AgentTimeoutError`, after 60.0 seconds;
   - `round_1_verifier_ran` is true and `round_1_reward` is 0.0;
   - `round_2_started` is true and `round_2_reward` is 1.0;
@@ -10216,6 +10235,8 @@ Expected:
 
 If anything differs:
 - **`check` fails:** use Task 7's table, then rerun with `--attempt 2`.
+- **`check` fails with `round-2: probe file round-2/procs.txt has no PID-1 line, so a killed decoy cannot be told from an unread process list`:** the agent's round-2 listing does not show the container's processes, so the decoy check read nothing. Rerun with the next `--attempt`. If it fails the same way again, STOP. Task 7's table has no row for this failure.
+- **The probe's `failures` is not `[]`, or its `ok` is `false`:** its `recorded` facts rest on a process list nobody read, or on no trial at all. The failures read `round-1: probe file before-collect/procs.txt missing`, `round-2: probe file round-2/procs.txt missing`, `... procs.txt has no PID-1 line, so it did not list the container's processes` or `no trial directory with result.json`. Rerun the probe with the next `--attempt`. If it fails again, STOP. `prereg write` refuses to freeze on a probe whose latest attempt has `ok` false or any failure.
 - **The probe shows `round_2_started` false or `round_1_reward` 1.0:** STOP.
 - **The probe shows `sleep 600` still running, or two `claude` lines, in round 2:** fix Task 5's `COLLECT_COMMAND` as Task 7 Step 12 says. Rerun Task 5's tests, then rerun the probe with `--attempt 2`.
 - **The canary reports `no Write tool call created the file without an error`:** STOP. The fallback, relocating the gates directory, changes the bundle and must be decided before the freeze.
@@ -10241,7 +10262,7 @@ Expected: one line per attempt. The latest attempt of each job reads as follows,
 - `check__dummy__control__aN True <digest> []`;
 - `check__dummy__oracle__aN True <digest> []`.
 
-`prereg write` records the latest attempts, and it refuses to freeze otherwise. If any latest attempt except the probe's is not `True ... []`, go back to Step 6 or 7.
+`prereg write` records the latest attempts, and it refuses to freeze otherwise: every check's latest line must be `True <digest> []`, and the probe's latest line must be `None <digest> []`. A probe line with `False` or with any failure is refused, like a failed check. If any latest line differs, go back to Step 6 or 7.
 
 - [ ] **Step 9: Validate tasks in the seeded order until 10 pass** (Mac time only; many hours)
 
@@ -10264,6 +10285,7 @@ ls "$RUNS/validation" | grep -c '^theme_'; tail -3 "$RUNS/logs/validate.log"; ki
 How the walk works:
 - Each task's agent and validation copies get the ARM patch. A Go tarball that a `COPY` or `ADD` takes from the build context is swapped for go.dev's linux-arm64 archive of the same version, checked against go.dev's published sha256. The spec expects this for d10_w4.
 - Each task builds its arm64 image. A failed build is retried once; a second failure is a validation failure.
+- Before any Harbor job, the image's working directory is checked for a file named `setup.sh`. Harbor would overwrite it with the round hook every round, and the hook deletes itself, so such a task fails validation with the reason `project file setup.sh in the working directory would be overwritten by the round hook`. The walk swaps it like any other failure.
 - Then every round runs three times: oracle, nop, and oracle with a planted ledger.
 - When the process has exited, the log's last line is `{"selected": [...], "swaps": [...], "complete": true, "python_missing": []}`. `selected` holds 10 task names in seeded order. Each swap names a task that failed validation, its reason, and its replacement.
 - The walk resumes. After a crash or reboot, launch the same command again, and finished tasks are read from `$RUNS/validation/`.
@@ -10294,9 +10316,45 @@ Expected: one line per walked task, giving:
 
 Every selected task prints `True arm64 <rounds> True 0 <k> ['root'] None`. Here k is 1 for d10_w4, whose bundled tarball was replaced, and 0 for the others.
 
+Watch item, recorded and not a STOP: the planted ledger plants test-like files in Python, Go, JavaScript, TypeScript and shell only (`validate.PLANTED_LEDGER`). Validation's planted-ledger oracle run is the real protection: it passes every round only when no verifier collected a planted file. To record which other languages a selected task could test in, list the language toolchains its `environment/Dockerfile` installs. That file is not under `tests/`, and the ARM patcher already reads it. The snippet prints only toolchain names, never file contents, and appends one dated line to `$RUNS/findings.md`:
+
+```bash
+WT="/Users/deeps/Documents/NEW STUFF/fun /.superpowers/worktrees/evocode"; RUNS="$HOME/Documents/evocode-horizon-runs"; REV=9fcae3e5539d1c0e85e2481fe06bd6af42cc4bc6
+cd "$WT" && python3 - <<'EOF'
+import json
+import re
+import time
+from bench.evo import config
+# toolchain name -> what installs it in a Dockerfile; only the names are printed or recorded
+TOOLCHAINS = {"python3": r"\bpython3?\b|\bpip3?\b", "golang": r"\bgolang\b|\bgo\d+\.\d+|/usr/local/go\b",
+              "nodejs": r"\bnodejs\b|\bnpm\b|\bnode:\d|nodesource|\byarn\b", "typescript": r"\btypescript\b|\btsc\b",
+              "rustc": r"\brustc\b|\bcargo\b|\brustup\b", "openjdk": r"\bopenjdk\b|\bjdk\b|\bmaven\b|\bgradle\b",
+              "ruby": r"\bruby\b", "php": r"\bphp\b", "dotnet": r"\bdotnet\b", "perl": r"\bperl\b",
+              "gcc": r"\bgcc\b|\bg\+\+|\bclang\b|build-essential", "r-base": r"\br-base\b"}
+PLANTED = {"python3", "golang", "nodejs", "typescript"}  # shell is in every image
+summary = json.loads((config.RUNS / "validation" / "summary.json").read_text())
+tasks = config.RUNS / "dataset" / config.DATASET_REVISION / "tasks"
+lines = []
+for task in summary["selected"]:
+    text = (tasks / task / "environment" / "Dockerfile").read_text(errors="replace")
+    found = sorted(name for name, pattern in TOOLCHAINS.items() if re.search(pattern, text, re.I))
+    other = [name for name in found if name not in PLANTED]
+    planted = json.loads((config.RUNS / "validation" / f"{task}.json").read_text()).get("planted") or []
+    planted_ok = bool(planted) and all(r is not None and r >= 1.0 for r in planted)
+    print(task, found, "other:", other, "planted_ok:", planted_ok, "STOP" if other and not planted_ok else "record")
+    lines.append(f"- {time.strftime('%Y-%m-%d')}: Step 9 toolchains: {task} {found}\n")
+with open(config.RUNS / "findings.md", "a") as handle:
+    handle.writelines(lines)
+EOF
+```
+
+Expected: one line per selected task, giving its toolchain names, the ones outside Python, Go, JavaScript, TypeScript and shell, `planted_ok: True` and `record`. Every selected task passed validation, so its planted-ledger oracle run passed every round, and the last word is `record`. A toolchain outside that set is a finding for the report's reader, not a defect.
+
 If anything differs:
 - **`"complete": false`:** all 13 tasks were walked and fewer than 10 passed. If fewer than 6 passed, STOP: no N fits. Otherwise note the count in `$RUNS/findings.md` and continue. The freeze refuses an N larger than this count, and that becomes a STOP at Step 13.
 - **A task is not `ok` because of `UnknownArchPattern` (its reason starts `copy failed: line`):** STOP. The spec requires patching every pool task's amd64 Go and yq artifacts, and tasks are not chosen by whether they build. Write the line number (not the line) to `$RUNS/findings.md`. Ask the user whether to extend Task 4's patcher (with a test) or to log a swap.
+- **A task's reason starts `copy failed:` and mentions a symlink:** STOP. The copies refuse a symlink that leaves the task directory (a runner limit, not a property of the task), so the walk swapped the task for the runner's sake. Write only `copy failed: symlink` and the task name to `$RUNS/findings.md`, never the path. Ask the user whether to log the swap.
+- **A toolchain line ends with `STOP`:** the task installs a toolchain outside Python, Go, JavaScript, TypeScript and shell, and its planted-ledger oracle run did not pass every round. STOP and ask the user. With an `ok` validation record this cannot happen, so it means the record and the walk disagree.
 - **`python_missing` is not empty, or a selected task prints python `False`:** STOP and ask the user. The spec's validation criteria do not cover a container without python3 3.10 or later, and the Horizon CLI cannot run in one.
 - **A selected task has a null case count above 0:** set `T` to that task's name and run only `grep -c CASE_SUMMARY "$RUNS"/checks/oracle__"$T"/*/steps/*/verifier/test-stdout.txt`. It prints one count per round file. Never print or open the files. STOP and report the counts.
 - **A selected task's users are not `['root']`:** STOP and ask the user. The spec says the per-round setup hook runs as root, but Harbor runs it as the step's agent user. A non-root user leaves root-owned `/tmp` entries and has a different `HOME`.
@@ -10358,8 +10416,13 @@ Expected: when the process exits, the log's last line is:
 ```
 
 An invalid first attempt is retried once on its own. It shows as an extra entry, with its `invalid_reason`, before the `__a2` entry.
-If the log ends with `stopped: - dry theme_d11_w2_scientific_numerical_brownfield_modification__not_1234: dropped after two invalid runs ...` (exit 3), STOP. Without a valid dry run there is no N.
-Handle `RunnerBusy`, `InfrastructureFailure`, `usage headroom did not return` and authentication errors as in Step 14.
+If the log ends with `stopped: - dry theme_d11_w2_scientific_numerical_brownfield_modification__not_1234: dropped after two invalid runs ...` (exit 3), STOP. Without a valid dry run there is no N. The runner wrote that drop line to `$RUNS/findings.md`, the pre-freeze log, never to `$RUNS/deviations.md`. A dry drop is never skipped on a relaunch, so if the user says to retry, relaunch the command above with `--attempt 3`, the next unused number; an arm that already has a valid dry record is not run again.
+Handle `RunnerBusy`, `InfrastructureFailure` (including `usage probe returned no rate-limit data`), `usage headroom did not return` and authentication errors as in Step 14.
+
+When the process has exited, confirm that Harbor left the walkthrough's agent copy unchanged. The dry run is the first Harbor job that runs from an agent copy (`-p`), and on every main start `verify_runs` holds each agent copy to the digest validation recorded:
+
+Run: `cd "$WT" && python3 -c 'import json; from bench.evo import config; from bench.tb4.copies import tree_digest; w = config.WALKTHROUGH; d = json.loads((config.RUNS / "validation" / f"{w}.json").read_text()); print(tree_digest(config.RUNS / "copies" / "agent" / w) == d["copy_digest"])'`
+Expected: `True`. If it prints `False`, STOP before the freeze: a Harbor job changed its task directory, so every main relaunch would refuse with `NotFrozen`.
 
 - [ ] **Step 12: Score the dry run and apply the N rule**
 
@@ -10392,11 +10455,37 @@ for path in sorted((config.RUNS / "records").glob("dry__*.json")):
     for step in steps.read_trial(record["trial_dir"])["steps"]:
         t0 = parse_time(step["agent_started"])
         starts = [parse_time((g.get("used") or {}).get("started"))
-                  for g in score.ledger_goals(step["artifacts_dir"], step["name"]).values()]
+                  for g in (score.ledger_goals(step["artifacts_dir"], step["name"]) or {}).values()]
         new = sorted((t - t0).total_seconds() / 60 for t in starts if t and t0 and t >= t0)
         usage = stream.rate_limit_info(stream.read_events(Path(step["agent_dir"]) / "claude-code.txt")) or {}
         print(record["arm"], step["index"], "goal_start_min", round(new[0], 1) if new else None,
               "five_hour", usage.get("five_hour"), "seven_day", usage.get("seven_day"))
+EOF
+python3 - <<'EOF'
+import json
+from pathlib import Path
+from bench.evo import config, steps
+from bench.evo import run as evo_run
+from bench.tb4 import stream
+# the runner paces jobs with TB4's rates per agent-hour; the dry run measures this study's own
+limits = {"seven_day": evo_run.WEEKLY_PER_AGENT_HOUR, "five_hour": evo_run.FIVE_HOUR_PER_AGENT_HOUR}
+for path in sorted((config.RUNS / "records").glob("dry__*.json")):
+    record = json.loads(path.read_text())
+    if not record.get("valid") or not record.get("trial_dir"):
+        continue
+    readings, hours = [record.get("usage_before") or {}], []
+    for step in steps.read_trial(record["trial_dir"])["steps"]:
+        readings.append(stream.rate_limit_info(stream.read_events(Path(step["agent_dir"]) / "claude-code.txt")) or {})
+        hours.append((step["agent_sec"] or 0) / 3600)
+    rates = {}
+    for window in limits:  # sum the rises between consecutive readings of one window, skipping a reset
+        rise = used = 0.0
+        for before, after, h in zip(readings, readings[1:], hours):
+            if (before.get(window) is not None and after.get(window) is not None
+                    and before.get(f"{window}_resets_at") == after.get(f"{window}_resets_at")):
+                rise, used = rise + after[window] - before[window], used + h
+        rates[window] = round(rise / used, 4) if used else None
+    print(record["arm"], rates, {w: rates[w] is None or rates[w] > limits[w] for w in limits})
 EOF
 python3 -m bench.evo.analysis timing | tee "$RUNS/timing.json"
 ```
@@ -10409,6 +10498,7 @@ Expected:
   - `five_hour` and `seven_day` are the utilizations at the round's last rate-limit event.
 
   It prints offsets and utilizations only, never goal text.
+- The third inspection prints one line per valid dry job: the arm, its measured `seven_day` and `five_hour` rise per agent-hour, and whether each one exceeds the rate the runner paces with (`run.WEEKLY_PER_AGENT_HOUR` 0.0127, `run.FIVE_HOUR_PER_AGENT_HOUR` 0.098). A rate is `None` when no two consecutive readings of that window fall in one window period. It prints numbers only. Expected: both flags `False` for both arms.
 - `timing` prints `{"m_control": <x>, "m_horizon": <y>, "rounds": {"control": 5, "horizon": 5}, "n": <10, 8 or 6>}`, and `$RUNS/timing.json` holds it.
 
 STOP if any of these holds:
@@ -10416,13 +10506,14 @@ STOP if any of these holds:
 - **`n` is larger than the number of tasks Step 9 validated.**
 - **`control_horizon_calls` is above 0, or any control row has `horizon_started` true:** the control arm saw Horizon.
 - **`horizon_started` is 0:** Horizon never started, so the skill or the prompt is broken.
+- **Either arm's measured rise per agent-hour exceeds the runner's rate, or is `None` (a flag is `True`):** the runner's pacing, frozen at the tag, would admit jobs that can pass the 0.9 ceilings. STOP before the freeze and report the numbers.
 
 Otherwise, append a dated line to `$RUNS/findings.md` with these numbers:
 - rounds passed per arm;
 - the Horizon start rate;
 - m_control, m_horizon and N;
 - the median goal start offset;
-- each arm's rise in `five_hour` and `seven_day` across its rounds.
+- each arm's rise in `five_hour` and `seven_day` across its rounds, and its rise per agent-hour.
 
 A low start rate, or rounds that run out of time, is a finding, not a defect to fix.
 
@@ -10439,11 +10530,11 @@ sh bench/tb4/test.sh -q -rs tests/test_evo_prereg.py | grep -c 'before the freez
 ```
 
 Expected:
-- `git status --short` shows nothing under `bench/`.
+- `git status --short` prints nothing at all; otherwise STOP. `write` hashes the spec and the judge rubric from the working tree, and the tag freezes everything in `prereg.FROZEN_PATHS`: `bench/evo`, `bench/tb4`, `prereg.json`, the judge rubric, the spec and `prereg.md`. Every one of them must be committed, with `prereg.json` and `prereg.md` added by the commit below, before the tag. A dirty spec would leave a digest in the tagged record that no commit holds.
 - `write` prints `{"n": N, "tasks": [...], "replaced": [...], "reserve": [...], "json": "/Users/deeps/Documents/NEW STUFF/fun /.superpowers/worktrees/evocode/docs/evaluations/evocode-horizon/prereg.json", "md": "/Users/deeps/Documents/NEW STUFF/fun /.superpowers/worktrees/evocode/docs/evaluations/evocode-horizon/prereg.md"}`, where:
   - N equals Step 12's `n`;
   - `tasks` are the first N names of Step 9's `selected` list;
-  - `replaced` lists the swaps that come before them;
+  - `replaced` names the same tasks as the swaps that come before them in Step 9. Compare task names only: `replaced` gives each a shortened public reason (`copy failed`, `build failed twice`, `planted copy failed`, with `$RUNS` and `~` in place of host paths), and the full text stays in `$RUNS/validation/<task>.json`;
   - `reserve` is the rest of Step 9's `selected` list, in order. For N = 8 that is the 9th and 10th names, and for N = 10 it is `[]`. These are the pre-registered replacements for main tasks dropped by an infrastructure failure.
 - The section shows a table of the N measured tasks with their image IDs, then the list of swapped tasks, then `### Reserve`. That subsection holds a table of the reserve tasks with their image IDs, or `No reserve: validation stopped at the Nth passing task, or no later task passed it.`
 - The grep count is `0`: the freeze pins now run against `prereg.json`.
@@ -10459,6 +10550,7 @@ If `write` fails, act on its message:
 | `its validation record says ok, but its rewards or arch break the rule` | STOP |
 | `have different agent timeouts` | STOP: one M per task would be wrong for some rounds; ask the user |
 | `Harbor check results missing` or `the latest attempt of a Harbor check failed` | Go back to Steps 6-8 |
+| `the latest attempt of the timeout probe failed` | Go back to Step 7 and rerun the probe with the next `--attempt`. If it fails again, STOP |
 | `BundleMismatch` | STOP: `$RUNS/bundle` changed after the dry run used it |
 | `harbor --version printed` | STOP: Harbor is no longer 0.24.0 |
 | `commit the code before the freeze` | Commit the pending code change with its tests passing, then repeat |
@@ -10469,7 +10561,7 @@ If `write` fails, act on its message:
 Run the full suite before the commit:
 
 Run: `cd "$WT" && sh bench/tb4/test.sh -q`
-Expected: the last line is `1130 passed` followed by the run time, with no `skipped`. That is Task 11's `1123 passed, 7 skipped` with the 7 freeze pins now running. If other work has landed first, expect the previous count plus this task's tests, with 0 failures.
+Expected: the last line is `1234 passed` followed by the run time, with no `skipped`. That is Step 1's `1226 passed, 8 skipped` with the 8 freeze pins now running. Any other count, or any failure, is a STOP.
 
 Commit and tag. Each command runs only if the one before it succeeded:
 
@@ -10477,6 +10569,7 @@ Commit and tag. Each command runs only if the one before it succeeded:
 WT="/Users/deeps/Documents/NEW STUFF/fun /.superpowers/worktrees/evocode"; RUNS="$HOME/Documents/evocode-horizon-runs"; REV=9fcae3e5539d1c0e85e2481fe06bd6af42cc4bc6
 cd "$WT" && git add docs/evaluations/evocode-horizon/prereg.json docs/evaluations/evocode-horizon/prereg.md \
   && python3 -I "$RUNS/bin/contamination-check.py" "$RUNS/dataset/$REV/tasks" docs/evaluations/evocode-horizon \
+  && ! grep -rn -e "$HOME" -e '/Users/' docs/evaluations/evocode-horizon/ \
   && python3 -m bench.tb4.leakcheck \
   && git commit -m "docs(evo): pre-register the EvoCode-Bench first look" \
   && git tag -a evo-prereg -m "EvoCode-Bench first look pre-registration"
@@ -10484,10 +10577,11 @@ cd "$WT" && git add docs/evaluations/evocode-horizon/prereg.json docs/evaluation
 
 Expected:
 - The contamination check prints `"hits"` of 0 for every file and exits 0.
+- The host-path `grep` prints nothing: no file names the home directory or any `/Users/` path.
 - `leakcheck` prints `no token in staged files`.
 - The commit and the tag succeed.
 
-If the contamination check reports hits, nothing is committed. Run `git restore --staged docs/evaluations/evocode-horizon`, do not open the listed lines, and STOP.
+If the contamination check reports hits, or the host-path `grep` prints any line, nothing is committed. Run `git restore --staged docs/evaluations/evocode-horizon`, do not open the lines the contamination check lists, and STOP.
 
 Run: `cd "$WT" && git show --stat --format=%s HEAD | head -20`
 Expected: the subject `docs(evo): pre-register the EvoCode-Bench first look`, then exactly two files, `docs/evaluations/evocode-horizon/prereg.json` and `docs/evaluations/evocode-horizon/prereg.md`, and `2 files changed`.
@@ -10504,7 +10598,7 @@ python3 -m bench.evo.run --phase main --print-commands | wc -l
 
 Expected:
 - `check` prints `{"frozen": "<commit>"}`, and the `git rev-parse` line prints the same commit.
-- The pins print `53 passed`: Task 11's `46 passed, 7 skipped` with the 7 freeze pins running.
+- The pins print `71 passed`: the file's `63 passed, 8 skipped` before the freeze, with the 8 freeze pins running.
 - The command count is `2N` lines, for example `16` for N = 8. No task has dropped yet, so no reserve is in play.
 
 From here on, every change goes to `$RUNS/deviations.md` with its date and reason.
@@ -10514,7 +10608,7 @@ From here on, every change goes to `$RUNS/deviations.md` with its date and reaso
 Probe the token and usage first:
 
 Run: `cd "$WT" && python3 -c 'from bench.tb4 import run; info = run.probe_usage(run.read_token()) or {}; print({k: info.get(k) for k in ("status", "five_hour", "seven_day")})'`
-Expected: a dict whose `status` starts with `allowed`, or whose values are `None`. If the token fails, do the user's manual step.
+Expected: a dict whose `status` starts with `allowed` and whose `five_hour` and `seven_day` are numbers. If they are `None`, the probe returned no rate-limit data: STOP, because the runner would refuse every job (`InfrastructureFailure: usage probe returned no rate-limit data`). If the token fails, do the user's manual step.
 
 ```bash
 WT="/Users/deeps/Documents/NEW STUFF/fun /.superpowers/worktrees/evocode"; RUNS="$HOME/Documents/evocode-horizon-runs"; REV=9fcae3e5539d1c0e85e2481fe06bd6af42cc4bc6
@@ -10535,19 +10629,46 @@ Expected:
 - Before each job, the runner probes usage. It logs a wait whenever the weekly utilization leaves too little room for a worst-case job.
 - When the process exits, the log's last line is `{"phase": "main", "dropped": [...], "records": [...]}`.
 
-When the runner stops early, act on the end of `main.log`:
+When the runner stops early, or a live runner keeps logging the same failure, act on the end of `main.log`:
 
 | Log ends with | Action |
 | --- | --- |
-| `stopped: - main <task>: dropped after two invalid runs ...` (exit 3) | The runner has written the drop to `$RUNS/deviations.md`. A drop follows an invalid run (usage limit, API error, infrastructure failure, host sleep or interruption), never a result. Fix the cause the line names (Docker, network, token or usage), then relaunch this step. The runner skips the dropped task and every finished job. It runs the next unused reserve from `prereg.json`'s `reserve`, as pre-registered; with no reserve left, the drop stays a drop. Check which reserve came in with the command below. If the same cause drops a second task, **STOP** |
+| `stopped: - main <task>: dropped after two invalid runs ...` (exit 3) | The runner has written the drop to `$RUNS/deviations.md`. A drop follows two invalid runs of one arm: usage limit, API error, infrastructure failure, host sleep or interruption. An interrupted second attempt drops the task too (see the row for a reboot). A Harbor exception type the runner does not know makes the run `infrastructure`, and that can be the model's own repeatable crash. So if the line names `api_error` or `infrastructure`, **STOP** before relaunching: read each invalid job's transcript (`agent/claude-code.txt` under `$RUNS/jobs/<job>/`, never quoted) and its log (`$RUNS/logs/<job>.log`). Relaunch only once they show a passing API or Docker failure, not model behaviour, because the relaunch brings in a reserve. For any cause, fix it (Docker, network, token or usage), then relaunch this step. The runner skips the dropped task and every finished job. It runs the next unused reserve from `prereg.json`'s `reserve`, as pre-registered; with no reserve left, the drop stays a drop. Check which reserve came in with the command below. If the same cause drops a second task, **STOP** |
 | `RunnerBusy` | Follow the RunnerBusy procedure below, then relaunch |
-| `InfrastructureFailure` | Check `docker info` and the network, then relaunch |
+| `InfrastructureFailure: usage probe returned no rate-limit data` | **STOP**. The probe before the job sent no `five_hour` or `seven_day` utilization, so the runner started no job and spent no attempt; its pacing would have run blind |
+| Any other `InfrastructureFailure` | Check `docker info` and the network, then relaunch |
 | `usage headroom did not return` | Relaunch after the reset time shown in the log |
+| `usage probe failed (exit ...): ...; retrying in 600 s` (or `usage probe did not finish: ...; retrying in 600 s`), while the runner is still running | The runner retries the probe every 10 minutes, up to 48 times, and no job runs meanwhile. Read the message. If it mentions authentication (`401`, `OAuth token has expired` or `invalid x-api-key`), confirm that `pgrep -fl 'harbor run'` prints nothing, end the runner with `kill "$(cat "$RUNS/main.pid")"`, do the user's manual step and relaunch: the runner read the token once, at launch. Otherwise, after 3 such lines in a row, **STOP** |
 | A `ProbeError`, or a job invalid with `api_error`, mentioning authentication | Do the user's manual step, then relaunch |
-| `ImageChanged`, `NotFrozen` or `NotValidated` | **STOP**. At launch, `ImageChanged: <task>: validated image differs from the pre-registered one` means a validation rerun after the freeze replaced a pinned image. This check also covers a reserve once it comes into play |
+| `ImageChanged`, `NotFrozen` or `NotValidated` | **STOP**, whatever the message. See "Freeze refusals" below |
 | `CalledProcessError` from `docker image inspect` | **STOP**: the pinned image is gone, and rebuilding gives a new image ID, which is a deviation |
-| Nothing (the Mac rebooted, or the process vanished) | Relaunch. A job directory without a record is recorded as `interrupted` and retried |
+| Nothing (the Mac rebooted, or the process vanished) | Run the interrupted-job check below before relaunching. For a job it calls a `first attempt`, relaunch: the runner records the job as `interrupted` and retries it. For a job it calls a `retry`, **STOP**: the relaunch would record it as `interrupted` and drop the task, and a reserve would come in |
 | Anything else | **STOP** |
+
+**Freeze refusals.** Never move, delete or recreate the `evo-prereg` tag, never pass `--prereg`, and never edit `$RUNS/bundle`, a prompt file or an agent copy to make a check pass. Ask the user. The messages:
+- `ImageChanged: <task>: validated image differs from the pre-registered one` at launch: a validation rerun after the freeze replaced a pinned image. This check also covers a reserve once it comes into play.
+- `NotFrozen` from `prereg.verify_runs`, at launch: `.../bundle differs from commit f73975a in [...]`, `.../bundle is not the bundle prereg.json pins; ...`, `.../prompts/<task>__<arm>.md differs from the <arm>@<M> prompt file prereg.json pins`, `.../copies/agent/<task>: the agent copy prereg.json pins for <task> is missing`, `.../copies/agent/<task> differs from the agent copy prereg.json pins for <task>`, or `<task> is not pre-registered in prereg.json`. Something changed the run directory after the freeze.
+- `NotFrozen` from `prereg.require_frozen_record`: `<path> differs from docs/evaluations/evocode-horizon/prereg.json at evo-prereg`, or `cannot read <path>`. The prereg file is not the tagged one.
+- `NotFrozen` from `prereg.require_freeze`: `tag evo-prereg is missing`, `HEAD does not contain evo-prereg`, `frozen paths changed since evo-prereg: ...`, `uncommitted changes in frozen paths` or `docs/evaluations/evocode-horizon/report.md is committed: the main run is closed`. A frozen path changed, or the report is committed.
+
+Interrupted-job check: it lists each main job directory that has no record, and whether the relaunch would retry it or drop its task.
+
+```bash
+WT="/Users/deeps/Documents/NEW STUFF/fun /.superpowers/worktrees/evocode"; RUNS="$HOME/Documents/evocode-horizon-runs"; REV=9fcae3e5539d1c0e85e2481fe06bd6af42cc4bc6
+cd "$WT" && python3 - <<'EOF'
+import json
+from bench.evo import config
+records = [json.loads(p.read_text()) for p in (config.RUNS / "records").glob("main__*.json")]
+for job in sorted((config.RUNS / "jobs").glob("main__*")):
+    if not (config.RUNS / "records" / f"{job.name}.json").exists():
+        head, arm, _ = job.name.rsplit("__", 2)
+        task = head[len("main__"):]
+        retry = any((r["task"], r["arm"]) == (task, arm) and not r["valid"] for r in records)
+        print(job.name, "retry" if retry else "first attempt")
+EOF
+```
+
+Expected: nothing, or one line per unfinished job. Usually there is one: the job that was running.
 
 To see the drops and the reserves now in play:
 
@@ -10567,7 +10688,7 @@ Expected: the dropped main tasks in drop order, then the reserves in play. There
    docker ps -aq --filter label=com.docker.compose.project=<project> | xargs docker rm -f
    ```
 
-Relaunching is always safe: jobs that have a record are not run again.
+A relaunch never runs again a job that has a record. It can still drop a task: after an interrupted retry, as above.
 
 - [ ] **Step 15: Score the main run**
 
@@ -10582,8 +10703,10 @@ Expected:
 - The second line prints the dropped tasks and the planned rounds of both arms, counting every reserve in play.
 - With no drop, R equals that number. Otherwise R equals it minus the rounds of each dropped task's arms that have no valid record.
 
-Every valid job yields one row per round, and a round the chain never reached is a `not reached` row.
-If R differs otherwise, STOP. Rescoring is safe at any time: labels are kept while the final message is unchanged.
+Every valid job yields one row per round, and a round the chain never reached is a `not reached` row. Each row also carries `exception`, the round's Harbor exception type or `null`.
+If R differs otherwise, STOP. Rescoring is safe until Step 19 commits the report: labels are kept while the final message is unchanged.
+If `score` raises `ValueError: <job>: the record is valid but its trial result.json is missing; ...`, STOP: a job directory was moved or deleted, and scoring it as failed rounds would be wrong.
+If `score` raises `NotFrozen` with any message, STOP: a frozen path changed, or the report is committed. Never move, delete or recreate the `evo-prereg` tag, and never pass `--prereg`; ask the user. See "Freeze refusals" in Step 14.
 
 - [ ] **Step 16: Integrity check against the pre-registration**
 
@@ -10620,8 +10743,9 @@ for r in records:
         problems.append(f"{r['job_name']}: image {r.get('image_id')}")
     if r.get("freeze") != tag:
         problems.append(f"{r['job_name']}: freeze {r.get('freeze')}")
-    if not str(r.get("harbor_version") or "").startswith(config.HARBOR_VERSION) \
-            or not str(r.get("claude_code_version") or "").startswith(config.CLAUDE_CODE_VERSION):
+    # an interrupted record, or an infrastructure record without a trial, never ran a trial and has no versions
+    if r.get("trial_dir") and (not str(r.get("harbor_version") or "").startswith(config.HARBOR_VERSION)
+                               or not str(r.get("claude_code_version") or "").startswith(config.CLAUDE_CODE_VERSION)):
         problems.append(f"{r['job_name']}: versions {r.get('harbor_version')}, {r.get('claude_code_version')}")
 valid = {(r["task"], r["arm"]) for r in records if r.get("valid")}
 missing = [f"{t}__{a}" for t in tasks for a in config.ARMS if (t, a) not in valid]
@@ -10634,6 +10758,7 @@ Expected:
 - `"problems": []`.
 - With no drop: `"planned": N`, `"dropped": []`, `"valid_arms": 2N` and `"missing": []`.
 - After drops, `planned` also counts the reserves in play, and `missing` lists only arms of tasks in `dropped`.
+- The freeze commit is checked on every main record. The versions are checked only on records that ran a trial: an `interrupted` record, or an `infrastructure` record whose job left no trial, has `null` versions by design, and its relaunch is the rerun the pre-registration allows.
 
 If anything else appears, append each problem to `$RUNS/deviations.md` as a dated line and STOP.
 
@@ -10659,6 +10784,7 @@ tail -2 "$RUNS/logs/label.log"; kill -0 "$(cat "$RUNS/label.pid")" 2>/dev/null &
 ```
 
 On a judge error or an authentication error, fix it (the user's manual step for the token) and relaunch. Only unlabelled rows are sent again.
+If `label.log` ends with `NotFrozen`, whatever the message, STOP: it is not a judge error. A frozen path (the code, the spec, the judge rubric, `prereg.json` or `prereg.md`) changed after the tag, or the report is committed. Never move, delete or recreate the `evo-prereg` tag, and never pass `--prereg`; ask the user. See "Freeze refusals" in Step 14.
 
 - [ ] **Step 18: Render the report**
 
@@ -10667,7 +10793,13 @@ Expected: exit 0, and `docs/evaluations/evocode-horizon/report.md` is written. I
 - `primary`, with the keys `mean`, `ci95`, `p`, `wins`, `losses` and `ties`;
 - `statuses`, with one entry per planned task, including any reserve a drop brought in. Each entry is `valid` or `dropped`.
 
-If it exits 2 with `"error": "the main phase is not final: finish runs, scoring and labels first"`, the JSON lists `pending`, `not_scored`, `unlabeled` or `not_planned`. Finish Steps 14-17 for those items and rerun.
+The report states the analysed count, the pre-registered N and how many dropped tasks a reserve replaced. Its Deviations section is `$RUNS/deviations.md` with the run directory, the worktree and the home directory written as `$RUNS`, `$WT` and `~`.
+
+If it exits 2, nothing is written:
+- With `"error": "the main phase is not final: finish runs, scoring and labels first"`, the JSON lists `pending`, `not_scored`, `unlabeled` or `not_planned`. Finish Steps 14-17 for those items and rerun.
+- With `"error": "main records were made under another freeze commit than the one the report checks against: stop and ask the user"`, the JSON gives `freeze`, the commit `require_freeze` returned, and `records`, each such job with its commit. STOP: the tag moved after those runs, so the report would render them as if they had been frozen with today's code.
+
+If it raises `NotFrozen` with any message, STOP. Never move, delete or recreate the `evo-prereg` tag, and never pass `--prereg`; ask the user. See "Freeze refusals" in Step 14.
 
 - [ ] **Step 19: Commit the report**
 
@@ -10681,7 +10813,7 @@ cd "$WT" && if [ -f "$RUNS/deviations.md" ]; then cp "$RUNS/deviations.md" docs/
 Run the full suite before the commit:
 
 Run: `cd "$WT" && sh bench/tb4/test.sh -q`
-Expected: the last line is `1130 passed` followed by the run time, with no `skipped`, as at the freeze.
+Expected: the last line is `1234 passed` followed by the run time, with no `skipped`, as at the freeze.
 
 Commit. Each command runs only if the one before it succeeded:
 
@@ -10689,16 +10821,18 @@ Commit. Each command runs only if the one before it succeeded:
 WT="/Users/deeps/Documents/NEW STUFF/fun /.superpowers/worktrees/evocode"; RUNS="$HOME/Documents/evocode-horizon-runs"; REV=9fcae3e5539d1c0e85e2481fe06bd6af42cc4bc6
 cd "$WT" && git add docs/evaluations/evocode-horizon/report.md docs/evaluations/evocode-horizon/deviations.md \
   && python3 -I "$RUNS/bin/contamination-check.py" "$RUNS/dataset/$REV/tasks" docs/evaluations/evocode-horizon \
+  && ! grep -rn -e "$HOME" -e '/Users/' docs/evaluations/evocode-horizon/ \
   && python3 -m bench.tb4.leakcheck \
   && git commit -m "docs(evo): EvoCode-Bench first look report"
 ```
 
 Expected:
 - The contamination check prints `"hits"` of 0 for every file and exits 0.
+- The host-path `grep` prints nothing. `report.md` writes host paths as `$RUNS`, `$WT` and `~`, but `deviations.md` is copied as written, so a hand-written line that broke the STOP rule shows here.
 - `leakcheck` prints `no token in staged files`.
 - The commit succeeds.
 
-If the contamination check reports hits, nothing is committed. Run `git restore --staged docs/evaluations/evocode-horizon`, do not open the listed lines, and STOP.
+If the contamination check reports hits, or the host-path `grep` prints any line, nothing is committed. Run `git restore --staged docs/evaluations/evocode-horizon`, do not open the lines the contamination check lists, and STOP.
 
 Run: `cd "$WT" && git show --stat --format=%s HEAD | head -20`
 Expected: the subject `docs(evo): EvoCode-Bench first look report`, then exactly two files, `docs/evaluations/evocode-horizon/deviations.md` and `docs/evaluations/evocode-horizon/report.md`, and `2 files changed`.
