@@ -14,13 +14,15 @@ import tree_hash  # noqa: E402
 def _repo(tmp_path: Path, gitignore: str = "out/\nnode_modules/\n") -> Path:
     repo = tmp_path / "repo"
     repo.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    # a git hook exports GIT_DIR; without this the init, add and commit would act on the real repository
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True, env=env)
     (repo / ".gitignore").write_text(gitignore)
     (repo / "tracked.txt").write_text("hello")
-    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, env=env)
     subprocess.run(
         ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init"],
-        cwd=repo, check=True,
+        cwd=repo, check=True, env=env,
     )
     return repo
 
