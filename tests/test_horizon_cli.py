@@ -218,3 +218,14 @@ def test_status_prints_a_deadline_for_timed_goals(client):
     code, report = run("status", slug)
     assert code == 0
     assert report["deadline"] and 24.0 <= report["minutes_left"] <= 25.0
+
+def test_status_lists_short_rows_and_start_shows_other_goals(client):
+    _, _, run = client
+    first = start(run, "--gate", "true")
+    code, second = run("start", "Second request", "--gate", "true")
+    assert code == 0, second
+    assert [row["slug"] for row in second["other_goals"]] == [first]
+    code, listing = run("status")
+    assert code == 0
+    assert sorted(row["slug"] for row in listing["goals"]) == sorted([first, second["slug"]])
+    assert all("last_checkpoint" not in row for row in listing["goals"])

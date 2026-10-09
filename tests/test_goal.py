@@ -1127,3 +1127,18 @@ def test_minutes_left_stops_at_zero_and_is_null_without_a_clock():
     assert goal.summary(state)["minutes_left"] == 0
     untimed = goal.summary(_make(goal="Untimed work"))
     assert untimed["deadline"] is None and untimed["minutes_left"] is None
+
+def test_row_is_short_and_carries_what_a_new_session_needs():
+    state = _make(goal="G" * 500, gate_value="true", review_criterion="C" * 500)
+    state = goal.checkpoint(state["slug"], "did", "N" * 500, _digest(state), "pass", "out")
+    state = goal.abandon(state["slug"], "open lines R2, R3 " + "x" * 500)
+    row = goal.row(state)
+    assert set(row) == {"slug", "status", "goal", "gate", "review_criterion", "gate_path",
+                        "next_action", "abandoned_reason", "started", "completed_at",
+                        "turns_used", "last_gate", "last_review"}
+    assert len(row["goal"]) == 200 and row["goal"].endswith("…")
+    assert len(row["review_criterion"]) == 300 and len(row["next_action"]) == 300
+    assert row["abandoned_reason"].startswith("open lines R2, R3")
+    assert len(row["abandoned_reason"]) == 300
+    assert (row["status"], row["turns_used"], row["last_gate"], row["last_review"]) == (
+        "abandoned", 1, "pass", None)

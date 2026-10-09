@@ -791,6 +791,45 @@ def commit_revision(state: dict, *, expected_revision: int) -> dict:
     return _save(candidate)
 
 
+def _clip(text, limit: int):
+    if text is None:
+        return None
+    text = str(text)
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _next_action(state: dict) -> str:
+    block = state.get("execution")
+    if block:
+        return block["task"]["next_action"]
+    last = state["checkpoints"][-1] if state["checkpoints"] else None
+    return last.get("next", "") if last else ""
+
+
+def row(state: dict) -> dict:
+    """One goal in a listing: enough to decide whether to read it in full.
+
+    A full summary carries up to 4,000 characters of gate output and 16,000
+    of review evidence; listing every goal that way made `status` 2-5 KB per
+    goal on the pilot ledgers.
+    """
+    last = state["checkpoints"][-1] if state["checkpoints"] else None
+    reviews = state.get("reviews") or []
+    return {
+        "slug": state["slug"], "status": state["status"],
+        "goal": _clip(state["goal"], 200),
+        "gate": {"kind": state["gate"]["kind"], "value": _clip(state["gate"]["value"], 200)},
+        "review_criterion": _clip(state["gate"].get("review_criterion"), 300),
+        "gate_path": state.get("gate_path"),
+        "next_action": _clip(_next_action(state), 300),
+        "abandoned_reason": _clip(state.get("abandoned_reason"), 300),
+        "started": state["used"]["started"],
+        "completed_at": state.get("completed_at"),
+        "turns_used": state["used"]["turns"],
+        "last_gate": last["gate"] if last else None,
+        "last_review": reviews[-1]["result"] if reviews else None,
+    }
+
 def deadline(state: dict) -> datetime | None:
     """When the wall-clock budget ends: `used.started` plus `max_minutes`.
 
@@ -824,5 +863,5 @@ def summary(state: dict) -> dict:
         "turn_unit": "worker_attempt" if block else "checkpoint",
         "execution_revision": block["revision"] if block else None,
         "active_attempt": active,
-        "next_action": block["task"]["next_action"] if block else (last.get("next", "") if last else ""),
+        "next_action": _next_action(state),
     }

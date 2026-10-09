@@ -109,6 +109,11 @@ def parser() -> argparse.ArgumentParser:
 def status(state: dict) -> dict:
     return goal.summary(state)
 
+def goal_rows(exclude: str | None = None) -> list[dict]:
+    directory = paths.harness_root() / "goals"
+    return [goal.row(goal.load(p.stem)) for p in sorted(directory.glob("*.json"))
+            if p.stem != exclude]
+
 
 def entry_summary(entry: dict) -> dict:
     result = {key: entry.get(key) for key in
@@ -279,8 +284,7 @@ def dispatch(args) -> tuple[dict, int]:
     if args.action == "status":
         if args.slug:
             return status(goal.load(args.slug)), 0
-        directory = paths.harness_root() / "goals"
-        return {"goals": [status(goal.load(p.stem)) for p in sorted(directory.glob("*.json"))]}, 0
+        return {"goals": goal_rows()}, 0
     if args.action == "start":
         if args.coverage and args.review:
             raise ValueError("Use --coverage alone, or --gate together with --review")
@@ -291,7 +295,9 @@ def dispatch(args) -> tuple[dict, int]:
             watch_paths=args.watch, review_criterion=args.review,
             execution=args.execution, gate_path=args.gate_path,
         )
-        return status(state), 0
+        report = status(state)
+        report["other_goals"] = goal_rows(exclude=state["slug"])
+        return report, 0
     if args.action in {"step-begin", "step-attach", "step-finish", "step-recover"}:
         return _dispatch_step(args)
     if args.action == "check":
