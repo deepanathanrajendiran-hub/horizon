@@ -993,7 +993,7 @@ def _reviewable(**kw):
     return state, digest
 
 
-def test_review_must_echo_the_checkpoint_hash():
+def test_a_pass_must_echo_the_checkpoint_hash_but_a_fail_is_always_kept():
     state, digest = _reviewable()
     with pytest.raises(goal.EvidenceInsufficient, match="naming the reviewed checkpoint"):
         goal.record_review(state["slug"], "pass",
@@ -1001,9 +1001,13 @@ def test_review_must_echo_the_checkpoint_hash():
                            "judge-1", digest)
     other = "f" * 12 if not digest.startswith("f" * 12) else "e" * 12
     with pytest.raises(goal.EvidenceInsufficient, match="naming the reviewed checkpoint"):
-        goal.record_review(state["slug"], "fail",
-                           f"Reviewed checkpoint: {other}\nR1: FAIL - another snapshot",
+        goal.record_review(state["slug"], "pass",
+                           f"Reviewed checkpoint: {other}\nR1: PASS - another snapshot",
                            "judge-1", digest)
+    failed = goal.record_review(state["slug"], "fail",
+                                "R1: FAIL - the reviewer forgot the echo, but this verdict counts.",
+                                "judge-1", digest)
+    assert failed["reviews"][-1]["result"] == "fail"
     reviewed = goal.record_review(state["slug"], "pass",
                                   f"Reviewed checkpoint: {digest[:12]}\nR1: PASS - ran it",
                                   "judge-1", digest)
@@ -1146,3 +1150,23 @@ def test_row_is_short_and_carries_what_a_new_session_needs():
     assert len(row["abandoned_reason"]) == 300
     assert (row["status"], row["turns_used"], row["last_gate"], row["last_review"]) == (
         "abandoned", 1, "pass", None)
+
+def test_a_split_verdict_line_cannot_complete_a_gate_path_goal():
+    _gates()
+    state, digest = _reviewable(gate_path=".claude/harness/gates/parser")
+    reply = (f"Reviewed checkpoint: {digest[:12]}\nR1: PASS - ran it\n"
+             "R2: PASS for valid files, FAIL for the empty file (exit 0, expected 3)\n"
+             "R3: NOT REVIEWED - no reference")
+    with pytest.raises(goal.EvidenceInsufficient, match="R2: FAIL"):
+        goal.record_review(state["slug"], "pass", reply, "judge-1", digest)
+
+
+def test_pass_is_refused_when_requirements_lose_their_lines():
+    gates = _gates()
+    state = _make(gate_value="true", review_criterion="Every line holds.", gate_path=str(gates))
+    (gates / "requirements.md").write_text("A table now:\n| id | text |\n")
+    digest = _digest(state)
+    goal.checkpoint(state["slug"], "did", "review", digest, "pass", "")
+    with pytest.raises(goal.EvidenceInsufficient, match="no requirement lines"):
+        goal.record_review(state["slug"], "pass",
+                           f"Reviewed checkpoint: {digest[:12]}\nLooks right.", "judge-1", digest)

@@ -98,7 +98,7 @@ from the old implementation must rerun verification before completing.
   or UNVERIFIED line, a FAIL headline, a missing requirement line, or no echo
   of the reviewed checkpoint.
 - `check` returns a neutral reviewer brief filled from the goal's files. `status`
-  lists goals as short rows and prints each goal's deadline.
+  lists goals as short rows, and `status SLUG` prints the goal's deadline.
 
 ## Practical boundaries
 

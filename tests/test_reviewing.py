@@ -52,7 +52,7 @@ def test_fail_headlines_are_found(line):
     "**Verdict: PASS, with caveats.**",
     "| Req | Verdict | Fail reason |",
     "Fail-safe paths were exercised.",
-    "> **Verdict: FAIL, narrowly.**",
+    "Reviewed checkpoint: abc\n> **Verdict: FAIL, narrowly.**",
     "No FAIL lines remain.",
 ])
 def test_other_lines_are_not_fail_headlines(line):
@@ -119,10 +119,128 @@ def test_long_request_is_cut_with_a_pointer(tmp_path):
     (gates / "requirements.md").write_text("R1 [gate] x\n")
     state = {"slug": "s", "gate_path": str(gates), "reviews": []}
     text = reviewing.brief_for(state, "b" * 64, "/tmp/r.md", "/p/.claude/harness")
-    assert f"[truncated; read the full text in {gates / 'request.md'}]" in text
+    assert f"[truncated; the full text is in {gates / 'request.md'}, which you may read]" in text
+    assert "q" * reviewing.BRIEF_FILE_LIMIT in text and "q" * (reviewing.BRIEF_FILE_LIMIT + 1) not in text
 
 
 def test_unreadable_gate_files_become_placeholders(tmp_path):
     state = {"slug": "s", "gate_path": str(tmp_path / "gone"), "reviews": []}
     text = reviewing.brief_for(state, "b" * 64, "/tmp/r.md", "/p/.claude/harness")
     assert "<<REQUEST: could not read" in text and "<<REQUIREMENTS: could not read" in text
+
+# Final-review findings: the shapes reviewers actually write.
+
+@pytest.mark.parametrize("line, expected", [
+    ("R1 [gate] -> PASS", {"R1": "PASS"}),
+    ("R1 → PASS", {"R1": "PASS"}),
+    ("R1 = PASS", {"R1": "PASS"}),
+    ("R1: ✅ PASS", {"R1": "PASS"}),
+    ("R2: ❌ FAIL", {"R2": "FAIL"}),
+    ("### R1: PASS", {"R1": "PASS"}),
+    ("### R2 — FAIL", {"R2": "FAIL"}),
+    ("- [x] R1: PASS", {"R1": "PASS"}),
+    ("• R1: FAIL", {"R1": "FAIL"}),
+    ("R1: FAIL", {"R1": "FAIL"}),
+    ('R1 [gate] "ready.txt says ready": PASS', {"R1": "PASS"}),
+    ("**R1 [gate]**: PASS", {"R1": "PASS"}),
+    ("R2 [unverifiable] [judgment]: NOT REVIEWED", {"R2": "NOT REVIEWED"}),
+    ("R4 (from fix-fahrenheit-conversion-in-temps-py-and-accept-kelvin R3) [gate]: PASS",
+     {"R4": "PASS"}),
+    ("| R1 | ready.txt says ready | PASS | cat ready.txt |", {"R1": "PASS"}),
+    ("| 1 | R1 | PASS |", {"R1": "PASS"}),
+    ("| R1 | [gate] | pass |", {"R1": "PASS"}),
+    ("| R2 | keep exit 3 | FAIL | empty file exits 0 |", {"R2": "FAIL"}),
+    ("R1-R3: PASS", {"R1": "PASS", "R2": "PASS", "R3": "PASS"}),
+    ("R1, R2: PASS", {"R1": "PASS", "R2": "PASS"}),
+    ("R1: FAILING", {"R1": "FAIL"}),
+    ("R1: Failure - x", {"R1": "FAIL"}),
+    ("R2: Fixed, now PASS", {"R2": "PASS"}),
+    ("R1a: FAIL - b.txt says broken", {"R1a": "FAIL"}),
+    ("R1.2: PASS", {"R1.2": "PASS"}),
+])
+def test_verdicts_read_the_shapes_reviewers_write(line, expected):
+    assert reviewing.verdicts(line) == (expected, [])
+
+
+@pytest.mark.parametrize("line, expected", [
+    ("R1: PASS for valid files, FAIL for the empty file (exit 0, expected 3)", "FAIL"),
+    ("R1: passes exit 3 through only for valid files - FAIL: empty file exits 0", "FAIL"),
+    ("R1: pass/fail could not be determined - UNVERIFIED", "UNVERIFIED"),
+    ("R1: Passed? No: the symptom still reproduces. FAIL", "FAIL"),
+    ("R1: PASS - the parser no longer fails on empty input", "PASS"),
+    ('R1 [gate] "the CLI fails with exit 3 on bad input": PASS - exit 3', "PASS"),
+    ("R1: PASS - ran `grep FAIL out.log`, no matches", "PASS"),
+    ("R1: PASS - 12 PASSED, 0 FAILED", "PASS"),
+    ("R1: PASS - was FAIL in the first review", "PASS"),
+])
+def test_the_worst_verdict_on_a_line_wins(line, expected):
+    assert reviewing.verdicts(line)[0] == {"R1": expected}
+
+
+@pytest.mark.parametrize("line", [
+    "**Overall: FAIL** - the second example still crashes",
+    "Result: FAIL (second example crashes)",
+    "Status: FAIL",
+    "Conclusion: fail",
+    "Fail.",
+    "**Fail**",
+    "| **Overall** | **FAIL** |",
+    "Overall verdict: R2 FAIL",
+])
+def test_overall_fail_shapes_are_headlines(line):
+    assert reviewing.verdicts(f"Reviewed checkpoint: abc\n{line}")[1] == [line]
+
+
+@pytest.mark.parametrize("reply", [
+    "R1: PASS - before the fix\n```\nFAILED tests/test_ready.py::test_ready - AssertionError\n"
+    "--- FAIL: TestReady (0.00s)\nFAIL: test_ready (tests.test_ready)\n```\nnow 3 passed",
+    "Verdict: failure modes from the earlier review no longer reproduce.",
+    "FAIL lines from the previous review are now resolved.",
+    "- FAIL messages now include the path",
+    "FAIL count: 0",
+    "--- FAIL: TestReady (0.00s)",
+    "Verdict: PASS (0 FAIL)",
+])
+def test_test_output_and_prose_are_not_headlines(reply):
+    assert reviewing.verdicts(reply)[1] == []
+
+
+def test_a_reply_quoted_in_full_is_still_read():
+    reply = "> Reviewed checkpoint: abc\n> R1: PASS\n> R2: FAIL - empty file exits 0"
+    assert reviewing.verdicts(reply) == ({"R1": "PASS", "R2": "FAIL"}, [])
+
+
+def test_requirement_lines_keep_sub_ids_apart():
+    text = ('R1 [gate] "a"\nR1a [review] "b"\nR1.2 [review] "c"\n'
+            '## R2 [gate] "d"\n- [ ] R3 [review] "e"\n')
+    assert reviewing.requirement_lines(text) == {
+        "R1": {"gate"}, "R1a": {"review"}, "R1.2": {"review"}, "R2": {"gate"}, "R3": {"review"}}
+
+
+def test_a_fail_on_a_sub_id_blocks_the_pass():
+    required = reviewing.requirement_lines('R1 [gate] "a"\nR1a [review] "b"\nR1b [review] "c"\n')
+    assert reviewing.pass_refusals("R1: PASS\nR1a: PASS\nR1b: FAIL - b.txt says broken",
+                                   required) == ["R1b: FAIL"]
+
+
+def test_a_missing_verdict_quotes_the_line_that_mentions_it():
+    refusals = reviewing.pass_refusals("R1: PASS\nR2 looks fine to me", {"R1": set(), "R2": set()})
+    assert refusals == ['R2: no verdict (unread line: "R2 looks fine to me")']
+
+
+def test_brief_keeps_reviewer_files_out_of_the_project():
+    text = reviewing.brief(digest="a" * 64, request="r", requirements="R1 x", harness_dir="h",
+                           review_file="/tmp/r.md", previous=[])
+    assert "Do not create, change or delete files inside the project" in " ".join(text.split())
+
+
+def test_review_file_leaves_watched_paths_and_survives_a_missing_tempdir(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    monkeypatch.setattr(reviewing.tempfile, "gettempdir", lambda: str(project / "tmp"))
+    chosen = reviewing.review_file("s", "a" * 64, 1, watch_paths=[str(project)])
+    assert not chosen.startswith(str(project))
+
+    def broken():
+        raise FileNotFoundError("no usable temporary directory")
+    monkeypatch.setattr(reviewing.tempfile, "gettempdir", broken)
+    assert reviewing.review_file("s", "a" * 64, 1, watch_paths=[str(project)])

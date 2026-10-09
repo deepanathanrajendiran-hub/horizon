@@ -313,11 +313,17 @@ def _requirements(state: dict) -> dict | None:
         return None
     target = Path(gate_path) / "requirements.md"
     try:
-        return reviewing.requirement_lines(target.read_text())
+        lines = reviewing.requirement_lines(target.read_text())
     except (OSError, UnicodeError) as exc:
         raise EvidenceInsufficient(
             f"{target} is unreadable ({exc}); restore it, run check, and review again"
         ) from exc
+    if not lines:
+        # Otherwise rewriting the file as a table would switch the check off.
+        raise EvidenceInsufficient(
+            f"{target} has no requirement lines (R1, R2, ...); restore them, run check, "
+            f"and review again")
+    return lines
 
 
 def _initial_state(goal, cwd, gate_kind, gate_value, max_turns,
@@ -577,18 +583,23 @@ def _apply_review(state: dict, observed_hash: str, *, result: str,
     if observed_hash != digest:
         raise GateNotPassed("Artifacts changed after verification; run the gate again.")
     evidence = evidence.strip()
-    if not reviewing.echoes(evidence, digest):
-        raise EvidenceInsufficient(
-            "The evidence must be the reviewer's reply naming the reviewed checkpoint "
-            f"(the first {reviewing.HASH_ECHO} hash characters, {digest[:reviewing.HASH_ECHO]})."
-        )
+    # A fail is kept whatever its shape: an unrecorded FAIL is the pilot's
+    # failure, and a fail on the wrong snapshot still only blocks completion.
     if result == "pass":
+        if not reviewing.echoes(evidence, digest):
+            raise EvidenceInsufficient(
+                "The evidence must be the reviewer's reply naming the reviewed checkpoint "
+                f"(the first {reviewing.HASH_ECHO} hash characters, "
+                f"{digest[:reviewing.HASH_ECHO]}). Record --result fail, or review again."
+            )
         refusals = reviewing.pass_refusals(evidence, _requirements(state))
         if refusals:
             raise EvidenceInsufficient(
                 "This reply does not support a pass: " + "; ".join(refusals)
                 + ". A pass needs every requirement line PASS (NOT REVIEWED only on lines "
-                "tagged [unverifiable]) and no FAIL headline. Record --result fail, "
+                "tagged [unverifiable]) and no FAIL headline; each requirement needs its own "
+                "line that starts with its id and gives a verdict, such as "
+                "`R1: PASS - command and output`. Record --result fail, "
                 "or fix and review again."
             )
     state.setdefault("reviews", []).append({

@@ -34,22 +34,24 @@ when operating from an otherwise unmarked nested directory.
 `status` without a slug returns `{"goals": [...]}` with one short row per goal:
 slug, status, goal, gate, review criterion, gate path, next action, abandon
 reason, start and completion times, turns used, and the last gate and review
-results. Long text is clipped and ends in `…`. `start` returns the same rows for
+results. Long text is clipped and ends in `…`. A goal file that cannot be read
+appears as `{"slug": ..., "error": ...}` instead of stopping the listing. `start` returns the same rows for
 the project's other goals as `other_goals`.
 
 ## Requirements and review
 
 `start --gate-path DIR` records the goal's gate directory. DIR must already hold a
 non-blank `request.md` (the request, verbatim) and a `requirements.md` with at
-least one requirement line. A requirement line starts with `R1`, `R2`, ... after
-any list marker or emphasis; the tags `[gate]`, `[review]`, `[unverifiable]` and
+least one requirement line. A requirement line starts with an id (`R1`, `R2`, or
+a sub-id such as `R1a` or `R1.2`) after any heading, list, checkbox or numbering
+marker and emphasis; the tags `[gate]`, `[review]`, `[unverifiable]` and
 `[judgment]` on that line belong to it. `start` adds DIR to the watch set when no
 watched path covers it. Keep gate scripts, fixtures and requirement files in the
 gate directory inside the watched tree; keep gate logs, generated output and
 review evidence outside the watched tree.
 
-When a review is due, `check` returns `review_file`, a path outside the project
-that is new for each review round, and `review_brief`. The brief is the template
+When a review is due, `check` returns `review_file`, a path in the temporary
+directory, outside every watched path, that is new for each review round, and `review_brief`. The brief is the template
 below, filled in with:
 - the checkpoint hash;
 - the gate directory's request and requirements (each cut at 32,000 characters,
@@ -69,11 +71,14 @@ Requirements:
 Artifacts: <<ARTIFACTS>>
 How to run: <<HOW_TO_RUN>>
 
-Build your own checks from the request. Do not read or run anything under
-{harness_dir}, an earlier reviewer's files, or the author's helpers. Call the
-code the way its existing callers and tests do, including the repeated, boundary
-and multi-step cases the request implies. Where the request is ambiguous, choose
-your own reading and say where the artifact's reading differs.
+Build your own checks from the request. Do not create, change or delete files
+inside the project: put any scripts and outputs in a new directory next to
+{review_file}, and leave the project's git state as you found it. Do not read
+or run anything under {harness_dir}, an earlier reviewer's files, or the
+author's helpers. Call the code the way its existing callers and tests do,
+including the repeated, boundary and multi-step cases the request implies.
+Where the request is ambiguous, choose your own reading and say where the
+artifact's reading differs.
 
 Reply with exactly one line per requirement:
 `Rk: PASS|FAIL|UNVERIFIED - command and observed output`. A requirement you could
@@ -88,21 +93,36 @@ write your complete reply to {review_file}.
 
 The agent replaces only `<<ARTIFACTS>>` and `<<HOW_TO_RUN>>`. A goal without
 `--gate-path` also keeps `<<REQUEST>>` and `<<REQUIREMENTS>>` for the agent to
-fill. After a failed review, the brief ends with `Previous:` and that review's
-FAIL and UNVERIFIED lines and FAIL headlines, each prefixed with `> `.
+fill. When the latest review was recorded as a fail, the brief ends with
+`Previous:` and that review's FAIL and UNVERIFIED lines and FAIL headlines, each
+prefixed with `> `. Do not dispatch a reviewer for a baseline check or for a last
+check before stopping; a coverage goal reports `review_required` on every check.
 
 `review` stores the reviewer's reply whole up to 16,000 characters. Beyond that it
-keeps the reply's head and tail. Every review, pass or fail, must contain the
-first 12 characters of `--hash`.
+keeps the reply's head and tail. A pass must contain the first 12 characters of
+`--hash`; a fail is recorded without that echo, so no reviewer's FAIL is lost.
+
+A verdict line starts with a requirement id after any heading, list, checkbox or
+numbering marker, or is a table row with the id in one of its cells. Ids may be
+listed (`R1, R2`) or given as a range (`R1-R3`). The line's worst verdict counts:
+its first verdict word, plus any all-capitals PASS, FAIL, UNVERIFIED or NOT
+REVIEWED (or a check mark or cross) later on the line. Quoted text and code spans
+are ignored, and so are counts and history such as `0 FAILED` or `was FAIL`.
+FAIL ranks above UNVERIFIED, which ranks above NOT REVIEWED and PASS. A FAIL
+headline is a line that starts with Verdict, Overall, Result, Status, Conclusion
+or Outcome and says FAIL, or a line that is only `FAIL` or `Fail` plus
+punctuation. Lines inside code fences are never headlines.
 
 A pass is refused when any of these holds:
 - the last verdict for any requirement is FAIL or UNVERIFIED;
 - a line reads as a FAIL headline (`Verdict: FAIL`, or an all-caps `FAIL` as the
   line's first word);
-- the goal has a gate directory, and either a requirement line has no verdict or
-  a line answers NOT REVIEWED without the `[unverifiable]` tag.
+- the goal has a gate directory, and its requirements.md has no requirement
+  lines, a requirement line has no verdict, or a line answers NOT REVIEWED
+  without the `[unverifiable]` tag.
 
-Quoted lines starting with `>` are ignored. A fail is always recorded.
+Lines quoted with `>` are ignored unless the whole reply is quoted. A fail needs
+only the 40-character floor and the current checkpoint.
 
 ## State-mode worker protocol
 
@@ -346,8 +366,8 @@ and command errors retain a failed checkpoint. Exit 0 means pass, 1 means
 failed/skipped/awaiting review, and 2 means an error; inspect JSON before deciding.
 
 Command-plus-review and coverage goals require a review for the same checkpoint
-and criterion. Evidence must contain at least 40 characters and the checkpoint's
-hash prefix. Those checks are basic guards; the verdict rules are under
+and criterion. Evidence must contain at least 40 characters, and a pass must
+also contain the checkpoint's hash prefix. Those checks are basic guards; the verdict rules are under
 [Requirements and review](#requirements-and-review). The calling agent must dispatch a real independent
 reviewer. A caller-supplied handle or editable local ledger cannot prove identity
 or prevent intentional falsification. `complete` preserves checkpoint evidence

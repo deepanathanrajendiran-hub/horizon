@@ -32,13 +32,13 @@ the current request changes them.
 
 Resume a goal only for the same request; never continue an earlier goal under a
 different one. Read its last checkpoint and raw artifacts before resuming. When
-the current request replaces or extends an earlier goal's work, or a goal you
-would resume is exhausted and the request states a budget, start a new goal
+the current request replaces or extends an earlier goal's work, start a new goal
 first: copy every still-applicable earlier line into the new requirements.md as
-`Rk (from OLD_SLUG Rj)`, copy the checks behind them into the new `$GATES`, and
-never edit an earlier goal's gate files. Then, if the old goal is still active,
-`abandon` it with reason `continued in NEW_SLUG`. Without a stated budget, stop
-and report instead. Leave unrelated goals alone.
+`Rk (from OLD_SLUG Rj)`, copy the checks behind them into the new goal's `$GATES`
+(see Before `start`), and never edit an earlier goal's gate files. Then, if the
+old goal is still active, `abandon` it with reason `continued in NEW_SLUG`. Do
+the same when a goal you would resume is exhausted and the request states a
+budget; if it states none, stop and report instead. Leave unrelated goals alone.
 
 Where the current request contradicts or corrects an earlier requirement, it
 governs that point only: retire only the checks it supersedes, keep the rest,
@@ -50,7 +50,9 @@ Create a goal when the user requests bounded continuation or invokes `/horizon`.
 ## Before `start`
 
 Do these steps before changing any deliverable; scratch experiments elsewhere are
-fine. Let `GATES` be the `gates` path `doctor` printed, plus `/NAME`, where NAME
+fine. Note the time when you first read the request: a time limit the user states
+counts from their message, so give the goal the minutes that remain when you
+create it. Let `GATES` be the `gates` path `doctor` printed, plus `/NAME`, where NAME
 is a short label for this request that no directory there already uses.
 
 1. Save the request verbatim to `$GATES/request.md`. Read the inputs it names, the
@@ -77,12 +79,8 @@ is a short label for this request that no directory there already uses.
    naming one wrong artifact it would accept, or `none`; if there is one, add a
    check that does not depend on how the artifact is produced, or retag that line
    `[review]` or `[unverifiable]`.
-4. Start the goal, as below, before editing any deliverable; a gate written after
-   the answer tends to check the answer's form.
-5. Before your first edit, run `check` with `--did "baseline before any change"`.
-   Checks of new lines must fail here where the request says behaviour is broken
-   or missing. Carried checks must pass; report a carried check that fails here
-   as a pre-existing regression.
+4. Start the goal before editing any deliverable; a gate written after the answer
+   tends to check the answer's form:
 
 ```bash
 python3 "$HARNESS" --runtime claude --project "$PROJECT" start "Requested outcome" \
@@ -90,6 +88,13 @@ python3 "$HARNESS" --runtime claude --project "$PROJECT" start "Requested outcom
   --review "Every line of $GATES/requirements.md holds, judged against $GATES/request.md" \
   --max-turns 20 --max-minutes 60
 ```
+
+5. Before your first edit, run `check` (see Conversation-mode increments) on the
+   returned slug with `--did "baseline before any change"` and a `--next` naming
+   your first change. Checks of new lines must fail here where the request says
+   behaviour is broken or missing. Carried checks must pass; report a carried
+   check that fails here as a pre-existing regression. The baseline needs no
+   review: if it prints `review_required`, do not dispatch a reviewer.
 
 Use `--coverage` with the same criterion instead of `--gate` when no command can
 check any line. Omit `--review` only when every line is tagged `[gate]`. `start`
@@ -141,9 +146,7 @@ the worker. State mode itself creates no native goal, task, schedule, or API cli
 ## Conversation-mode increments
 
 1. Read `status SLUG` before work. Continue only when status is active and
-   `budget_exhausted` is false. Inspect the recorded next action. A time limit the
-   user states counts from their message; note the time when you first read it,
-   and give the goal the minutes that remain when you create it. Start an
+   `budget_exhausted` is false. Inspect the recorded next action. Start an
    increment or a review only if it, `check`, the review and the final report can
    all finish before the `deadline` that `status` prints. Near the deadline, leave
    the work buildable, run `check`, and give the final report.
@@ -172,9 +175,13 @@ When `review_required` is true, `check` also prints `review_brief` and
 foreground (`run_in_background: false`), and wait for its result in the same
 turn. Send it the `review_brief` unchanged, except that you replace
 `<<ARTIFACTS>>` with the artifact paths and `<<HOW_TO_RUN>>` with the commands a
-user would run. Add nothing else: no diagnosis, design choices, expected values,
-explanations of earlier findings, or questions that point to an answer. If no
-reviewer is available, report the unmet requirement.
+user would run (a goal started without `--gate-path` also needs `<<REQUEST>>` and
+`<<REQUIREMENTS>>` filled in). Add nothing else: no diagnosis, design choices,
+expected values, explanations of earlier findings, or questions that point to an
+answer. If no reviewer is available, report the unmet requirement. Never
+dispatch a reviewer for the baseline check or for a last `check` you run before
+stopping, whatever `review_required` says; a coverage goal sets it on every
+check.
 
 The reviewer writes its reply to `review_file`. Pass that file, unedited, as
 `--evidence-file`. Record every verdict, FAIL included, with

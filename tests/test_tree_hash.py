@@ -210,3 +210,16 @@ def test_goal_bookkeeping_does_not_change_hash(make_state_goal):
     source = Path(state["cwd"]) / "real-source.txt"
     source.write_text("meaningful work")
     assert tree_hash.compute(state["cwd"], state["watch_paths"]) != before
+
+def test_untracked_caches_do_not_change_the_hash(tmp_path):
+    """Running a gate or a reviewer's checks writes __pycache__ and similar
+    caches. The walk already skips them, but `git status` listed them, so the
+    first gate run made its own checkpoint stale and every review was refused."""
+    repo = _repo(tmp_path)
+    before = tree_hash.compute(repo)
+    for cache in ("__pycache__", "pkg/__pycache__", ".pytest_cache", ".mypy_cache"):
+        (repo / cache).mkdir(parents=True)
+        (repo / cache / "entry.pyc").write_bytes(b"cache")
+    assert tree_hash.compute(repo) == before
+    (repo / "pkg" / "module.py").write_text("VALUE = 1")
+    assert tree_hash.compute(repo) != before

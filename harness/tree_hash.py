@@ -96,6 +96,9 @@ def compute(cwd, watch_paths: list[str] | None = None) -> str:
     exclusions = [f':(glob,exclude)**/{runtime}/harness/{part}'
                   for runtime in ('.claude', '.codex')
                   for part in ('goals/**', 'undo/**', 'CHANGELOG.md')]
+    # The walk skips cache directories; git must too, or the caches a gate or
+    # a reviewer's own checks write make the checkpoint stale.
+    exclusions += [f':(glob,exclude)**/{name}/**' for name in sorted(EXCLUDED_DIRS - {'.git'})]
     status = _git(cwd, 'status', '--porcelain=v1', '--untracked-files=all', '--', *exclusions)
     h.update(b'STATUS\x00' + (status or 'NONE').encode() + b'\x00')
     for wp in sorted(str(p) for p in (watch_paths or [cwd])):

@@ -113,8 +113,17 @@ def status(state: dict) -> dict:
 
 def goal_rows(exclude: str | None = None) -> list[dict]:
     directory = paths.harness_root() / "goals"
-    return [goal.row(goal.load(p.stem)) for p in sorted(directory.glob("*.json"))
-            if p.stem != exclude]
+    rows = []
+    for path in sorted(directory.glob("*.json")):
+        if path.stem == exclude:
+            continue
+        # `start` lists siblings after saving the new goal; one broken file
+        # must not hide the new slug and invite a duplicate retry.
+        try:
+            rows.append(goal.row(goal.load(path.stem)))
+        except (goal.GoalStateError, KeyError, TypeError, ValueError) as exc:
+            rows.append({"slug": path.stem, "error": f"unreadable goal: {exc}"})
+    return rows
 
 
 def entry_summary(entry: dict) -> dict:
@@ -209,7 +218,8 @@ def check(args) -> tuple[dict, int]:
     )
     if report["review_required"]:
         report["review_file"] = reviewing.review_file(
-            state["slug"], digest, len(state.get("reviews") or []) + 1)
+            state["slug"], digest, len(state.get("reviews") or []) + 1,
+            watch_paths=state.get("watch_paths") or [state["cwd"]])
         report["review_brief"] = reviewing.brief_for(
             state, digest, report["review_file"], str(paths.harness_root()))
     if error:

@@ -274,3 +274,16 @@ def test_brief_after_a_failed_review_quotes_its_open_lines(client):
     assert report["review_brief"].endswith("Previous:\n> R1: FAIL - ready.txt is missing\n")
     assert report["review_file"].endswith("-2.md")
     assert "<<REQUEST>>" in report["review_brief"]
+
+def test_start_survives_an_unreadable_sibling_goal(client):
+    project, runtime, run = client
+    first = start(run, "--gate", "true")
+    harness = project / (".codex" if runtime == "codex" else ".claude") / "harness"
+    (harness / "goals" / "broken.json").write_text("{not json")
+    code, second = run("start", "Second request", "--gate", "true")
+    assert code == 0, second
+    rows = {row["slug"]: row for row in second["other_goals"]}
+    assert set(rows) == {first, "broken"}
+    assert "unreadable" in rows["broken"]["error"]
+    code, listing = run("status")
+    assert code == 0 and len(listing["goals"]) == 3

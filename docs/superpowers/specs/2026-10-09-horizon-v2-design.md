@@ -205,3 +205,48 @@ C9, C10 and N1 with these adjustments:
   25 minutes.
 - Every change was designed from the same 10 TB4 trials, and some of the design
   drew on EvoCode material. P8 handles the contamination.
+
+## Revisions after the final review (2026-10-09)
+
+A four-lens review with adversarial verification (8 agents) found that the verdict
+grammar above was too narrow in both directions. One line could hold a FAIL after
+an earlier PASS, which was read as a pass. Common correct reply shapes were refused
+as "no verdict". The harness contract now differs from the sections above in these
+ways:
+
+- **Verdict lines.**
+  - A line's worst verdict counts: its first verdict word, plus any all-capitals
+    verdict or cross mark later on the line.
+  - Quoted text, code spans, and counts or history (`0 FAILED`, `was FAIL`) are
+    ignored.
+  - Accepted forms:
+    - arrows and `=`;
+    - any number of tag groups;
+    - headings, checkboxes and bullets;
+    - table rows with the id in any cell;
+    - id lists and ranges (`R1, R2`, `R1-R3`);
+    - FAILING and FAILURE;
+    - sub-ids such as `R1a` and `R1.2`, which are distinct requirements on both
+      sides.
+- **FAIL headlines.**
+  - A line counts when it starts with Verdict, Overall, Result, Status,
+    Conclusion or Outcome and says FAIL, or when it is only `FAIL` or `Fail` plus
+    punctuation.
+  - Lines inside code fences, such as test-runner output, never count.
+  - A reply that is quoted in full is still read.
+- **The hash echo is required for a pass only.** A fail is always kept, because
+  losing a reviewer's FAIL is the failure v2 exists to prevent.
+- **An empty requirements file refuses a pass.** Once a goal has a gate
+  directory, a pass is refused when its `requirements.md` has no requirement
+  lines.
+- **Unreadable sibling goals.** The listing shows them as `{slug, error}` rows,
+  so `start` still returns its new slug.
+- **`review_file`** avoids every watched path and never raises.
+- **The brief** tells the reviewer to keep its own files outside the project.
+- **Caches.** The tree hash ignores cache directories in `git status` as well as
+  in the walk, so caches written by a gate or a reviewer no longer make a
+  checkpoint stale.
+- **Skill prose:**
+  - the baseline check and a last check before stopping never get a reviewer;
+  - the C13 timing sentence moves before `start`;
+  - the start example now sits before the baseline step.
