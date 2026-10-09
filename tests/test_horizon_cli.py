@@ -193,6 +193,7 @@ def test_nested_projects_keep_runtime_and_global_routes(client):
         assert Path(global_doctor["targets"]["rho"]).parent.name == ".codex"
         assert Path(global_doctor["targets"]["G"]).parent.name == ".agents"
 
+
 def _gate_dir(run, project, runtime, name="ready"):
     _, doctor = run("doctor")
     gates = Path(doctor["gates"]) / name
@@ -212,12 +213,14 @@ def test_start_takes_a_gate_path_from_doctor(client):
     code, error = run("start", "Missing gates", "--gate", "true", "--gate-path", "nowhere")
     assert code == 2 and error["error"] == "GateRequired"
 
+
 def test_status_prints_a_deadline_for_timed_goals(client):
     _, _, run = client
     slug = start(run, "--gate", "true", "--max-minutes", "25")
     code, report = run("status", slug)
     assert code == 0
     assert report["deadline"] and 24.0 <= report["minutes_left"] <= 25.0
+
 
 def test_status_lists_short_rows_and_start_shows_other_goals(client):
     _, _, run = client
@@ -229,3 +232,45 @@ def test_status_lists_short_rows_and_start_shows_other_goals(client):
     assert code == 0
     assert sorted(row["slug"] for row in listing["goals"]) == sorted([first, second["slug"]])
     assert all("last_checkpoint" not in row for row in listing["goals"])
+
+
+def test_check_returns_a_filled_review_brief(client):
+    project, runtime, run = client
+    gates = _gate_dir(run, project, runtime)
+    (project / "ready.txt").write_text("ready")
+    slug = start(run, "--gate", "true", "--gate-path", str(gates),
+                 "--review", "Every line of requirements.md holds")
+    code, report = check(run, slug)
+    assert code == 0, report
+    digest = report["last_checkpoint"]["tree_hash"]
+    brief = report["review_brief"]
+    assert brief.startswith(f"Review checkpoint {digest}.")
+    assert "Make ready.txt say ready." in brief and 'R1 [gate] "ready.txt says ready"' in brief
+    assert report["review_file"] in brief
+    assert Path(report["review_file"]).name == f"horizon-review-{slug}-{digest[:12]}-1.md"
+    assert not Path(report["review_file"]).resolve().is_relative_to(project.resolve())
+    assert (".codex/harness" if runtime == "codex" else ".claude/harness") in brief
+
+
+def test_check_has_no_brief_when_no_review_is_due(client):
+    _, _, run = client
+    slug = start(run, "--gate", "false")
+    code, report = check(run, slug)
+    assert code == 1 and "review_brief" not in report and "review_file" not in report
+
+
+def test_brief_after_a_failed_review_quotes_its_open_lines(client):
+    project, _, run = client
+    slug = start(run, "--gate", "true", "--review", "Every line holds")
+    _, report = check(run, slug)
+    digest = report["last_checkpoint"]["tree_hash"]
+    reply = project.parent / "reply.md"
+    reply.write_text(f"Reviewed checkpoint: {digest[:12]}\nR1: FAIL - ready.txt is missing\n")
+    code, _ = run("review", slug, "--result", "fail", "--judge", "judge-1",
+                  "--hash", digest, "--evidence-file", str(reply))
+    assert code == 1
+    (project / "ready.txt").write_text("ready")
+    _, report = check(run, slug)
+    assert report["review_brief"].endswith("Previous:\n> R1: FAIL - ready.txt is missing\n")
+    assert report["review_file"].endswith("-2.md")
+    assert "<<REQUEST>>" in report["review_brief"]

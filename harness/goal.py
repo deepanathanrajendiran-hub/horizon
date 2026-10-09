@@ -173,6 +173,7 @@ def _bounded(text: str) -> str:
         return "[truncated]...\n" + text[-MAX_GATE_OUTPUT:]
     return text
 
+
 def _bounded_review(text: str) -> str:
     """Keep a long reviewer reply's head and tail; both carry verdicts."""
     if len(text) <= MAX_REVIEW_EVIDENCE:
@@ -317,6 +318,7 @@ def _requirements(state: dict) -> dict | None:
         raise EvidenceInsufficient(
             f"{target} is unreadable ({exc}); restore it, run check, and review again"
         ) from exc
+
 
 def _initial_state(goal, cwd, gate_kind, gate_value, max_turns,
                    max_minutes, watch_paths, review_criterion, gate_path=None):
@@ -830,6 +832,7 @@ def row(state: dict) -> dict:
         "last_review": reviews[-1]["result"] if reviews else None,
     }
 
+
 def deadline(state: dict) -> datetime | None:
     """When the wall-clock budget ends: `used.started` plus `max_minutes`.
 
@@ -840,6 +843,7 @@ def deadline(state: dict) -> datetime | None:
     if max_minutes is None:
         return None
     return datetime.fromisoformat(state["used"]["started"]) + timedelta(minutes=max_minutes)
+
 
 def summary(state: dict) -> dict:
     last = state["checkpoints"][-1] if state["checkpoints"] else None

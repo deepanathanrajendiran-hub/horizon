@@ -985,6 +985,7 @@ def test_commit_revision_wraps_malformed_candidate_execution():
             goal.commit_revision(candidate, expected_revision=0)
     assert goal.load(state["slug"]) == state
 
+
 def _reviewable(**kw):
     state = _make(gate_value="true", review_criterion="Every requirement line holds.", **kw)
     digest = _digest(state)
@@ -1043,6 +1044,7 @@ def test_review_evidence_keeps_16k_whole_and_head_and_tail_beyond():
     kept = goal.record_review(state["slug"], "pass", long, "judge-1", digest)["reviews"][-1]["evidence"]
     assert kept.startswith(head) and kept.endswith("R9: PASS - last line")
     assert "[truncated]" in kept and len(kept) < goal.MAX_REVIEW_EVIDENCE + 100
+
 
 def _project():
     return goal.paths.goals_dir().parent / "project"
@@ -1113,6 +1115,7 @@ def test_pass_is_refused_when_the_requirements_file_is_gone():
         goal.record_review(state["slug"], "pass",
                            f"Reviewed checkpoint: {digest[:12]}\nR1: PASS - ok", "judge-1", digest)
 
+
 def test_summary_prints_the_deadline_and_minutes_left():
     state = _make(max_minutes=25)
     report = goal.summary(state)
@@ -1127,6 +1130,7 @@ def test_minutes_left_stops_at_zero_and_is_null_without_a_clock():
     assert goal.summary(state)["minutes_left"] == 0
     untimed = goal.summary(_make(goal="Untimed work"))
     assert untimed["deadline"] is None and untimed["minutes_left"] is None
+
 
 def test_row_is_short_and_carries_what_a_new_session_needs():
     state = _make(goal="G" * 500, gate_value="true", review_criterion="C" * 500)

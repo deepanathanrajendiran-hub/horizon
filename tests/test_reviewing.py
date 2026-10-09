@@ -83,3 +83,46 @@ def test_echoes_needs_the_checkpoint_prefix():
     digest = "2a43c09b" + "0" * 56
     assert reviewing.echoes("Reviewed checkpoint: 2A43C09B0000", digest)
     assert not reviewing.echoes("Reviewed checkpoint: 6ec419f70000", digest)
+
+
+def test_brief_fills_the_template_and_keeps_two_placeholders():
+    text = reviewing.brief(digest="a" * 64, request="Fix the parser.",
+                           requirements='R1 [gate] "Fix the parser."',
+                           harness_dir="/p/.claude/harness", review_file="/tmp/r.md", previous=[])
+    assert text.startswith(f"Review checkpoint {'a' * 64}. Begin your reply with "
+                           f"`Reviewed checkpoint: {'a' * 64}`.")
+    assert "Request (verbatim):\nFix the parser.\n" in text
+    assert 'Requirements:\nR1 [gate] "Fix the parser."\n' in text
+    assert "<<ARTIFACTS>>" in text and "<<HOW_TO_RUN>>" in text
+    assert "/p/.claude/harness" in text and "/tmp/r.md" in text
+    assert "Previous:" not in text
+
+
+def test_brief_quotes_previous_open_lines():
+    text = reviewing.brief(digest="a" * 64, request="r", requirements="R1 x", harness_dir="h",
+                           review_file="f", previous=["R2: FAIL - m18 merges two attacks"])
+    assert text.endswith("\nPrevious:\n> R2: FAIL - m18 merges two attacks\n")
+
+
+def test_previous_lines_keep_only_open_verdicts_in_order():
+    reply = ("Reviewed checkpoint: x\nR1: PASS - ok\nR2: FAIL - m18\n"
+             "**Verdict: FAIL, narrowly.**\nR3: UNVERIFIED - no audio\nR4: NOT REVIEWED\n"
+             "R5: FAIL - first look\nR5: PASS - on rerun\nNon-blocking: style")
+    assert reviewing.previous_lines(reply) == [
+        "R2: FAIL - m18", "**Verdict: FAIL, narrowly.**", "R3: UNVERIFIED - no audio"]
+
+
+def test_long_request_is_cut_with_a_pointer(tmp_path):
+    gates = tmp_path / "gates"
+    gates.mkdir()
+    (gates / "request.md").write_text("q" * (reviewing.BRIEF_FILE_LIMIT + 10))
+    (gates / "requirements.md").write_text("R1 [gate] x\n")
+    state = {"slug": "s", "gate_path": str(gates), "reviews": []}
+    text = reviewing.brief_for(state, "b" * 64, "/tmp/r.md", "/p/.claude/harness")
+    assert f"[truncated; read the full text in {gates / 'request.md'}]" in text
+
+
+def test_unreadable_gate_files_become_placeholders(tmp_path):
+    state = {"slug": "s", "gate_path": str(tmp_path / "gone"), "reviews": []}
+    text = reviewing.brief_for(state, "b" * 64, "/tmp/r.md", "/p/.claude/harness")
+    assert "<<REQUEST: could not read" in text and "<<REQUIREMENTS: could not read" in text

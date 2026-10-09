@@ -17,6 +17,7 @@ import tree_hash
 import filelock
 import task_state
 import steps
+import reviewing
 
 
 def parser() -> argparse.ArgumentParser:
@@ -108,6 +109,7 @@ def parser() -> argparse.ArgumentParser:
 
 def status(state: dict) -> dict:
     return goal.summary(state)
+
 
 def goal_rows(exclude: str | None = None) -> list[dict]:
     directory = paths.harness_root() / "goals"
@@ -205,6 +207,11 @@ def check(args) -> tuple[dict, int]:
         state["gate"]["kind"] == "coverage"
         or (result == "pass" and bool(state["gate"].get("review_criterion")))
     )
+    if report["review_required"]:
+        report["review_file"] = reviewing.review_file(
+            state["slug"], digest, len(state.get("reviews") or []) + 1)
+        report["review_brief"] = reviewing.brief_for(
+            state, digest, report["review_file"], str(paths.harness_root()))
     if error:
         report["error"] = error
     return report, (2 if error else 0 if result == "pass" else 1)
