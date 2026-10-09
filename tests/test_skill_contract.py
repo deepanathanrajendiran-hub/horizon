@@ -12,6 +12,7 @@ import cli
 from string import Template
 import json
 import task_state
+import reviewing
 
 
 @pytest.mark.parametrize("runtime,folder", [("codex", ".agents"), ("claude", ".claude")])
@@ -159,3 +160,29 @@ def test_documented_state_update_examples_merge_with_real_contract(tmp_path):
             assert any(entry["id"] == "parser-open-question" for entry in candidate["entries"])
         else:
             assert all(entry["id"] != "obsolete-finding" for entry in candidate["entries"])
+
+def _horizon_skill(folder):
+    return (ROOT / folder / "skills/horizon/SKILL.md").read_text()
+
+
+def test_horizon_skills_share_their_sections():
+    def headings(folder):
+        return re.findall(r"^#{2,3} .+$", _horizon_skill(folder), re.M)
+    assert headings(".claude") == headings(".agents")
+
+
+@pytest.mark.parametrize("folder", [".claude", ".agents"])
+def test_horizon_skills_carry_the_v2_contract(folder):
+    text = _horizon_skill(folder)
+    for phrase in ("## Earlier goals", "## Before `start`", "request.md", "requirements.md",
+                   "[unverifiable]", "[judgment]", "# Still passes:", "baseline before any change",
+                   "--gate-path", "review_brief", "NOT REVIEWED", "deadline",
+                   "at most two review rounds", "## Final report"):
+        assert phrase in text, phrase
+
+
+def test_documented_review_template_matches_the_harness():
+    text = (ROOT / "docs/harness-cli.md").read_text()
+    section = text.split("## Requirements and review", 1)[1]
+    block = re.search(chr(96) * 3 + r"text\n(.*?)" + chr(96) * 3, section, re.S).group(1)
+    assert block == reviewing.TEMPLATE

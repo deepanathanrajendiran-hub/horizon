@@ -12,7 +12,8 @@ python3 "$HARNESS" --runtime "$RUNTIME" --project "$PROJECT" --help
 
 Global options precede the subcommand. `--scope project|global` selects the
 refinement ledger, not the goal location. Goals always belong to the project.
-`doctor` prints resolved paths without creating files. Automatic project discovery
+`doctor` prints resolved paths without creating files, including `gates`, the
+directory under which each goal keeps its request, requirements and gate. Automatic project discovery
 uses the nearest ancestor with a runtime marker (`.agents`/`.codex` or `.claude`),
 then Git, then the current directory. Give `--project` the intended working root
 when operating from an otherwise unmarked nested directory.
@@ -21,14 +22,87 @@ when operating from an otherwise unmarked nested directory.
 
 | Command | Purpose |
 | --- | --- |
-| `status [SLUG]` | List goals or inspect one, including budget and latest checkpoint |
-| `start OBJECTIVE --gate COMMAND [--review CRITERION]` | Command verification with optional independent review |
-| `start OBJECTIVE --coverage CRITERION` | Independent artifact review without a command |
-| `check SLUG --did TEXT --next TEXT` | Run one check and checkpoint completed work |
+| `status [SLUG]` | List short goal rows, or inspect one goal in full (budget, deadline, latest checkpoint) |
+| `start OBJECTIVE --gate COMMAND [--review CRITERION] [--gate-path DIR]` | Command verification with optional independent review |
+| `start OBJECTIVE --coverage CRITERION [--gate-path DIR]` | Independent artifact review without a command |
+| `check SLUG --did TEXT --next TEXT` | Run one check and checkpoint completed work; prints `review_brief` and `review_file` when a review is due |
 | `review SLUG --result pass\|fail --judge HANDLE --hash HASH --evidence-file PATH` | Record the actual review of the checkpoint's snapshot |
 | `complete SLUG` | Require all configured checks on current artifacts |
 | `abandon SLUG --reason TEXT` | Close incomplete work honestly |
 | `reopen SLUG --reason TEXT [--extra-turns N] [--extra-minutes N]` | Resume with an authorized budget extension |
+
+`status` without a slug returns `{"goals": [...]}` with one short row per goal:
+slug, status, goal, gate, review criterion, gate path, next action, abandon
+reason, start and completion times, turns used, and the last gate and review
+results. Long text is clipped and ends in `…`. `start` returns the same rows for
+the project's other goals as `other_goals`.
+
+## Requirements and review
+
+`start --gate-path DIR` records the goal's gate directory. DIR must already hold a
+non-blank `request.md` (the request, verbatim) and a `requirements.md` with at
+least one requirement line. A requirement line starts with `R1`, `R2`, ... after
+any list marker or emphasis; the tags `[gate]`, `[review]`, `[unverifiable]` and
+`[judgment]` on that line belong to it. `start` adds DIR to the watch set when no
+watched path covers it. Keep gate scripts, fixtures and requirement files in the
+gate directory inside the watched tree; keep gate logs, generated output and
+review evidence outside the watched tree.
+
+When a review is due, `check` returns `review_file`, a path outside the project
+that is new for each review round, and `review_brief`. The brief is the template
+below, filled in with:
+- the checkpoint hash;
+- the gate directory's request and requirements (each cut at 32,000 characters,
+  with a pointer to the full file);
+- the runtime's harness directory;
+- `review_file`.
+
+```text
+Review checkpoint {digest}. Begin your reply with `Reviewed checkpoint: {digest}`.
+
+Request (verbatim):
+{request}
+
+Requirements:
+{requirements}
+
+Artifacts: <<ARTIFACTS>>
+How to run: <<HOW_TO_RUN>>
+
+Build your own checks from the request. Do not read or run anything under
+{harness_dir}, an earlier reviewer's files, or the author's helpers. Call the
+code the way its existing callers and tests do, including the repeated, boundary
+and multi-step cases the request implies. Where the request is ambiguous, choose
+your own reading and say where the artifact's reading differs.
+
+Reply with exactly one line per requirement:
+`Rk: PASS|FAIL|UNVERIFIED - command and observed output`. A requirement you could
+not test is UNVERIFIED, and so is one where a caveat bears on whether it holds.
+Test a line tagged [unverifiable] if you can and answer it as usual; if you
+cannot, answer `Rk: NOT REVIEWED`. If a symptom the request reports still
+reproduces, that line FAILS even when a comment, docstring or design note
+justifies the behaviour. Do not repeat earlier reviewers' lines. List anything
+else under `Non-blocking:`. Keep the review under ten minutes. Before returning,
+write your complete reply to {review_file}.
+```
+
+The agent replaces only `<<ARTIFACTS>>` and `<<HOW_TO_RUN>>`. A goal without
+`--gate-path` also keeps `<<REQUEST>>` and `<<REQUIREMENTS>>` for the agent to
+fill. After a failed review, the brief ends with `Previous:` and that review's
+FAIL and UNVERIFIED lines and FAIL headlines, each prefixed with `> `.
+
+`review` stores the reviewer's reply whole up to 16,000 characters. Beyond that it
+keeps the reply's head and tail. Every review, pass or fail, must contain the
+first 12 characters of `--hash`.
+
+A pass is refused when any of these holds:
+- the last verdict for any requirement is FAIL or UNVERIFIED;
+- a line reads as a FAIL headline (`Verdict: FAIL`, or an all-caps `FAIL` as the
+  line's first word);
+- the goal has a gate directory, and either a requirement line has no verdict or
+  a line answers NOT REVIEWED without the `[unverifiable]` tag.
+
+Quoted lines starting with `>` are ignored. A fail is always recorded.
 
 ## State-mode worker protocol
 
@@ -245,7 +319,10 @@ and any required audit artifacts separately when those facts matter.
 and `--max-minutes` to the requested limits. An increment is a `check`, not a
 model message in conversation mode and a reserved worker attempt in state mode.
 Read `status` before work; an increment that crosses its time deadline may still
-checkpoint. The CLI is not a scheduler or an execution sandbox.
+checkpoint. Every goal summary prints `deadline` (the start time plus
+`--max-minutes`) and `minutes_left`; both are null without `--max-minutes`. The
+clock keeps running between sessions. The CLI is not a scheduler or an execution
+sandbox.
 
 Repeat `--watch PATH` on `start` to select the complete set of relevant inputs.
 Paths are relative to the discovered project; the default is the whole project.
@@ -253,8 +330,10 @@ The fingerprint includes file content, file mode, and Git state. It excludes
 common dependency/cache directories and mutable `.claude/harness` and
 `.codex/harness` goals, undo records, and changelogs. Harness source remains an
 input. Directory symlinks are not traversed; watch their resolved targets
-explicitly when they are relevant. Keep gate logs and review evidence outside
-the watched tree. Include
+explicitly when they are relevant. Use the directory the session started in as the
+project. If a deliverable lies outside the project, watch the project and that
+path. If a tool appends to a file on every run (a log or audit trail), watch the
+deliverables and inputs instead of the directory that holds it. Include
 external inputs explicitly, or use `check --force` when external state changes.
 Watch selection is a trust boundary: omitted inputs cannot invalidate a result.
 
@@ -267,8 +346,9 @@ and command errors retain a failed checkpoint. Exit 0 means pass, 1 means
 failed/skipped/awaiting review, and 2 means an error; inspect JSON before deciding.
 
 Command-plus-review and coverage goals require a review for the same checkpoint
-and criterion. Evidence must contain at least 40 characters; that length is only
-a basic empty-verdict guard. The calling agent must dispatch a real independent
+and criterion. Evidence must contain at least 40 characters and the checkpoint's
+hash prefix. Those checks are basic guards; the verdict rules are under
+[Requirements and review](#requirements-and-review). The calling agent must dispatch a real independent
 reviewer. A caller-supplied handle or editable local ledger cannot prove identity
 or prevent intentional falsification. `complete` preserves checkpoint evidence
 and rejects changed artifacts, gate definitions, and missing/failed reviews.

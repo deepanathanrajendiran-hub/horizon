@@ -92,6 +92,13 @@ from the old implementation must rerun verification before completing.
   lesson, while preserving its undo record.
 - Runtime dispatch stays in concise skill entrypoints; shared state protocol,
   schemas, recovery rules, and limits live in the linked CLI reference.
+- Horizon v2 goals save the request verbatim with a quoted, numbered requirement
+  list (`start --gate-path`), and the reviewer answers each line.
+- `review` refuses a pass that the reviewer's own reply does not support: a FAIL
+  or UNVERIFIED line, a FAIL headline, a missing requirement line, or no echo
+  of the reviewed checkpoint.
+- `check` returns a neutral reviewer brief filled from the goal's files. `status`
+  lists goals as short rows and prints each goal's deadline.
 
 ## Practical boundaries
 

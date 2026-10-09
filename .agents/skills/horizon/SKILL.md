@@ -8,7 +8,10 @@ description: Use for explicitly requested bounded work that must resume across t
 Keep the objective, evidence, budget, and next action on disk using the shared CLI.
 Resolve `HARNESS` to the absolute `scripts/harness.py` beside the **SKILL.md
 you actually loaded**, even for a global installation. Set `PROJECT` to the
-working project's absolute path. Quote both paths.
+absolute path of the directory this session started in (the session's working
+directory, not the shell's directory after a `cd`), unless the user names
+another project. Never use a subdirectory you create or enter during the
+work. Quote both paths.
 
 ```bash
 python3 "$HARNESS" --runtime codex --project "$PROJECT" doctor
@@ -16,22 +19,89 @@ python3 "$HARNESS" --runtime codex --project "$PROJECT" recall --query "relevant
 python3 "$HARNESS" --runtime codex --project "$PROJECT" status
 ```
 
-Reuse a matching active goal. Read its last checkpoint and raw artifacts before
-resuming. Create one when the user requests bounded continuation or invokes
-`$horizon`. Derive a concrete finish condition from the request.
-For code or mixed tasks, use a command plus a semantic review criterion:
+Run `doctor` first and use the `state` and `gates` paths it prints for the whole
+session.
+
+## Earlier goals
+
+Read the goal listing that `status` prints. Run `status SLUG` for every active goal
+and for every goal whose abandon reason or next action lists open lines. Read
+request.md and requirements.md of the most recent goal and of any goal whose
+deliverables overlap the current request. Their requirements still apply unless
+the current request changes them.
+
+Resume a goal only for the same request; never continue an earlier goal under a
+different one. Read its last checkpoint and raw artifacts before resuming. When
+the current request replaces or extends an earlier goal's work, or a goal you
+would resume is exhausted and the request states a budget, start a new goal
+first: copy every still-applicable earlier line into the new requirements.md as
+`Rk (from OLD_SLUG Rj)`, copy the checks behind them into the new `$GATES`, and
+never edit an earlier goal's gate files. Then, if the old goal is still active,
+`abandon` it with reason `continued in NEW_SLUG`. Without a stated budget, stop
+and report instead. Leave unrelated goals alone.
+
+Where the current request contradicts or corrects an earlier requirement, it
+governs that point only: retire only the checks it supersedes, keep the rest,
+and add `Rk supersedes OLD_SLUG Rj: old -> new` to requirements.md. If you are
+unsure whether an earlier requirement still applies, keep it and name the doubt
+in the final report. Never `reopen` without explicit user authorization.
+Create a goal when the user requests bounded continuation or invokes `$horizon`.
+
+## Before `start`
+
+Do these steps before changing any deliverable; scratch experiments elsewhere are
+fine. Let `GATES` be the `gates` path `doctor` printed, plus `/NAME`, where NAME
+is a short label for this request that no directory there already uses.
+
+1. Save the request verbatim to `$GATES/request.md`. Read the inputs it names, the
+   code it concerns, and that code's existing tests and callers.
+2. Write `$GATES/requirements.md` with one numbered line (R1, R2, ...) for each
+   requirement, reported symptom, deliverable and constraint in the request, quoted
+   in the request's words. Keep qualifiers such as "exact", "all" and "unchanged",
+   and keep stated limits. When the request names a class ("all X", "every Y"),
+   list each member. Tag each line `[gate]`, `[review]` or `[unverifiable]`. If a
+   line admits more than one reasonable reading, also tag it `[judgment]` and
+   record the reading you chose. This file states what was asked: leave out your
+   diagnosis, method and planned fix. The reviewer tests `[unverifiable]` lines it
+   can and answers the rest `NOT REVIEWED`; the final report lists those lines
+   first.
+3. Write the gate in `$GATES` as checks of the `[gate]` lines, each check naming its
+   line. Exercise the entry points the request names, called the way existing
+   callers and tests call them. If your change will add an interface or change a
+   consumer, also check the old interface's observable behaviour. When the request
+   says existing behaviour must stay the same, capture the current outputs now and
+   have the gate compare against them. Copy into `$GATES` the checks of earlier
+   goals that still apply (see "Earlier goals"); never edit an earlier goal's gate
+   files. Take expected values from the request and its inputs, never from your
+   solution's code or model. Put a `# Still passes:` line at the top of the gate
+   naming one wrong artifact it would accept, or `none`; if there is one, add a
+   check that does not depend on how the artifact is produced, or retag that line
+   `[review]` or `[unverifiable]`.
+4. Start the goal, as below, before editing any deliverable; a gate written after
+   the answer tends to check the answer's form.
+5. Before your first edit, run `check` with `--did "baseline before any change"`.
+   Checks of new lines must fail here where the request says behaviour is broken
+   or missing. Carried checks must pass; report a carried check that fails here
+   as a pre-existing regression.
 
 ```bash
 python3 "$HARNESS" --runtime codex --project "$PROJECT" start "Requested outcome" \
-  --gate "actual verification command" \
-  --review "Observable requirements the command cannot establish" \
+  --gate-path "$GATES" --gate "actual verification command" \
+  --review "Every line of $GATES/requirements.md holds, judged against $GATES/request.md" \
   --max-turns 20 --max-minutes 60
 ```
 
-Use `--coverage "criterion"` instead of `--gate` for research or other artifact
-review. A purely mechanical task may use a command alone. Choose proportional
-budgets; user limits take precedence over the example. Save the returned slug.
-State belongs to this runtime's project `.codex/harness`.
+Use `--coverage` with the same criterion instead of `--gate` when no command can
+check any line. Omit `--review` only when every line is tagged `[gate]`. `start`
+refuses a `--gate-path` without request.md and at least one requirement line, and
+watches that directory for you. Keep the gate, its fixtures, request.md and
+requirements.md in `$GATES`; keep logs and generated output elsewhere, outside the
+watched tree. If a deliverable the request names lies outside `PROJECT`, pass
+`--watch` for `PROJECT` and for that path. If a tool appends to a file on every
+run (a log or audit trail), watch the deliverables and inputs instead of the
+directory that holds it. Choose proportional budgets; user limits take precedence
+over the example. Save the returned slug. State belongs to this runtime's project
+`.codex/harness`.
 
 ## Optional state mode
 
@@ -71,8 +141,17 @@ the worker. State mode itself creates no native goal, task, schedule, or API cli
 ## Conversation-mode increments
 
 1. Read `status SLUG` before work. Continue only when status is active and
-   `budget_exhausted` is false. Inspect the recorded next action.
-2. Do one useful increment. Preserve the acceptance criteria.
+   `budget_exhausted` is false. Inspect the recorded next action. A time limit the
+   user states counts from their message; note the time when you first read it,
+   and give the goal the minutes that remain when you create it. Start an
+   increment or a review only if it, `check`, the review and the final report can
+   all finish before the `deadline` that `status` prints. Near the deadline, leave
+   the work buildable, run `check`, and give the final report.
+2. Do one useful increment. Never weaken the gate, a reviewer's test, or the
+   requirement list to fit your output: do not delete a failing case, widen a
+   tolerance, add an exception, or change an expected value to match the code.
+   If a check is wrong, fix it, say what changed and why in that check's `--did`,
+   and list every gate change in the final report.
 3. Run this command **once** to verify and save the increment. Read its JSON even
    on a nonzero exit. Work that crosses the wall-clock deadline is still recorded.
 
@@ -87,17 +166,29 @@ review, 2 error. Continue from the saved next action while budget remains.
 
 ## Independent review
 
-When `review_required` is true, dispatch a **fresh independent reviewer**.
-Use the available Codex subagent tool; in this desktop runtime it is
-`collaboration.spawn_agent` with `fork_turns: "none"`.
-Give it the objective, acceptance criterion, artifact paths, and raw check output.
-Request pass/fail with evidence and omissions. Do not supply a desired verdict or
-substitute your own explanation. If no reviewer is available, report the unmet
-requirement.
+When `review_required` is true, `check` also prints `review_brief` and
+`review_file`. Dispatch a **fresh independent reviewer** with the available
+Codex subagent tool; in this desktop runtime it is `collaboration.spawn_agent`
+with `fork_turns: "none"`. Wait for it to finish with the host's wait tools
+before anything else. Send it the `review_brief` unchanged, except that you replace
+`<<ARTIFACTS>>` with the artifact paths and `<<HOW_TO_RUN>>` with the commands a
+user would run. Add nothing else: no diagnosis, design choices, expected values,
+explanations of earlier findings, or questions that point to an answer. If no
+reviewer is available, report the unmet requirement.
 
-Save the actual review (at least 40 characters) in a temporary file **outside the
-watched project**. Use the real reviewer handle and the exact
-`last_checkpoint.tree_hash` printed by `check`:
+The reviewer writes its reply to `review_file`. Pass that file, unedited, as
+`--evidence-file`. Record every verdict, FAIL included, with
+`review --result fail|pass` before changing anything. Record `pass` only when
+every requirement line is PASS, or NOT REVIEWED on a line tagged
+`[unverifiable]`. The CLI refuses a pass whose reply has a FAIL or UNVERIFIED
+line, a FAIL headline, a requirement line without a verdict, or no echo of the
+checkpoint hash; record `fail` instead. A FAIL or UNVERIFIED line is not a pass:
+spend the next increment on those lines while budget remains, or stop and report
+them as unverified. A reviewer's expectation ("should handle", "by design",
+"harmless") is not evidence. Use the real reviewer handle and the hash the
+reviewer was given and echoed. Never record a review against a later checkpoint
+or another goal. If anything changed after the reviewer saw it, run `check` and
+a new review.
 
 ```bash
 python3 "$HARNESS" --runtime codex --project "$PROJECT" review "$SLUG" \
@@ -106,24 +197,53 @@ python3 "$HARNESS" --runtime codex --project "$PROJECT" review "$SLUG" \
 python3 "$HARNESS" --runtime codex --project "$PROJECT" complete "$SLUG"
 ```
 
-Replace `pass` with the actual verdict. Complete only after all configured checks
-pass. Missing/failed review, changed artifacts, a changed gate, or an unreadable
-snapshot blocks completion. Check and review again after any change. The ledger
-records reviewer provenance; it cannot prove independence by itself.
+Complete only after all configured checks pass. Missing/failed review, changed
+artifacts, a changed gate, or an unreadable snapshot blocks completion. After any
+change to reviewed files, check and review again, within the round limit. The
+ledger records reviewer provenance; it cannot prove independence by itself.
+
+Never end a turn, or schedule a wakeup (an automation or thread heartbeat),
+while your own reviewer or gate is running. When the reviewer passes an unchanged
+checkpoint, run `review` and then `complete` at once. Another `check` on unchanged
+files records `skipped` and blocks both.
+
+A finding blocks only if it bears on whether a requirement line holds, that is,
+it makes the line FAIL or UNVERIFIED. Record other findings as non-blocking gaps
+for the final report, and do not start an increment or a review for them. Run
+at most two review rounds per goal in a session unless the user allows more.
+Because any edit after a review needs a new review, after a second failed review
+report the open lines instead of fixing and re-briefing. Never narrow a brief or
+pre-explain a finding to get a pass.
 
 ## Limits and resumption
 
-Stop new increments at the budget and report remaining gaps. `abandon` closes
+Stop new increments at the budget and give the final report. `abandon` closes
 incomplete work; `reopen` may extend its budget only with user authorization.
-A skipped command needs changed inputs or `check --force` for external state.
-Missing tools, unreadable inputs, and timeouts retain a failed checkpoint:
-diagnose the cause, never fabricate a pass. Use `--timeout SECONDS` for a slow gate.
-Read [the CLI reference](references/commands.md) for watch paths, lifecycle
-commands, and upgrade rules.
+Wall-clock budgets keep running between sessions. Do not resume an exhausted
+goal: continue through a new goal as described under Earlier goals, or stop and
+report. A skipped command needs changed inputs or `check --force` for external
+state. Missing tools, unreadable inputs, and timeouts retain a failed checkpoint:
+diagnose the cause, never fabricate a pass. Use `--timeout SECONDS` for a slow
+gate. Read [the CLI reference](references/commands.md) for watch paths, lifecycle
+commands, the review brief, and upgrade rules.
 
 Disk checkpoints survive interruption; they do not wake the application.
 Only when the user requests scheduled continuation, use the available Codex
 automation tool with a thread heartbeat. Read status on every firing, stop on
 completion or exhaustion, and stay quiet unless something actionable changes.
 Do not create a native Codex goal merely because this skill loaded.
-Report final status, evidence, remaining gaps, and the slug.
+
+## Final report
+
+End in the same turn with one complete report:
+1. Each requirement line and its status: verified by gate, verified by reviewer,
+   judgment call (name the reading you chose), unverified, or not met, each with
+   evidence. Put unverified and not-met lines first.
+2. Reviewer findings you did not resolve, quoted; every gate change; superseded
+   requirements.
+3. The goal's slug and status. `complete` means your gate and reviewer passed.
+   Never present it, or a reviewer's PASS, as proof that the task is done.
+Never promise to report something later. If you stop without completing, make the
+ledger say why: with budget left, run a last `check` whose `--next` lists the open
+lines; with the budget spent, or when the open lines cannot be verified here,
+`abandon` with a reason that lists them.
