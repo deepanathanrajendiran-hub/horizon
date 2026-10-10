@@ -10105,7 +10105,7 @@ Expected:
 - `zstd --version` prints a version, and Python prints `3.11` or later.
 - The token byte count is above `20`.
 - `docker system df` shows images using well under half of Docker Desktop's disk limit.
-- The suite ends with `1236 passed, 8 skipped`, the count after the pre-freeze decisions (Task 12a); the time varies. The 8 skips are the freeze pins in `tests/test_evo_prereg.py`.
+- The suite ends with `1242 passed, 8 skipped`, the count after the pre-freeze decisions (Task 12a); the time varies. The 8 skips are the freeze pins in `tests/test_evo_prereg.py`.
 
 If anything differs:
 - **Docker is not running:** start Docker Desktop and repeat.
@@ -10284,7 +10284,7 @@ ls "$RUNS/validation" | grep -c '^theme_'; tail -3 "$RUNS/logs/validate.log"; ki
 ```
 
 How the walk works:
-- Each task's agent and validation copies get the ARM patch. A Go tarball that a `COPY` or `ADD` takes from the build context is swapped for go.dev's linux-arm64 archive of the same version, checked against go.dev's published sha256. No pool task is known to bundle one: d10_w4 downloads its Go, and the patch rewrites that download, so nothing is swapped (the spec's guess that d10_w4 bundles its Go was wrong). A shell `case` statement whose arms already include an `aarch64` or `arm64` arm is left as it is, `x86_64` and `amd64` arms included (user decision, 2026-10-09; d12_w1).
+- Each task's agent and validation copies get the ARM patch. A Go tarball that a `COPY` or `ADD` takes from the build context is swapped for go.dev's linux-arm64 archive of the same version, checked against go.dev's published sha256. No pool task is known to bundle one: d10_w4 downloads its Go, and the patch rewrites that download, so nothing is swapped (the spec's guess that d10_w4 bundles its Go was wrong). In a `RUN` instruction's shell `case` statement that also has an arm whose pattern names `aarch64` or `arm64`, only the arms whose pattern names `x86_64` or `amd64` (and not `aarch64` or `arm64`) are left as they are, from the pattern to the `;;` (user decision, 2026-10-09; d12_w1). Every other part of the statement is patched and checked as usual: the `aarch64` and `arm64` arms, `*)` arms, combined arms such as `x86_64|aarch64)`, and the `case ... in` header.
 - Then every copy's Dockerfile ends with the python3 block, `copies.PYTHON_BLOCK`, for both arms (user decision, 2026-10-09; d10_w4 and d1_w11 had no python3):
 
   ```dockerfile
@@ -10327,6 +10327,17 @@ Expected: one line per walked task, giving:
 
 Every selected task prints `True arm64 <rounds> True 0 0 True ['root'] None`. The bundled-tarball count is 0 for every task, d10_w4 included: its Go is downloaded and the patch rewrites the download, so nothing is bundled. (An earlier version of this step said 1 for d10_w4; that was wrong.)
 
+theme_d12_w1 must be among them: the user decided to include it (Task 12a), so the walk must not swap it. Its x86_64 `case` arm is left as written, so check that its image's Go toolchain is the arm64 one. The check prints only Go's version line, never task content:
+
+```bash
+WT="/Users/deeps/Documents/NEW STUFF/fun /.superpowers/worktrees/evocode"; RUNS="$HOME/Documents/evocode-horizon-runs"; REV=9fcae3e5539d1c0e85e2481fe06bd6af42cc4bc6
+cd "$WT" && docker run --rm --platform linux/arm64 --entrypoint go "$(python3 -c 'from bench.evo import config; print(config.image_tag("theme_d12_w1_automation_productivity_greenfield_implementation"))')" version
+```
+
+Expected: one line, `go version go<version> linux/arm64`.
+
+`go` may not be on the image's PATH. In that case Docker fails with `executable file not found in $PATH`, and nothing runs. Then repeat the command with `--entrypoint /usr/local/go/bin/go`, where a Go tarball is usually unpacked. It must print the same `linux/arm64` line. If that also fails, STOP and ask the user. (This check runs `go version` on the binary itself instead of `file`, because `file` is often missing from slim images and `go version` states the same architecture.)
+
 Watch item, recorded and not a STOP: the planted ledger plants test-like files in Python, Go, JavaScript, TypeScript and shell only (`validate.PLANTED_LEDGER`). Validation's planted-ledger oracle run is the real protection: it passes every round only when no verifier collected a planted file. To record which other languages a selected task could test in, list the language toolchains its `environment/Dockerfile` installs. That file is not under `tests/`, and the ARM patcher already reads it. The snippet prints only toolchain names, never file contents, and appends one dated line to `$RUNS/findings.md`:
 
 ```bash
@@ -10366,9 +10377,11 @@ If anything differs:
 - **A task is not `ok` because of `UnknownArchPattern` (its reason starts `copy failed: line`):** STOP. The spec requires patching every pool task's amd64 Go and yq artifacts, and tasks are not chosen by whether they build. Write the line number (not the line) to `$RUNS/findings.md`. Ask the user whether to extend Task 4's patcher (with a test) or to log a swap.
 - **A task's reason starts `copy failed:` and mentions a symlink:** STOP. The copies refuse a symlink that leaves the task directory (a runner limit, not a property of the task), so the walk swapped the task for the runner's sake. Write only `copy failed: symlink` and the task name to `$RUNS/findings.md`, never the path. Ask the user whether to log the swap.
 - **A toolchain line ends with `STOP`:** the task installs a toolchain outside Python, Go, JavaScript, TypeScript and shell, and its planted-ledger oracle run did not pass every round. STOP and ask the user. With an `ok` validation record this cannot happen, so it means the record and the walk disagree.
-- **`python_missing` is not empty, or a selected task prints python `False`:** STOP and ask the user. Every copy now ends with the python3 block, so this means the block failed: it ran but left no python3 3.10 or later in the image (for example, the distribution's python3 is older). The spec's validation criteria do not cover a container without python3 3.10 or later, and the Horizon CLI cannot run in one.
+- **`python_missing` is not empty, or a selected task prints python `False`:** STOP and ask the user. Every copy now ends with the python3 block, but the block installs python3 only when the image has none. So python `False` means one of two things: the image already had a python3 older than 3.10, which makes the block a no-op; or the block installed the distribution's python3, and that is older than 3.10. Both are STOPs. The spec's validation criteria do not cover a container without python3 3.10 or later, and the Horizon CLI cannot run in one.
 - **A selected task prints `False` for the python3 block:** STOP. Its record says ok, but its copy does not end with the block, so the record and the copy code disagree. (A task whose copy failed also prints `False`; its reason says why.)
 - **A task fails with `build failed twice` (the walk swaps it) although the earlier walk built it, for example d10_w4 or d1_w11:** STOP and ask the user. The python3 block is the only change to its image, so the block probably broke the build, for example with no `apt-get` in the image or a non-root `USER` at the end of the Dockerfile.
+- **theme_d12_w1 is not `ok`, for any reason, or is not in `selected`:** STOP and ask the user. The user decided to include it (Task 12a), so the walk's swap of it is not accepted on its own. Write only its reason's first words (for example `copy failed: line`, with the line number but not the line) to `$RUNS/findings.md`.
+- **The d12_w1 Go check prints anything other than `linux/arm64`, or fails with both entrypoints:** STOP and ask the user. Its image would build or test with an amd64 toolchain.
 - **A selected task has a null case count above 0:** set `T` to that task's name and run only `grep -c CASE_SUMMARY "$RUNS"/checks/oracle__"$T"/*/steps/*/verifier/test-stdout.txt`. It prints one count per round file. Never print or open the files. STOP and report the counts.
 - **A selected task's users are not `['root']`:** STOP and ask the user. The spec says the per-round setup hook runs as root, but Harbor runs it as the step's agent user. A non-root user leaves root-owned `/tmp` entries and has a different `HOME`.
 
@@ -10575,7 +10588,7 @@ If `write` fails, act on its message:
 Run the full suite before the commit:
 
 Run: `cd "$WT" && sh bench/tb4/test.sh -q`
-Expected: the last line is `1244 passed` followed by the run time, with no `skipped`. That is Step 1's `1236 passed, 8 skipped` with the 8 freeze pins now running. Any other count, or any failure, is a STOP.
+Expected: the last line is `1250 passed` followed by the run time, with no `skipped`. That is Step 1's `1242 passed, 8 skipped` with the 8 freeze pins now running. Any other count, or any failure, is a STOP.
 
 Commit and tag. Each command runs only if the one before it succeeded:
 
@@ -10827,7 +10840,7 @@ cd "$WT" && if [ -f "$RUNS/deviations.md" ]; then cp "$RUNS/deviations.md" docs/
 Run the full suite before the commit:
 
 Run: `cd "$WT" && sh bench/tb4/test.sh -q`
-Expected: the last line is `1244 passed` followed by the run time, with no `skipped`, as at the freeze.
+Expected: the last line is `1250 passed` followed by the run time, with no `skipped`, as at the freeze.
 
 Commit. Each command runs only if the one before it succeeded:
 
