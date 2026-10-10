@@ -9954,7 +9954,7 @@ feat(evo): pre-registration freeze, reserves, bundle verification and freeze pin
 
 1. **The bundle is built in Step 5, right after the order, instead of at the freeze.** The dry run's horizon arm needs `RUNS/bundle/horizon` (`--skill`), and the canary uses the same bundle. At the freeze, `prereg write` verifies the bundle byte for byte against a fresh build at `BUNDLE_COMMIT`.
 2. **Two steps are added at the start:** preconditions (Step 1) and a token and usage probe (Step 2).
-3. **Step 9 reads more than `ok`.** For every validated task it prints whether python3 3.10 or later runs in the image, how many rounds lack case counts, how many bundled Go tarballs were replaced and which user each round runs as. It STOPs on any of them, and on an unknown amd64 pattern, instead of letting the walk swap the task.
+3. **Step 9 reads more than `ok`.** For every validated task it prints whether python3 3.10 or later runs in the image, how many rounds lack case counts, how many bundled Go tarballs were replaced, whether the copy ends with the python3 block (Task 12a) and which user each round runs as. It STOPs on any of them, and on an unknown amd64 pattern, instead of letting the walk swap the task.
 4. **Step 12 also measures the goal start offset and the usage per round**, as the spec's dry run requires. It prints offsets and utilizations only, never goal text.
 5. **A dropped main task is replaced by a reserve (Step 14).** `prereg.json` pre-registers the reserves (spec rule 7), and on relaunch the runner runs the next unused one. The skeleton could only drop.
 6. **A post-run integrity check is added (Step 16).** It checks every planned task against `prereg.json`, including any reserve in play: prompt-file digests, agent-copy digests, image IDs, the freeze commit of every main record, and the versions of every main record that ran a trial.
@@ -9979,11 +9979,11 @@ feat(evo): pre-registration freeze, reserves, bundle verification and freeze pin
     - `ALGORITHM` states both rules.
   - Task 6:
     - `python3 -m bench.evo.validate --n N`, which prints `{"selected", "swaps", "complete", "python_missing"}`, and `python3 -m bench.evo.validate --task TASK`;
-    - each `validation/<task>.json` carries `python`, `oracle_cases`, `arm_patch`, `user` (from `validate.agent_users(task_toml, image_user)`) and `code` (`validate.CODE_DIGEST`). A saved record whose `code` differs is validated again;
+    - each `validation/<task>.json` carries `python`, `oracle_cases`, `arm_patch` (`{changed, artifacts, added}`; `added` holds `copies.PYTHON_LINE`, see Step 9), `user` (from `validate.agent_users(task_toml, image_user)`) and `code` (`validate.CODE_DIGEST`). A saved record whose `code` differs is validated again;
     - a task whose image holds `setup.sh` in its working directory fails validation with the reason `project file setup.sh in the working directory would be overwritten by the round hook`, before any Harbor job;
     - `validate_task` and `--task` raise `ValueError` for a task name that is empty or absolute, or that holds `/`, `\` or `..`, before anything is deleted;
     - `steps.read_trial` (Step 12).
-  - Task 7: `python3 -m bench.evo.harborcheck check [--agent oracle]`, `vtimeout`, `probe` and `canary --skill DIR`. The findings land in `$RUNS/checks/<job>/findings.json`. The dummy image is `FROM ubuntu:22.04` with no apt step.
+  - Task 7: `python3 -m bench.evo.harborcheck check [--agent oracle]`, `vtimeout`, `probe` and `canary --skill DIR`. The findings land in `$RUNS/checks/<job>/findings.json`. The dummy's own Dockerfile is `FROM ubuntu:22.04` with no apt step. Its copies, like every copy since Task 12a, end with the python3 block, so a check run again after Task 12a installs python3 with apt while it builds the dummy image.
   - Task 8: `python3 -m bench.evo.run --phase dry|main [--print-commands]`. It exits 3 with `stopped: ...` when a task is dropped. In both phases:
     - a drop line goes to `$RUNS/deviations.md` for `main` and to `$RUNS/findings.md` for `dry`. Only a main drop is skipped on a relaunch, so a dry relaunch with the next `--attempt` runs the walkthrough again;
     - when the usage probe that gates a job returns no `five_hour` or `seven_day` utilization, it raises `InfrastructureFailure: usage probe returned no rate-limit data`. No job starts, no record is written and no attempt is spent;
@@ -10001,6 +10001,7 @@ feat(evo): pre-registration freeze, reserves, bundle verification and freeze pin
     - `prereg.json` holds `reserve` (from `prereg.reserve_tasks`) and `task_details` for every measured task and every reserve;
     - `OUTCOMES["running"]` states the reserve rule;
     - `prereg.md` has a `### Reserve` subsection;
+    - `prereg.json` holds `decisions`, the decisions made before the freeze (`prereg.DECISIONS`, Task 12a), and `prereg.md` lists them under `## Decisions made before the freeze`, between `### Reserve` and `## N rule`;
     - `prereg.verify_runs(prereg, runs, tasks)` raises `NotFrozen` when the bundle, an existing prompt file or an agent copy differs from `prereg.json`, or an agent copy is missing;
     - `prereg.require_frozen_record(path, run)` raises `NotFrozen` unless the file holds exactly the tagged `prereg.json`. `run --phase main` and `analysis report` call it, and `score --phase main`, `analysis label` and `analysis report` call `require_freeze`.
   - TB4, unchanged:
@@ -10104,7 +10105,7 @@ Expected:
 - `zstd --version` prints a version, and Python prints `3.11` or later.
 - The token byte count is above `20`.
 - `docker system df` shows images using well under half of Docker Desktop's disk limit.
-- The suite ends with `1226 passed, 8 skipped`, the count after the final-review fixes; the time varies. The 8 skips are the freeze pins in `tests/test_evo_prereg.py`.
+- The suite ends with `1236 passed, 8 skipped`, the count after the pre-freeze decisions (Task 12a); the time varies. The 8 skips are the freeze pins in `tests/test_evo_prereg.py`.
 
 If anything differs:
 - **Docker is not running:** start Docker Desktop and repeat.
@@ -10283,13 +10284,22 @@ ls "$RUNS/validation" | grep -c '^theme_'; tail -3 "$RUNS/logs/validate.log"; ki
 ```
 
 How the walk works:
-- Each task's agent and validation copies get the ARM patch. A Go tarball that a `COPY` or `ADD` takes from the build context is swapped for go.dev's linux-arm64 archive of the same version, checked against go.dev's published sha256. The spec expects this for d10_w4.
+- Each task's agent and validation copies get the ARM patch. A Go tarball that a `COPY` or `ADD` takes from the build context is swapped for go.dev's linux-arm64 archive of the same version, checked against go.dev's published sha256. No pool task is known to bundle one: d10_w4 downloads its Go, and the patch rewrites that download, so nothing is swapped (the spec's guess that d10_w4 bundles its Go was wrong). A shell `case` statement whose arms already include an `aarch64` or `arm64` arm is left as it is, `x86_64` and `amd64` arms included (user decision, 2026-10-09; d12_w1).
+- Then every copy's Dockerfile ends with the python3 block, `copies.PYTHON_BLOCK`, for both arms (user decision, 2026-10-09; d10_w4 and d1_w11 had no python3):
+
+  ```dockerfile
+
+  # evo: python3 for the Horizon CLI, added to both arms when the image lacks it (bench/evo/copies.py)
+  RUN command -v python3 >/dev/null 2>&1 || (apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 && rm -rf /var/lib/apt/lists/*)
+  ```
+
+  It does nothing when the image already has python3. `arm-patch.json`, and so each record's `arm_patch`, holds that `RUN` line under `added`.
 - Each task builds its arm64 image. A failed build is retried once; a second failure is a validation failure.
 - Before any Harbor job, the image's working directory is checked for a file named `setup.sh`. Harbor would overwrite it with the round hook every round, and the hook deletes itself, so such a task fails validation with the reason `project file setup.sh in the working directory would be overwritten by the round hook`. The walk swaps it like any other failure.
 - Then every round runs three times: oracle, nop, and oracle with a planted ledger.
 - When the process has exited, the log's last line is `{"selected": [...], "swaps": [...], "complete": true, "python_missing": []}`. `selected` holds 10 task names in seeded order. Each swap names a task that failed validation, its reason, and its replacement.
 - The walk resumes. After a crash or reboot, launch the same command again, and finished tasks are read from `$RUNS/validation/`.
-- A record made by other copy code (its `code` differs from `validate.CODE_DIGEST`) is validated again. So after any fix to Task 4, 5 or 6, the relaunched walk validates every task again.
+- A record made by other copy code (its `code` differs from `validate.CODE_DIGEST`) is validated again. So after any fix to Task 4, 5 or 6, the relaunched walk validates every task again. Task 12a changed `patch.py` and `copies.py`, so the walk after it validates every task again.
 
 Read the results without opening any task material:
 
@@ -10297,12 +10307,12 @@ Read the results without opening any task material:
 WT="/Users/deeps/Documents/NEW STUFF/fun /.superpowers/worktrees/evocode"; RUNS="$HOME/Documents/evocode-horizon-runs"; REV=9fcae3e5539d1c0e85e2481fe06bd6af42cc4bc6
 cd "$WT" && python3 - <<'EOF'
 import json
-from bench.evo import config
+from bench.evo import config, copies
 for path in sorted((config.RUNS / "validation").glob("theme_*.json")):
     d = json.loads(path.read_text())
     print(path.stem, d["ok"], d["arch"], d["rounds"], (d.get("python") or {}).get("ok"),
           sum(c is None for c in d.get("oracle_cases") or []), len((d.get("arm_patch") or {}).get("artifacts") or []),
-          d.get("user"), d["reason"])
+          (d.get("arm_patch") or {}).get("added") == [copies.PYTHON_LINE], d.get("user"), d["reason"])
 EOF
 ```
 
@@ -10311,10 +10321,11 @@ Expected: one line per walked task, giving:
 - whether python3 3.10 or later runs in the image;
 - the number of rounds whose oracle run had no case counts;
 - the number of bundled Go tarballs replaced;
+- whether the copy ends with the python3 block (`arm_patch.added` is `[copies.PYTHON_LINE]`);
 - the users the rounds run as;
 - the reason it failed.
 
-Every selected task prints `True arm64 <rounds> True 0 <k> ['root'] None`. Here k is 1 for d10_w4, whose bundled tarball was replaced, and 0 for the others.
+Every selected task prints `True arm64 <rounds> True 0 0 True ['root'] None`. The bundled-tarball count is 0 for every task, d10_w4 included: its Go is downloaded and the patch rewrites the download, so nothing is bundled. (An earlier version of this step said 1 for d10_w4; that was wrong.)
 
 Watch item, recorded and not a STOP: the planted ledger plants test-like files in Python, Go, JavaScript, TypeScript and shell only (`validate.PLANTED_LEDGER`). Validation's planted-ledger oracle run is the real protection: it passes every round only when no verifier collected a planted file. To record which other languages a selected task could test in, list the language toolchains its `environment/Dockerfile` installs. That file is not under `tests/`, and the ARM patcher already reads it. The snippet prints only toolchain names, never file contents, and appends one dated line to `$RUNS/findings.md`:
 
@@ -10355,7 +10366,9 @@ If anything differs:
 - **A task is not `ok` because of `UnknownArchPattern` (its reason starts `copy failed: line`):** STOP. The spec requires patching every pool task's amd64 Go and yq artifacts, and tasks are not chosen by whether they build. Write the line number (not the line) to `$RUNS/findings.md`. Ask the user whether to extend Task 4's patcher (with a test) or to log a swap.
 - **A task's reason starts `copy failed:` and mentions a symlink:** STOP. The copies refuse a symlink that leaves the task directory (a runner limit, not a property of the task), so the walk swapped the task for the runner's sake. Write only `copy failed: symlink` and the task name to `$RUNS/findings.md`, never the path. Ask the user whether to log the swap.
 - **A toolchain line ends with `STOP`:** the task installs a toolchain outside Python, Go, JavaScript, TypeScript and shell, and its planted-ledger oracle run did not pass every round. STOP and ask the user. With an `ok` validation record this cannot happen, so it means the record and the walk disagree.
-- **`python_missing` is not empty, or a selected task prints python `False`:** STOP and ask the user. The spec's validation criteria do not cover a container without python3 3.10 or later, and the Horizon CLI cannot run in one.
+- **`python_missing` is not empty, or a selected task prints python `False`:** STOP and ask the user. Every copy now ends with the python3 block, so this means the block failed: it ran but left no python3 3.10 or later in the image (for example, the distribution's python3 is older). The spec's validation criteria do not cover a container without python3 3.10 or later, and the Horizon CLI cannot run in one.
+- **A selected task prints `False` for the python3 block:** STOP. Its record says ok, but its copy does not end with the block, so the record and the copy code disagree. (A task whose copy failed also prints `False`; its reason says why.)
+- **A task fails with `build failed twice` (the walk swaps it) although the earlier walk built it, for example d10_w4 or d1_w11:** STOP and ask the user. The python3 block is the only change to its image, so the block probably broke the build, for example with no `apt-get` in the image or a non-root `USER` at the end of the Dockerfile.
 - **A selected task has a null case count above 0:** set `T` to that task's name and run only `grep -c CASE_SUMMARY "$RUNS"/checks/oracle__"$T"/*/steps/*/verifier/test-stdout.txt`. It prints one count per round file. Never print or open the files. STOP and report the counts.
 - **A selected task's users are not `['root']`:** STOP and ask the user. The spec says the per-round setup hook runs as root, but Harbor runs it as the step's agent user. A non-root user leaves root-owned `/tmp` entries and has a different `HOME`.
 
@@ -10536,7 +10549,8 @@ Expected:
   - `tasks` are the first N names of Step 9's `selected` list;
   - `replaced` names the same tasks as the swaps that come before them in Step 9. Compare task names only: `replaced` gives each a shortened public reason (`copy failed`, `build failed twice`, `planted copy failed`, with `$RUNS` and `~` in place of host paths), and the full text stays in `$RUNS/validation/<task>.json`;
   - `reserve` is the rest of Step 9's `selected` list, in order. For N = 8 that is the 9th and 10th names, and for N = 10 it is `[]`. These are the pre-registered replacements for main tasks dropped by an infrastructure failure.
-- The section shows a table of the N measured tasks with their image IDs, then the list of swapped tasks, then `### Reserve`. That subsection holds a table of the reserve tasks with their image IDs, or `No reserve: validation stopped at the Nth passing task, or no later task passed it.`
+- `prereg.json` also records `decisions`: the three decisions made before the freeze, `prereg.DECISIONS` (python3 added to the copies for both arms, the ARM patcher leaving an arch `case` statement that has an arm64 arm, and the d5_w9 swap). `write` does not print them.
+- The section shows a table of the N measured tasks with their image IDs, then the list of swapped tasks, then `### Reserve`. That subsection holds a table of the reserve tasks with their image IDs, or `No reserve: validation stopped at the Nth passing task, or no later task passed it.` Then `## Decisions made before the freeze` lists the three decisions, one bullet each, word for word as in `prereg.DECISIONS`.
 - The grep count is `0`: the freeze pins now run against `prereg.json`.
 
 If `write` fails, act on its message:
@@ -10561,7 +10575,7 @@ If `write` fails, act on its message:
 Run the full suite before the commit:
 
 Run: `cd "$WT" && sh bench/tb4/test.sh -q`
-Expected: the last line is `1234 passed` followed by the run time, with no `skipped`. That is Step 1's `1226 passed, 8 skipped` with the 8 freeze pins now running. Any other count, or any failure, is a STOP.
+Expected: the last line is `1244 passed` followed by the run time, with no `skipped`. That is Step 1's `1236 passed, 8 skipped` with the 8 freeze pins now running. Any other count, or any failure, is a STOP.
 
 Commit and tag. Each command runs only if the one before it succeeded:
 
@@ -10598,7 +10612,7 @@ python3 -m bench.evo.run --phase main --print-commands | wc -l
 
 Expected:
 - `check` prints `{"frozen": "<commit>"}`, and the `git rev-parse` line prints the same commit.
-- The pins print `71 passed`: the file's `63 passed, 8 skipped` before the freeze, with the 8 freeze pins running.
+- The pins print `72 passed`: the file's `64 passed, 8 skipped` before the freeze, with the 8 freeze pins running.
 - The command count is `2N` lines, for example `16` for N = 8. No task has dropped yet, so no reserve is in play.
 
 From here on, every change goes to `$RUNS/deviations.md` with its date and reason.
@@ -10813,7 +10827,7 @@ cd "$WT" && if [ -f "$RUNS/deviations.md" ]; then cp "$RUNS/deviations.md" docs/
 Run the full suite before the commit:
 
 Run: `cd "$WT" && sh bench/tb4/test.sh -q`
-Expected: the last line is `1234 passed` followed by the run time, with no `skipped`, as at the freeze.
+Expected: the last line is `1244 passed` followed by the run time, with no `skipped`, as at the freeze.
 
 Commit. Each command runs only if the one before it succeeded:
 
