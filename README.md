@@ -1,10 +1,39 @@
 # Continual Harness for Codex and Claude Code
 
-Two skills for work that spans sessions and for learning from completed tasks:
+A harness that lets coding agents learn from the tasks they finish. It runs
+inside Codex and Claude Code as two skills:
 
-- **horizon** saves a bounded goal, verification results, and the next action.
-- **refine** proposes a small instruction or memory improvement from real task
-  evidence, applies authorized edits with undo, and records later outcomes.
+- **refine** is the learning loop. After a task, it reads the task evidence
+  (the request, what the agent did, and whether it passed), proposes the
+  smallest reusable change to the agent's instructions or memory, applies
+  authorized edits with undo, and records later outcomes for each lesson.
+- **horizon** saves a bounded goal, verification results, and the next action
+  for work that spans sessions.
+
+Refine's lessons are plain text, so any agent that reads instructions can use
+them, not only the one that wrote them.
+
+## Results
+
+In a pre-registered SWE-bench Pro study, Refine (in Claude Code) learned from
+30 practice tasks. Its notes were frozen and then given to a different agent:
+mini-swe-agent with DeepSeek V4 Flash, capped at 20 steps. On 44 held-out
+openlibrary tasks, run 3 times each:
+
+| | Without notes | With Refine's notes |
+| --- | --- | --- |
+| Passed runs | 77 of 132 (58%) | 103 of 132 (78%) |
+
+- Mean gain per task: +0.197, with a 95% interval of +0.11 to +0.28.
+- Sign-flip p = 0.0001.
+- Every run was re-graded on a pristine image with only its patch applied.
+- The gain held when runs flagged by the hidden-test audit were scored as
+  failures, or their tasks dropped.
+
+The result covers one repository, one model and a tight step cap. Claude Code
+with Sonnet and Haiku already passed 29/30 and 30/30 ansible practice tasks,
+so those studies stopped at the pre-registered gate with no room to measure a
+gain. [Full report](docs/evaluations/swepro-refine-openlibrary-mini20/report.md).
 
 The agents have separate skill instructions and state, backed by **one shared
 Python implementation**. This keeps tool-specific behavior accurate while fixes
@@ -112,7 +141,8 @@ Verification covers the chosen watched files and supplied criterion. External
 state needs a deliberate rerun. Review handles and approval flags record what the
 calling agent asserts; they are not identity verification or a security sandbox.
 Codex notes require explicit recall. These skills do not reproduce Prime Agent's
-persistent Python RLM or establish a measured productivity improvement.
+persistent Python RLM. Refine's measured gain is the single study under
+[Results](#results). Horizon has no measured improvement yet.
 
 The inspiration is Prime Intellect's trajectory-driven refinement of prompts,
 skills, subagents, and memory. [Prime Agent](https://www.primeintellect.ai/blog/prime-agent).
