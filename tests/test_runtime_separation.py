@@ -9,11 +9,10 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / '.claude/harness/bin'))
+sys.path.insert(0, str(ROOT / 'harness'))
 import goal
 import gate
 import paths
-import refine_log
 import tree_hash
 
 
@@ -46,13 +45,6 @@ def test_completion_refuses_changed_artifact(project):
     assert goal.load(state['slug'])['status'] == 'active'
 
 
-@pytest.mark.parametrize('relative', [
-    '.agents/skills/refine/SKILL.md', '.agents/skills/horizon/SKILL.md',
-    '.codex/config.toml', '.codex/harness/undo/0001.json',
-])
-def test_codex_harness_paths_are_protected(project, relative):
-    with pytest.raises(refine_log.ProtectedTarget):
-        refine_log._assert_allowed(project / relative)
 
 
 def test_runtime_state_is_separate(project, monkeypatch):
@@ -65,7 +57,7 @@ def test_runtime_state_is_separate(project, monkeypatch):
 
 
 @pytest.mark.parametrize('runtime,folder', [('codex', '.agents'), ('claude', '.claude')])
-@pytest.mark.parametrize('skill', ['horizon', 'refine'])
+@pytest.mark.parametrize('skill', ['horizon'])
 def test_skill_entrypoint_starts_in_fresh_process(project, runtime, folder, skill):
     entry = ROOT / folder / 'skills' / skill / 'scripts/harness.py'
     result = subprocess.run([sys.executable, str(entry), '--runtime', runtime, 'doctor'],
@@ -153,18 +145,6 @@ def test_changed_gate_definition_invalidates_pass(project):
     with pytest.raises(goal.GateNotPassed):
         goal.complete(state['slug'], output)
 
-def test_refinement_outcomes_are_recorded_without_changing_the_lesson(project):
-    entry = refine_log.apply_edit('M', [(project / 'lesson.md', 'Quote paths with spaces.')],
-                                  'Observed a quoting failure', 'The unquoted command failed.')
-    before = (project / 'lesson.md').read_text()
-    result = refine_log.record_outcome(entry['id'], 'helpful', 'task-2',
-                                      'The follow-up task used the lesson and the command succeeded.')
-    assert result['outcomes'][-1]['outcome'] == 'helpful'
-    assert result['outcomes'][-1]['task'] == 'task-2'
-    assert (project / 'lesson.md').read_text() == before
-    assert refine_log.count_recent_edits() == 1
-    refine_log.undo()
-    assert not (project / 'lesson.md').exists()
 
 
 def _cli(project, runtime, *args):
@@ -207,29 +187,10 @@ def test_cli_failures_are_recorded_and_budget_stops_work(project, runtime):
     assert _cli(project, runtime, 'check', slug, '--did', 'Another', '--next', 'More').returncode == 2
     assert _cli(project, runtime, 'complete', slug).returncode == 2
 
-def test_history_includes_recorded_outcomes(project):
-    entry = refine_log.apply_edit('M', [(project / 'lesson.md', 'Quote paths.')], 'reason', 'evidence')
-    refine_log.record_outcome(entry['id'], 'helpful', 'task-2', 'The command succeeded.')
-    result = _cli(project, 'claude', 'refine-history')
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)['entries'][0]['outcomes'][0]['outcome'] == 'helpful'
 
 
-def test_custom_codex_home_is_protected(project, monkeypatch):
-    home = project.parent / 'custom-codex-home'
-    monkeypatch.setenv('CODEX_HOME', str(home))
-    monkeypatch.setenv('CONTINUAL_HARNESS_RUNTIME', 'codex')
-    for relative in ('config.toml', 'harness/undo/0001.json', 'harness/bin/goal.py'):
-        with pytest.raises(refine_log.ProtectedTarget):
-            refine_log._assert_allowed(home / relative)
 
 
-def test_shared_source_case_alias_is_protected():
-    alias = ROOT / 'HARNESS' / 'goal.py'
-    if not alias.exists() or not alias.samefile(ROOT / 'harness/goal.py'):
-        pytest.skip('Filesystem is case-sensitive')
-    with pytest.raises(refine_log.ProtectedTarget):
-        refine_log._assert_allowed(alias)
 
 
 def test_fingerprint_refuses_a_fifo_without_blocking(project):

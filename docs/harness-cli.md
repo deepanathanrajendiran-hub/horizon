@@ -1,6 +1,6 @@
-# Shared harness CLI
+# Horizon CLI
 
-Both runtimes call the same Python implementation. Set `HARNESS` to an absolute
+Codex and Claude Code call the same Python implementation. Set `HARNESS` to an absolute
 skill entrypoint (or `harness/cli.py`), `PROJECT` to the working project, and
 `RUNTIME` to `codex` or `claude`. Python 3.10+ and a POSIX environment are required;
 there are no third-party runtime dependencies. Quote paths containing spaces.
@@ -10,8 +10,7 @@ python3 "$HARNESS" --runtime "$RUNTIME" --project "$PROJECT" doctor
 python3 "$HARNESS" --runtime "$RUNTIME" --project "$PROJECT" --help
 ```
 
-Global options precede the subcommand. `--scope project|global` selects the
-refinement ledger, not the goal location. Goals always belong to the project.
+Global options precede the subcommand. Goals always belong to the project.
 `doctor` prints resolved paths without creating files, including `gates`, the
 directory under which each goal keeps its request, requirements and gate. Automatic project discovery
 uses the nearest ancestor with a runtime marker (`.agents`/`.codex` or `.claude`),
@@ -391,80 +390,3 @@ After upgrading, rerun checks for active goals created by the old implementation
 Old checkpoints lack the current fingerprint/gate-definition contract and cannot
 be used directly to complete. Completed history is left intact. Runtime state is
 never silently migrated between Codex and Claude.
-
-## Refinement proposals
-
-`doctor` and `refine-count` return the correct `rho`, `G`, `K`, and `M` target paths
-for the chosen runtime and scope. Read current files before constructing a
-proposal. The CLI accepts a JSON file shaped like this (substitute actual absolute
-paths from `doctor`):
-
-```json
-{
-  "layer": "M",
-  "rationale": "The same path-quoting failure occurred in two tasks.",
-  "evidence": "Actual excerpts and task references showing both failures.",
-  "edits": [
-    {
-      "path": "/absolute/project/.codex/memory/path-quoting.md",
-      "kind": "text",
-      "content": "Quote shell paths that contain spaces.\n"
-    },
-    {
-      "path": "/absolute/project/.codex/memory/MEMORY.md",
-      "kind": "append_line",
-      "content": "- [Path quoting](path-quoting.md): shell paths containing spaces."
-    }
-  ]
-}
-```
-
-`text` replaces the whole target. `append_line` atomically appends one line;
-`replace_line` requires a `match` substring selecting exactly one line and a
-single-line `content` replacement. Prefer line operations for a shared memory
-index. All paths must be absolute. An empty or ambiguous match is an error.
-
-```bash
-python3 "$HARNESS" --runtime "$RUNTIME" --project "$PROJECT" refine-count
-python3 "$HARNESS" --runtime "$RUNTIME" --project "$PROJECT" refine-apply "$PROPOSAL_FILE" --approved
-python3 "$HARNESS" --runtime "$RUNTIME" --project "$PROJECT" refine-history
-python3 "$HARNESS" --runtime "$RUNTIME" --project "$PROJECT" refine-undo --entry "$ENTRY_ID"
-```
-
-Three applies are allowed per rolling 24 hours, per runtime and scope. All global
-edits for one runtime share a global ledger; project edits use that project's
-ledger. `--override-cap` requires specific authorization. Approval flags record
-the agent's assertion of authorization; they do not implement an approval UI.
-
-Undo checks for intervening target changes. `refine-undo --force --approved`
-discards those changes and requires explicit authorization. Protected targets
-include this harness and its skills, configuration, hooks, and bookkeeping.
-This protects routine refinement from rewriting its own controls, not against a
-host process with arbitrary filesystem access.
-
-Content tripwires apply at every layer to literal attempts to weaken evidence,
-approval, or edit limits, or to claim harness write authority. Skill and subagent
-edits also check for direct memory-write instructions. They can produce false
-positives; inspect a refusal instead of silently routing around it. Count/history
-inspection may initialize empty ledger directories but does not apply an edit.
-
-## Memory and outcomes
-
-Codex uses project `.codex/memory`, explicitly retrieved by `recall`. Claude uses
-its existing project-memory directory under `~/.claude/projects`. Both routes
-remain project-specific even under global refinement scope. `CODEX_HOME` controls
-Codex's global configuration and ledger; personal skills live in `~/.agents/skills`.
-
-`recall` reads the memory index. `recall --query TEXT --limit N` also returns
-matching Markdown notes (simple keyword ranking, up to 20 notes). It is not
-semantic search or automatic native Codex memory integration.
-
-```bash
-python3 "$HARNESS" --runtime "$RUNTIME" --project "$PROJECT" refine-outcome "$ENTRY_ID" \
-  --outcome helpful --task "$LATER_TASK_REFERENCE" --evidence-file "$OBSERVATION_FILE"
-```
-
-Outcomes are `helpful`, `ineffective`, or `harmful`. Record only observed later
-behavior; otherwise leave the entry unassessed. Observations appear in history,
-do not alter the lesson, and do not consume an applied-edit slot. The repository's
-`docs/evaluation.md` describes how to measure effects across tasks.

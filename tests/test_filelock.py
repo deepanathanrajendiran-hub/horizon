@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-BIN = Path(__file__).resolve().parents[1] / ".claude" / "harness" / "bin"
+BIN = Path(__file__).resolve().parents[1] / "harness"
 sys.path.insert(0, str(BIN))
 
 import filelock  # noqa: E402

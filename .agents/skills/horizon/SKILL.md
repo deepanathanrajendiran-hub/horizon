@@ -15,7 +15,6 @@ work. Quote both paths.
 
 ```bash
 python3 "$HARNESS" --runtime codex --project "$PROJECT" doctor
-python3 "$HARNESS" --runtime codex --project "$PROJECT" recall --query "relevant task terms"
 python3 "$HARNESS" --runtime codex --project "$PROJECT" status
 ```
 

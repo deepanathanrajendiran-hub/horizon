@@ -1,55 +1,35 @@
-# Continual Harness for Codex and Claude Code
+# Horizon: long-horizon goal tracking for Claude Code and Codex
 
-A harness that lets coding agents learn from the tasks they finish. It runs
-inside Codex and Claude Code as two skills:
+Horizon is a skill for work that must survive across turns or sessions, such as
+"keep working until the tests pass". It keeps the objective, evidence, budget and
+next action on disk, so a later session can pick up exactly where the last one
+stopped.
 
-- **refine** is the learning loop. After a task, it reads the task evidence
-  (the request, what the agent did, and whether it passed), proposes the
-  smallest reusable change to the agent's instructions or memory, applies
-  authorized edits with undo, and records later outcomes for each lesson.
-- **horizon** saves a bounded goal, verification results, and the next action
-  for work that spans sessions.
+- **Bounded goal.** Each goal saves the request verbatim, a numbered requirement
+  list, and a turn and time budget.
+- **Verification gate.** A command (such as the test suite) or a review criterion
+  decides whether the work is done. A stale pass cannot complete a goal after an
+  artifact or the gate changes.
+- **Independent review.** When a goal asks for review, a fresh reviewer answers each
+  requirement line. A pass the reviewer's own reply doesn't support is refused.
+- **Checkpoints.** Every increment records what was done, the gate result and the
+  next action.
+- **State mode (experimental).** Instead of carrying the conversation forward, each
+  increment goes to a fresh worker that gets only a saved state packet.
 
-Refine's lessons are plain text, so any agent that reads instructions can use
-them, not only the one that wrote them.
+**Status:** Horizon has no measured improvement yet. State mode is experimental.
 
-## Results
-
-In a pre-registered SWE-bench Pro study, Refine (in Claude Code) learned from
-30 practice tasks. Its notes were frozen and then given to a different agent:
-mini-swe-agent with DeepSeek V4 Flash, capped at 20 steps. On 44 held-out
-openlibrary tasks, run 3 times each:
-
-| | Without notes | With Refine's notes |
-| --- | --- | --- |
-| Passed runs | 77 of 132 (58%) | 103 of 132 (78%) |
-
-- Mean gain per task: +0.197, with a 95% interval of +0.11 to +0.28.
-- Sign-flip p = 0.0001.
-- Every run was re-graded on a pristine image with only its patch applied.
-- The gain held when runs flagged by the hidden-test audit were scored as
-  failures, or their tasks dropped.
-
-The result covers one repository, one model and a tight step cap. Claude Code
-with Sonnet and Haiku already passed 29/30 and 30/30 ansible practice tasks,
-so those studies stopped at the pre-registered gate with no room to measure a
-gain. [Full report](docs/evaluations/swepro-refine-openlibrary-mini20/report.md).
-
-The agents have separate skill instructions and state, backed by **one shared
-Python implementation**. This keeps tool-specific behavior accurate while fixes
-to verification, budgets, and rollback reach both agents.
+Claude Code and Codex have separate skill instructions and state, backed by one
+shared Python implementation.
 
 | | Codex | Claude Code |
 | --- | --- | --- |
-| Skills in this checkout | [.agents/skills](.agents/skills) | [.claude/skills](.claude/skills) |
-| Invocation | `$horizon`, `$refine` | `/horizon`, `/refine` |
+| Skill in this checkout | [.agents/skills/horizon](.agents/skills/horizon) | [.claude/skills/horizon](.claude/skills/horizon) |
+| Invocation | `$horizon` | `/horizon` |
 | Project state | `.codex/harness` | `.claude/harness` |
-| Project instructions | `AGENTS.md` | `CLAUDE.md` |
-| Custom agents | `.codex/agents/*.toml` | `.claude/agents/*.md` |
-| Memory | `.codex/memory`, read with `recall` | Existing Claude project-memory route |
 
-The shared [CLI](harness/cli.py) uses only Python's standard library; run it with
-Python 3.10+ on a POSIX system. No separate model API or service is required.
+The [CLI](harness/cli.py) uses only Python's standard library. It needs Python 3.10+
+on a POSIX system. No separate model API or service is required.
 
 ## Use it
 
@@ -61,11 +41,8 @@ Open this project in either agent. Example requests:
 > Use Horizon state mode for this parser fix. Give each fresh worker one saved
 > increment, preserve its real host handle, and require independent review.
 
-> Refine what we learned from this task. Propose the smallest reusable change
-> and show me the evidence and diff.
-
-The skill locates its own helper and selects the correct runtime. To inspect
-the setup yourself, run from this checkout:
+The skill finds its own helper and selects the correct runtime. To check the setup
+yourself, run from this checkout:
 
 ```bash
 python3 .agents/skills/horizon/scripts/harness.py --runtime codex doctor
@@ -73,81 +50,44 @@ python3 .claude/skills/horizon/scripts/harness.py --runtime claude doctor
 ```
 
 For another project, pass `--project "/absolute/project/path"` before the
-subcommand. The skill's location determines the implementation, while the
-working project determines state. See the [CLI reference](docs/harness-cli.md)
-for conversation and state-mode lifecycle commands, packet/update schemas,
-proposal JSON, recall, and undo. State mode is explicit; goals created without
-`--execution state` keep the existing conversation behavior.
+subcommand. The skill's location decides the implementation; the working project
+decides where state lives. The [CLI reference](docs/harness-cli.md) covers the goal
+lifecycle, requirements and review, and the state-mode commands and schemas.
+State mode is explicit: goals created without `--execution state` work in the
+conversation.
 
-## Optional personal installation
+## Install for all your projects
 
-Keep the whole source checkout at a stable location. Skill entrypoints and
-references are relative symlinks into its shared implementation; copying just a
-skill folder is insufficient. To use these versions across projects, link the
-appropriate skill folders into the agent's personal skill directory:
+Keep the whole checkout at a stable location. The skill's entrypoint and reference
+are relative symlinks into the shared implementation, so copying only the skill
+folder won't work. Link the skill into your agent's personal skill directory:
 
 ```bash
 REPO="/absolute/path/to/this/checkout"
 mkdir -p "$HOME/.agents/skills" "$HOME/.claude/skills"
-ln -s "$REPO/.agents/skills/horizon" "$HOME/.agents/skills/horizon"
-ln -s "$REPO/.agents/skills/refine" "$HOME/.agents/skills/refine"
-ln -s "$REPO/.claude/skills/horizon" "$HOME/.claude/skills/horizon"
-ln -s "$REPO/.claude/skills/refine" "$HOME/.claude/skills/refine"
+ln -s "$REPO/.agents/skills/horizon" "$HOME/.agents/skills/horizon"   # Codex
+ln -s "$REPO/.claude/skills/horizon" "$HOME/.claude/skills/horizon"   # Claude Code
 ```
 
-Run only the pair for the agent you want. If those names already exist, inspect
-the existing installation first; these commands do not intentionally replace it.
-Avoid maintaining conflicting personal and project versions of the same skill.
-Codex supports skill symlinks and discovers `.agents/skills`; Claude uses
-`.claude/skills` and gives personal skills precedence over matching project
-skills. [Codex skills](https://learn.chatgpt.com/docs/build-skills),
+Run only the line for the agent you use. If `horizon` already exists there, inspect
+it first; these commands don't replace it. Claude Code gives personal skills
+precedence over project skills with the same name, so avoid keeping two different
+versions. [Codex skills](https://learn.chatgpt.com/docs/build-skills),
 [Claude Code skills](https://code.claude.com/docs/en/skills).
-
-`CODEX_HOME` changes Codex's global configuration and refinement ledger path;
-the personal skill directory remains `~/.agents/skills`. Existing imports through
-`.claude/harness/bin` remain compatible links to the shared modules. Active goals
-from the old implementation must rerun verification before completing.
-
-## What changed
-
-- Skill entrypoints work from unrelated projects and paths containing spaces.
-- Completion checks current file content and the configured gate. A stale pass
-  cannot complete after an artifact or gate changes.
-- Command-plus-review goals require a recorded passing review of the same
-  checkpoint; command success alone leaves the goal active.
-- Mutable goal and undo records do not themselves trigger another gate run.
-- Refinement protects both runtimes' control files and the shared implementation.
-- History shows later helpful, ineffective, or harmful observations for each
-  lesson, while preserving its undo record.
-- Runtime dispatch stays in concise skill entrypoints; shared state protocol,
-  schemas, recovery rules, and limits live in the linked CLI reference.
-- Horizon v2 goals save the request verbatim with a quoted, numbered requirement
-  list (`start --gate-path`), and the reviewer answers each line.
-- `review` refuses a pass that the reviewer's own reply does not support: a FAIL
-  or UNVERIFIED line, a FAIL headline, a missing requirement line, or no echo
-  of the reviewed checkpoint.
-- `check` returns a neutral reviewer brief filled from the goal's files. `status`
-  lists goals as short rows, and `status SLUG` prints the goal's deadline.
 
 ## Practical boundaries
 
-Checkpoints make resumption possible; an agent still needs to read and continue
-the goal. They do not wake an app. Scheduled continuation requires an explicit
-user request and the host's scheduling feature. Claude `/loop` belongs to a live
-session; Desktop scheduling and cloud routines have different environments.
-[Claude scheduling](https://code.claude.com/docs/en/scheduled-tasks).
-
-Verification covers the chosen watched files and supplied criterion. External
-state needs a deliberate rerun. Review handles and approval flags record what the
-calling agent asserts; they are not identity verification or a security sandbox.
-Codex notes require explicit recall. These skills do not reproduce Prime Agent's
-persistent Python RLM. Refine's measured gain is the single study under
-[Results](#results). Horizon has no measured improvement yet.
-
-The inspiration is Prime Intellect's trajectory-driven refinement of prompts,
-skills, subagents, and memory. [Prime Agent](https://www.primeintellect.ai/blog/prime-agent).
-The [evaluation protocol](docs/evaluation.md) separates correctness checks from
-experiments measuring task success and cost.
+- **Checkpoints make resuming possible; they don't wake anything up.** An agent
+  still has to read the goal and continue it. Scheduled continuation needs an
+  explicit request and the host's scheduling feature.
+  [Claude scheduling](https://code.claude.com/docs/en/scheduled-tasks).
+- **Verification covers only the watched files and the given criterion.** External
+  state needs a deliberate rerun (`check --force`).
+- **Review handles and approval flags record what the calling agent asserts.** They
+  are not identity verification or a security sandbox.
+- **State mode can't tell whether a worker is still running.** If a session is
+  killed while a worker holds an attempt, the next session must establish that the
+  worker stopped before running `step-recover`.
 
 ## Development
 
@@ -155,13 +95,17 @@ experiments measuring task success and cost.
 python3 -m pytest -q
 ```
 
-Tests require pytest. Runtime execution has no third-party dependencies. Tests
-cover state, locks/concurrency, rollback, command execution, content fingerprints,
-both runtime entrypoints, and real CLI workflows. The old pasted-Python tests
-were replaced with process-level coverage of their behavioral invariants.
+Tests need pytest; runtime execution has no third-party dependencies. They cover
+goal state, locks and concurrency, content fingerprints, gates, review parsing,
+state-mode steps, both runtime entrypoints, and real CLI workflows.
 
 - [CLI and schemas](docs/harness-cli.md)
-- [Verification results](docs/runtime-separation-results.md)
-- [Evaluation protocol](docs/evaluation.md)
-- [Implementation plan](docs/superpowers/plans/2026-09-04-runtime-separation.md)
-- [Historical design and findings](docs/history-before-runtime-split.md)
+- [Runtime separation results](docs/runtime-separation-results.md)
+- Design history: [specs](docs/superpowers/specs) and [plans](docs/superpowers/plans)
+
+## Provenance
+
+Horizon was split, with its filtered commit history, from
+[continual-harness](https://github.com/deepanathanrajendiran-hub/continual-harness)
+(archived), which held this skill and a companion skill together. That repository
+keeps the evaluation records.

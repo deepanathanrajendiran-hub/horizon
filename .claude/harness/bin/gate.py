@@ -1,1 +1,0 @@
-../../../harness/gate.py

@@ -1,15 +1,9 @@
-node_modules/
 .DS_Store
 .superpowers/
 __pycache__/
 .pytest_cache/
 
-# Runtime harness state: contains verbatim user quotes, absolute home
-# paths, full snapshots of edited config files, and a shell command that
-# executes on goal resume. Never commit.
-.claude/harness/goals/
-.claude/harness/undo/
-.codex/harness/goals/
-.codex/harness/undo/
-.codex/harness/CHANGELOG.md
-.codex/memory/
+# Runtime goal state: verbatim user requests, absolute home paths, and gate
+# commands that run on resume. Never commit.
+.claude/harness/
+.codex/harness/

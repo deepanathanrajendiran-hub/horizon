@@ -2,7 +2,6 @@
 import argparse
 import json
 import os
-import re
 import sys
 from pathlib import Path
 
@@ -12,7 +11,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gate
 import goal
 import paths
-import refine_log
 import tree_hash
 import filelock
 import task_state
@@ -24,8 +22,6 @@ def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--runtime", choices=("codex", "claude"), required=True)
     p.add_argument("--project", type=Path, help="Working project; defaults to the current directory")
-    p.add_argument("--scope", choices=("project", "global"), default="project",
-                   help="Refinement ledger scope; goal state is always project-local")
     commands = p.add_subparsers(dest="action", required=True)
     commands.add_parser("doctor", help="Check installation and report runtime paths without writing")
     status = commands.add_parser("status", help="List goals or read one goal before doing work")
@@ -86,24 +82,6 @@ def parser() -> argparse.ArgumentParser:
     recover.add_argument("--reason", required=True)
     recover.add_argument("--worker-state", choices=("stopped", "not-started"), required=True)
     recover.add_argument("--evidence-file", type=Path, required=True)
-    commands.add_parser("refine-count", help="Read the rolling edit count before proposing")
-    commands.add_parser("refine-history", help="Show refinements and later outcome observations")
-    apply = commands.add_parser("refine-apply", help="Apply exactly the approved JSON proposal")
-    apply.add_argument("proposal", type=Path)
-    apply.add_argument("--approved", action="store_true", required=True)
-    apply.add_argument("--override-cap", action="store_true")
-    undo = commands.add_parser("refine-undo", help="Undo the latest or specified refinement")
-    undo.add_argument("--entry")
-    undo.add_argument("--force", action="store_true")
-    undo.add_argument("--approved", action="store_true")
-    outcome = commands.add_parser("refine-outcome", help="Record an observed later result; does not edit a lesson")
-    outcome.add_argument("entry")
-    outcome.add_argument("--outcome", choices=("helpful", "ineffective", "harmful"), required=True)
-    outcome.add_argument("--task", required=True)
-    outcome.add_argument("--evidence-file", type=Path, required=True)
-    recall = commands.add_parser("recall", help="Read the memory index or retrieve relevant project notes")
-    recall.add_argument("--query", default="")
-    recall.add_argument("--limit", type=int, default=5)
     return p
 
 
@@ -126,59 +104,10 @@ def goal_rows(exclude: str | None = None) -> list[dict]:
     return rows
 
 
-def entry_summary(entry: dict) -> dict:
-    result = {key: entry.get(key) for key in
-              ("id", "at", "layer", "rationale", "reverted", "outcomes")}
-    result["targets"] = [target["path"] if isinstance(target, dict) else target
-                         for target in entry["targets"]]
-    return result
 
 
-def recall(query: str, limit: int) -> dict:
-    if limit < 1 or limit > 20:
-        raise ValueError("Recall limit must be between 1 and 20")
-    directory = paths.memory_dir()
-    index = directory / "MEMORY.md"
-    report = {"directory": str(directory),
-              "index": index.read_text()[:6000] if index.exists() else "",
-              "notes": []}
-    terms = re.findall(r"\w+", query.lower())
-    if terms:
-        ranked = []
-        for note in sorted(directory.glob("*.md")):
-            if note == index:
-                continue
-            content = note.read_text()
-            score = sum(term in (note.stem + " " + content).lower() for term in terms)
-            if score:
-                ranked.append((score, note, content))
-        ranked.sort(key=lambda item: (-item[0], str(item[1])))
-        report["notes"] = [{"path": str(note), "text": content[:2000]}
-                           for _, note, content in ranked[:limit]]
-    return report
 
 
-def apply_proposal(args) -> dict:
-    proposal = json.loads(args.proposal.read_text())
-    edits = []
-    for item in proposal["edits"]:
-        kind = item.get("kind", "text")
-        if kind == "text":
-            content = item["content"]
-        elif kind == "append_line":
-            content = refine_log.AppendLine(item["content"])
-        elif kind == "replace_line":
-            content = refine_log.ReplaceLine(item["match"], item["content"])
-        else:
-            raise ValueError(f"Unknown edit kind: {kind}")
-        target = Path(item["path"]).expanduser()
-        if not target.is_absolute():
-            raise ValueError("Proposal target paths must be absolute")
-        edits.append((target, content))
-    entry = refine_log.apply_edit(
-        proposal["layer"], edits, proposal["rationale"], proposal["evidence"],
-        override_cap=args.override_cap, scope=args.scope)
-    return entry_summary(entry)
 
 
 def check(args) -> tuple[dict, int]:
@@ -293,8 +222,6 @@ def dispatch(args) -> tuple[dict, int]:
             "implementation": str(Path(__file__).resolve().parent),
             "state": str(paths.harness_root()),
             "gates": str(paths.harness_root() / "gates"),
-            "targets": paths.targets(args.scope),
-            "memory_mode": "explicit recall" if paths.runtime() == "codex" else "Claude project memory",
             "state_supported": filelock.state_supported(),
             "worker_availability": "Determined by the host; the Python CLI does not dispatch or inspect workers.",
         }, 0
@@ -330,24 +257,6 @@ def dispatch(args) -> tuple[dict, int]:
     if args.action == "reopen":
         return status(goal.reopen(args.slug, args.reason, extra_turns=args.extra_turns,
                                   extra_minutes=args.extra_minutes)), 0
-    if args.action == "refine-count":
-        return {"used": refine_log.count_recent_edits(scope=args.scope), "cap": refine_log.CAP,
-                "window_hours": refine_log.CAP_WINDOW_HOURS, "scope": args.scope,
-                "targets": paths.targets(args.scope)}, 0
-    if args.action == "refine-history":
-        return {"entries": [entry_summary(e) for e in refine_log.list_entries(scope=args.scope)]}, 0
-    if args.action == "refine-apply":
-        return apply_proposal(args), 0
-    if args.action == "refine-undo":
-        if args.force and not args.approved:
-            raise ValueError("Forced undo requires explicit approval to discard later changes")
-        return entry_summary(refine_log.undo(force=args.force, entry_id=args.entry, scope=args.scope)), 0
-    if args.action == "refine-outcome":
-        entry = refine_log.record_outcome(args.entry, args.outcome, args.task,
-                                          args.evidence_file.read_text(), scope=args.scope)
-        return entry_summary(entry), 0
-    if args.action == "recall":
-        return recall(args.query, args.limit), 0
     raise ValueError(f"Unknown action: {args.action}")
 
 

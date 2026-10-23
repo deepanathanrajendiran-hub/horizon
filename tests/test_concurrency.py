@@ -15,7 +15,7 @@ from pathlib import Path
 import time
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-BIN = REPO_ROOT / ".claude" / "harness" / "bin"
+BIN = REPO_ROOT / "harness"
 
 N = 8
 
@@ -27,8 +27,6 @@ def _run_workers(body: str, state_dir: Path, n: int = N):
         sys.path.insert(0, {str(BIN)!r})
         import paths
         paths.goals_dir = lambda: {str(state_dir)!r} and __import__("pathlib").Path({str(state_dir)!r})
-        paths.undo_dir = lambda: __import__("pathlib").Path({str(state_dir)!r})
-        paths.changelog = lambda: __import__("pathlib").Path({str(state_dir / "CHANGELOG.md")!r})
         WORKER = int(sys.argv[1])
         {textwrap.indent(textwrap.dedent(body), "        ").strip()}
     """)
@@ -57,34 +55,6 @@ def test_concurrent_checkpoints_do_not_lose_turns(tmp_path, monkeypatch):
         f"lost checkpoints: {len(final['checkpoints'])} recorded of {N}")
 
 
-def test_concurrent_apply_edits_all_get_a_snapshot(tmp_path):
-    """A colliding entry id overwrites another proposal's snapshot, which
-    silently destroys the ability to undo it."""
-    state_dir = tmp_path / "undo"
-    state_dir.mkdir()
-    targets = tmp_path / "targets"
-    targets.mkdir()
-
-    # override_cap: G2 would otherwise refuse all but the first three, which
-    # is the correct behaviour and the subject of its own test. What is under
-    # test here is that every edit that DOES apply keeps its own snapshot.
-    _run_workers(f"""
-        import refine_log
-        refine_log.apply_edit("M", [({str(targets)!r} + f"/w{{WORKER}}.md", f"content {{WORKER}}")],
-                              f"rationale {{WORKER}}", "evidence", override_cap=True)
-    """, state_dir)
-
-    entries = [json.loads(p.read_text()) for p in state_dir.glob("[0-9]*.json")]
-    assert len(entries) == N, f"{len(entries)} entries survived of {N} proposals"
-
-    snapshotted = {Path(t["path"]).name for e in entries for t in e["targets"]}
-    written = {p.name for p in targets.glob("*.md")}
-    assert written == snapshotted, (
-        f"targets written with no undo snapshot: {sorted(written - snapshotted)}"
-    )
-
-    ids = [e["id"] for e in entries]
-    assert len(ids) == len(set(ids)), f"colliding entry ids: {sorted(ids)}"
 
 
 def test_concurrent_creates_do_not_collide_on_slugs(tmp_path):

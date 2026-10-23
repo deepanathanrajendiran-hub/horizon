@@ -26,12 +26,10 @@ def client(tmp_path, request):
     env = dict(os.environ, HOME=str(home), CODEX_HOME=str(home / ".codex"),
                PYTHONDONTWRITEBYTECODE="1")
 
-    def run(*args, skill="horizon", cwd=None, scope="project"):
-        executable = entry if skill == "horizon" else entry.parent.parent.parent / "refine/scripts/harness.py"
+    def run(*args, cwd=None):
         result = subprocess.run(
-            [sys.executable, str(executable), "--runtime", runtime,
-             "--scope", scope, *args], cwd=cwd or project, env=env,
-            capture_output=True, text=True, timeout=10)
+            [sys.executable, str(entry), "--runtime", runtime, *args],
+            cwd=cwd or project, env=env, capture_output=True, text=True, timeout=10)
         report = json.loads(result.stdout or result.stderr)
         return result.returncode, report
     return project, runtime, run
@@ -147,51 +145,16 @@ def test_force_reruns_gate_with_unchanged_local_inputs(client):
     assert counter.read_text() == "xx"
 
 
-def test_refinement_apply_recall_observe_and_undo(client):
-    project, _, run = client
-    _, doctor = run("doctor", skill="refine")
-    memory = Path(doctor["targets"]["M"])
-    note = memory / "quoting.md"
-    index = memory / "MEMORY.md"
-    proposal = project.parent / "proposal.json"
-    proposal.write_text(json.dumps({
-        "layer": "M", "rationale": "Repeated shell path failure",
-        "evidence": "Two task commands failed because a path with spaces was unquoted.",
-        "edits": [{"path": str(note), "content": "Quote shell paths that contain spaces.\n"},
-                  {"path": str(index), "kind": "append_line",
-                   "content": "- [Path quoting](quoting.md)"}]}))
-    code, applied = run("refine-apply", str(proposal), "--approved", skill="refine")
-    assert code == 0, applied
-    assert run("refine-count", skill="refine")[1]["used"] == 1
-    recalled = run("recall", "--query", "quoting shell", skill="refine")[1]
-    assert recalled["notes"][0]["path"] == str(note)
-    assert "[Path quoting]" in recalled["index"]
-    evidence = project.parent / "observation.txt"
-    evidence.write_text("Task two used the stored quoting lesson and its command succeeded.")
-    code, observed = run("refine-outcome", applied["id"], "--outcome", "helpful",
-                         "--task", "task-two", "--evidence-file", str(evidence), skill="refine")
-    assert code == 0, observed
-    history = run("refine-history", skill="refine")[1]["entries"]
-    assert history[0]["outcomes"][0]["task"] == "task-two"
-    assert run("refine-count", skill="refine")[1]["used"] == 1
-    assert run("refine-undo", "--entry", applied["id"], skill="refine")[0] == 0
-    assert not note.exists()
-    assert not index.exists()
 
 
-def test_nested_projects_keep_runtime_and_global_routes(client):
+def test_nested_directories_resolve_to_the_project(client):
     project, runtime, run = client
     nested = project / "src/deep"
     nested.mkdir(parents=True)
     code, doctor = run("doctor", cwd=nested)
     assert code == 0
     assert doctor["project"] == str(project)
-    _, global_doctor = run("doctor", cwd=nested, scope="global")
-    assert doctor["targets"]["M"] == global_doctor["targets"]["M"]
-    assert global_doctor["targets"]["rho"] != doctor["targets"]["rho"]
-    if runtime == "codex":
-        assert Path(global_doctor["targets"]["rho"]).parent.name == ".codex"
-        assert Path(global_doctor["targets"]["G"]).parent.name == ".agents"
+    assert doctor["runtime"] == runtime
 
 
 def _gate_dir(run, project, runtime, name="ready"):

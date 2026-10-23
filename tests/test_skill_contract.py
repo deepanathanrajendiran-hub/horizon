@@ -16,7 +16,7 @@ import reviewing
 
 
 @pytest.mark.parametrize("runtime,folder", [("codex", ".agents"), ("claude", ".claude")])
-@pytest.mark.parametrize("name", ["horizon", "refine"])
+@pytest.mark.parametrize("name", ["horizon"])
 def test_skill_has_resolvable_entrypoint_and_references(runtime, folder, name):
     skill = ROOT / folder / "skills" / name / "SKILL.md"
     text = skill.read_text()
@@ -31,7 +31,7 @@ def test_skill_has_resolvable_entrypoint_and_references(runtime, folder, name):
 
 
 @pytest.mark.parametrize("runtime,folder", [("codex", ".agents"), ("claude", ".claude")])
-@pytest.mark.parametrize("name", ["horizon", "refine"])
+@pytest.mark.parametrize("name", ["horizon"])
 def test_documented_commands_parse_with_the_real_cli(runtime, folder, name):
     skill = ROOT / folder / "skills" / name / "SKILL.md"
     sources = [skill]

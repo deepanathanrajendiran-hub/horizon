@@ -1,1 +1,0 @@
-../../../harness/paths.py

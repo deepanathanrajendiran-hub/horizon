@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-BIN = Path(__file__).resolve().parents[1] / ".claude" / "harness" / "bin"
+BIN = Path(__file__).resolve().parents[1] / "harness"
 sys.path.insert(0, str(BIN))
 
 import goal  # noqa: E402
@@ -758,7 +758,7 @@ def test_state_summary_and_idle_guard():
         goal.require_idle(state)
 
 
-def test_legacy_bin_import_can_create_and_load_state_goal(tmp_path):
+def test_direct_module_import_can_create_and_load_state_goal(tmp_path):
     project = tmp_path / "unrelated-project"
     project.mkdir()
     script = (

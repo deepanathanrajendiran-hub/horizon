@@ -1,6 +1,6 @@
 """A small advisory file lock for read-modify-write on harness state.
 
-`goal.checkpoint` and `refine_log.apply_edit` both read a file, change it,
+`goal.checkpoint` and the state-mode step commands read a file, change it,
 and write it back. Without a lock those are check-then-write races, and
 they lose data rather than erroring: two terminals in one project, or a
 `/loop` firing beside a live session, silently drop checkpoints and mint
