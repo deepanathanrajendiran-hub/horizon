@@ -128,10 +128,19 @@ def test_review_refuses_changed_snapshot(project):
         goal.record_review(state['slug'], 'pass', f"Reviewed checkpoint: {digest[:12]}. {REVIEW}", 'fresh-judge-1', digest)
 
 
-def test_old_review_does_not_cover_another_turn(project):
+def test_review_covers_a_later_turn_on_the_same_tree(project):
     state, digest = _review_goal(project)
     goal.record_review(state['slug'], 'pass', f"Reviewed checkpoint: {digest[:12]}. {REVIEW}", 'fresh-judge-1', digest)
     goal.checkpoint(state['slug'], 'new attempt', 'review', digest, 'pass', '')
+    assert goal.complete(state['slug'], '')['status'] == 'complete'
+
+
+def test_old_review_does_not_cover_a_changed_tree(project):
+    state, digest = _review_goal(project)
+    goal.record_review(state['slug'], 'pass', f"Reviewed checkpoint: {digest[:12]}. {REVIEW}", 'fresh-judge-1', digest)
+    (project / 'changed.txt').write_text('new work')
+    result, output, new_digest = gate.run_gate_at(goal.load(state['slug']))
+    goal.checkpoint(state['slug'], 'new attempt', 'review', new_digest, result, output)
     with pytest.raises(goal.GateNotPassed):
         goal.complete(state['slug'], '')
 

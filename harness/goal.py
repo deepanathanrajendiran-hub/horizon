@@ -21,6 +21,7 @@ import reviewing
 from pathlib import Path
 import evidence
 import gate
+import evidence as evidence_rules  # _apply_review has a parameter named evidence
 
 MAX_GATE_OUTPUT = 4000
 
@@ -610,16 +611,22 @@ def _apply_review(state: dict, observed_hash: str, *, result: str,
     )
     if not criterion:
         raise GateNotPassed("This goal has no configured review criterion")
-    last = state["checkpoints"][-1] if state["checkpoints"] else None
-    if not last or last["tree_hash"] != digest or last.get("gate_spec") != state["gate"]:
-        raise GateNotPassed("The review does not match the current checkpoint")
-    if state["gate"]["kind"] == "command" and last["gate"] != "pass":
-        raise GateNotPassed("The command gate must pass before review")
     if (not isinstance(digest, str)
             or not re.fullmatch(r"[0-9a-f]{64}", digest)):
         raise GateNotPassed("No verified snapshot; run the gate again.")
     if observed_hash != digest:
         raise GateNotPassed("Artifacts changed after verification; run the gate again.")
+    if state["gate"]["kind"] == "command":
+        record = evidence_rules.passing_record(state, digest)
+        if record is None:
+            raise GateNotPassed("The command gate must pass on this snapshot before review")
+        turn = record.get("turn", state["used"]["turns"])
+        last = None
+    else:
+        last = state["checkpoints"][-1] if state["checkpoints"] else None
+        if not last or last["tree_hash"] != digest or last.get("gate_spec") != state["gate"]:
+            raise GateNotPassed("The review does not match the current checkpoint")
+        turn = last["turn"]
     evidence = evidence.strip()
     # A fail is kept whatever its shape: an unrecorded FAIL is the pilot's
     # failure, and a fail on the wrong snapshot still only blocks completion.
@@ -640,7 +647,7 @@ def _apply_review(state: dict, observed_hash: str, *, result: str,
                 "--result fail, or fix and review again."
             )
     state.setdefault("reviews", []).append({
-        "turn": last["turn"], "tree_hash": digest, "at": _now(),
+        "turn": turn, "tree_hash": digest, "at": _now(),
         "judge": judge.strip(), "criterion": criterion,
         "result": result, "evidence": _bounded_review(evidence),
     })
@@ -652,9 +659,7 @@ def _apply_review(state: dict, observed_hash: str, *, result: str,
         })
 
 
-def _apply_completion(state: dict, observed_hash: str, gate_output: str) -> None:
-    if state["status"] != "active":
-        raise GoalClosed(f"cannot complete: goal status is {state['status']!r}")
+def _apply_coverage_completion(state: dict, observed_hash: str, gate_output: str) -> None:
     last = state["checkpoints"][-1] if state["checkpoints"] else None
     if last is None or last["gate"] != "pass":
         raise GateNotPassed(
@@ -700,6 +705,35 @@ def _apply_completion(state: dict, observed_hash: str, gate_output: str) -> None
     state["gate_evidence"] = _bounded(evidence)
     state["completed_at"] = _now()
 
+def _apply_completion(state: dict, observed_hash: str, gate_output: str) -> None:
+    if state["status"] != "active":
+        raise GoalClosed(f"cannot complete: goal status is {state['status']!r}")
+    if state["gate"]["kind"] == "coverage":
+        return _apply_coverage_completion(state, observed_hash, gate_output)
+    record = evidence.passing_record(state, observed_hash)
+    if record is None:
+        raise GateNotPassed(
+            "No passing gate result covers the current files; run close (or observe) first.")
+    changed = evidence.changed_baseline_tests(state)
+    if changed:
+        raise GateNotPassed(
+            "Baseline test files changed: " + ", ".join(changed)
+            + ". Completion needs a reviewer's or the user's approval: approve-test-change.")
+    reasons = evidence.review_reasons(state, _requirements(state))
+    if reasons:
+        criterion = state["gate"]["review_criterion"]
+        reviews = [r for r in state.get("reviews", [])
+                   if r["tree_hash"] == observed_hash and r["criterion"] == criterion]
+        if not reviews or reviews[-1]["result"] != "pass":
+            raise GateNotPassed(
+                "An independent review is required (" + "; ".join(reasons)
+                + ") and none has passed for this snapshot.")
+    text = (record.get("gate_output") or "").strip() or (
+        f"{state['gate']['value']} -> exit 0 (gate produced no output)")
+    state["status"] = "complete"
+    state["gate_evidence"] = _bounded(text)
+    state["completed_at"] = _now()
+
 def record_review(slug: str, result: str, evidence: str, judge: str,
                   digest: str) -> dict:
     """Record the fresh reviewer's verdict for one exact checkpoint."""
@@ -710,6 +744,18 @@ def record_review(slug: str, result: str, evidence: str, judge: str,
             judge=judge, digest=digest,
         ),
     )
+
+def _approve_test_change_locked(slug: str, path: str, reason: str) -> dict:
+    state = load(slug)
+    if state["status"] != "active":
+        raise GoalClosed(f"Goal is {state['status']}")
+    if not isinstance(reason, str) or len(reason.strip()) < 10:
+        raise EvidenceInsufficient("Say who approved the test change and why")
+    target = Path(state["cwd"]) / path
+    digest = evidence._sha(target) if target.is_file() else "deleted"
+    state.setdefault("approvals", []).append(
+        {"path": path, "sha256": digest, "reason": reason.strip(), "at": _now()})
+    return _persist_mutation_locked(state)
 
 
 
@@ -810,6 +856,8 @@ complete = _with_lock(_complete_locked)
 abandon = _with_lock(_abandon_locked)
 reopen = _with_lock(_reopen_locked)
 add_subagent = _with_lock(_add_subagent_locked)
+
+approve_test_change = _with_lock(_approve_test_change_locked)
 
 
 # Completion performs its fingerprint before acquiring the goal lock.

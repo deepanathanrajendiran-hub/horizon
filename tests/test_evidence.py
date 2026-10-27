@@ -96,3 +96,89 @@ def test_observe_rejects_unknown_role():
     state = _make()
     with pytest.raises(ValueError):
         goal.observe(state["slug"], "whenever")
+
+
+import tree_hash  # noqa: E402
+
+
+def _digest(state):
+    return tree_hash.compute(state["cwd"], state.get("watch_paths"))
+
+
+def test_pass_from_earlier_observation_completes_unchanged_tree():
+    state = _make()
+    goal.observe(state["slug"], "baseline")
+    goal.checkpoint(state["slug"], "nothing", "stop", _digest(state), "skipped")
+    done = goal.complete(state["slug"], "")
+    assert done["status"] == "complete"
+
+
+def test_skipped_checkpoint_does_not_block_completion():
+    state = _make()
+    d = _digest(state)
+    goal.checkpoint(state["slug"], "work", "next", d, "pass")
+    goal.checkpoint(state["slug"], "again", "next", d, "skipped")
+    assert goal.complete(state["slug"], "")["status"] == "complete"
+
+
+def test_changed_tree_invalidates_pass():
+    state = _make()
+    goal.observe(state["slug"], "baseline")
+    (_project() / "new.py").write_text("x = 2\n")
+    with pytest.raises(goal.GateNotPassed):
+        goal.complete(state["slug"], "")
+
+
+def test_changed_baseline_test_blocks_until_approved():
+    p = _project()
+    (p / "test_a.py").write_text("one\n")
+    state = _make()
+    goal.observe(state["slug"], "baseline")
+    (p / "test_a.py").write_text("two\n")
+    goal.observe(state["slug"], "final")
+    with pytest.raises(goal.GateNotPassed, match="test_a.py"):
+        goal.complete(state["slug"], "")
+    goal.approve_test_change(state["slug"], "test_a.py", "Reviewer agreed the old assertion was wrong")
+    assert goal.complete(state["slug"], "")["status"] == "complete"
+
+
+def test_strong_gate_skips_review_weak_gate_requires_it():
+    p = _project()
+    (p / "test_a.py").write_text("def test(): pass\n")
+    strong = _make(review_criterion="Every requirement holds")
+    goal.observe(strong["slug"], "baseline")
+    assert evidence.review_reasons(goal.load(strong["slug"]), None) == []
+    assert goal.complete(strong["slug"], "")["status"] == "complete"
+
+    (p / "test_new.py").write_text("def test(): pass\n")
+    weak = _make(goal="Another goal", review_criterion="Every requirement holds")
+    goal.observe(weak["slug"], "baseline")
+    (p / "test_more.py").write_text("def test(): pass\n")
+    goal.observe(weak["slug"], "final")
+    reasons = evidence.review_reasons(goal.load(weak["slug"]), None)
+    assert reasons and "not strong" in reasons[0]
+    with pytest.raises(goal.GateNotPassed, match="review"):
+        goal.complete(weak["slug"], "")
+
+
+def test_review_is_matched_by_tree_hash_not_turn():
+    p = _project()
+    (p / "test_more.py").write_text("x\n")
+    state = _make(review_criterion="Every requirement holds")
+    d = _digest(state)
+    goal.checkpoint(state["slug"], "work", "next", d, "pass")
+    goal.checkpoint(state["slug"], "again", "next", d, "skipped")
+    evidence_text = (f"Reviewed {d[:goal.reviewing.HASH_ECHO]}. "
+                     "All requirements hold; nothing missing in the tree.")
+    goal.record_review(state["slug"], "pass", evidence_text, "agent-123", d)
+    assert goal.complete(state["slug"], "")["status"] == "complete"
+
+
+def test_old_goal_without_new_fields_completes_after_observe(isolated_goals):
+    state = _make()
+    raw = goal.load(state["slug"])
+    raw.pop("observations", None)
+    raw.pop("test_manifest", None)
+    goal._save(raw)
+    goal.observe(state["slug"], "final")
+    assert goal.complete(state["slug"], "")["status"] == "complete"
