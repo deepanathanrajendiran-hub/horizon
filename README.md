@@ -12,10 +12,18 @@ stopped.
   artifact or the gate changes.
 - **Independent review.** When a goal asks for review, a fresh reviewer answers each
   requirement line. A pass the reviewer's own reply doesn't support is refused.
+- **Close on evidence.** `close` completes a goal when a passing gate result covers
+  the current files and nothing else is missing; otherwise it says what is. A pass
+  from an earlier session still counts if the files are unchanged, and a baseline
+  test that changed needs approval first.
 - **Checkpoints.** Every increment records what was done, the gate result and the
   next action.
 - **State mode (experimental).** Instead of carrying the conversation forward, each
   increment goes to a fresh worker that gets only a saved state packet.
+- **Automatic recovery and hooks.** In Claude Code, the first `start` in a project
+  installs hooks that report open goals at session start, keep state-mode attempts
+  alive, and reclaim an attempt whose session died. Codex has no hooks: run
+  `status` and `step-reclaim` at session start.
 
 **Status:** Horizon has no measured improvement yet. State mode is experimental.
 

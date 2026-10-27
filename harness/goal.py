@@ -19,6 +19,9 @@ import task_state
 from typing import Callable
 import reviewing
 from pathlib import Path
+import evidence
+import gate
+import evidence as evidence_rules  # _apply_review has a parameter named evidence
 
 MAX_GATE_OUTPUT = 4000
 
@@ -36,6 +39,8 @@ MIN_COVERAGE_EVIDENCE = 40
 # judge that genuinely ran -- the one direction that teaches an agent to
 # route around the check.
 JUDGE_ROLE_MARKER = "judge"
+
+OBSERVATION_ROLES = ("baseline", "resume", "final")
 
 
 class GateRequired(Exception):
@@ -345,6 +350,11 @@ def _initial_state(goal, cwd, gate_kind, gate_value, max_turns,
         state["gate_path"] = gate_path
         if not any(_covers(watch, gate_path) for watch in state["watch_paths"]):
             state["watch_paths"].append(gate_path)
+    if gate_kind == "command":
+        # Recorded before any gate run, so a later edit to a test or to the
+        # gate's own scripts shows up as a change rather than as the baseline.
+        state["test_manifest"] = evidence.test_manifest(cwd, state["watch_paths"])
+        state["gate_manifest"] = evidence.gate_manifest(cwd, str(gate_value), state["watch_paths"])
     return state
 
 
@@ -529,6 +539,123 @@ def budget_exhausted(state: dict) -> bool:
     return False
 
 
+def observe(slug: str, role: str, timeout: int = gate.DEFAULT_TIMEOUT) -> dict:
+    """Run the command gate now and record what it found, outside any increment.
+
+    Charges no turn and never skips: an unchanged tree is exactly when a
+    resumed session needs a fresh reading. Goals record their test-file
+    manifest at creation; a baseline observation of a goal that has none
+    saves it then. Any other role leaves it absent, so an old goal stays
+    fail-closed instead of adopting tests edited during the work.
+    """
+    if role not in OBSERVATION_ROLES:
+        raise ValueError(f"role must be one of {', '.join(OBSERVATION_ROLES)}")
+    before = load(slug)
+    if before["status"] != "active":
+        raise GoalClosed(f"cannot observe: goal status is {before['status']!r}")
+    if before["gate"]["kind"] != "command":
+        raise GateNotPassed("Coverage gates are judged by a reviewer; observe runs command gates only.")
+    require_idle(before)
+    manifest = None
+    if role == "baseline" and "test_manifest" not in before:
+        manifest = evidence.test_manifest(before["cwd"], before.get("watch_paths"))
+    try:
+        result, output, digest = gate.run_gate_at(dict(before, checkpoints=[]), timeout=timeout)
+    except gate.GateUnrunnable as exc:
+        result, output = "fail", str(exc)
+        digest = getattr(exc, "tree_hash", gate.UNKNOWN_HASH)
+    with filelock.goal_locked(_path(slug)):
+        state = load(slug)
+        if state["status"] != "active":
+            raise GoalClosed(f"cannot observe: goal status is {state['status']!r}")
+        require_idle(state)
+        state.setdefault("observations", []).append({
+            "kind": "observation", "role": role, "at": _now(), "tree_hash": digest,
+            "gate": result, "gate_output": _bounded(output), "gate_spec": dict(state["gate"]),
+        })
+        if manifest is not None:
+            state.setdefault("test_manifest", manifest)
+        return _persist_mutation_locked(state)
+
+def latest_observation(state: dict) -> dict | None:
+    """The most recent recorded gate run, trimmed to what an agent needs to act on."""
+    records = state.get("observations") or []
+    if not records:
+        return None
+    last = records[-1]
+    return {"role": last["role"], "at": last["at"], "gate": last["gate"],
+            "gate_output": last["gate_output"], "tree_hash": last["tree_hash"]}
+
+def _unchanged_since_baseline(state: dict, observed: str) -> bool:
+    """True when the files are exactly those a baseline observation recorded."""
+    return (isinstance(observed, str) and observed != gate.UNKNOWN_HASH
+            and any(o.get("role") == "baseline" and o.get("tree_hash") == observed
+                    for o in state.get("observations") or []))
+
+
+def close(slug: str, *, run_gate: bool = True, timeout: int = gate.DEFAULT_TIMEOUT) -> dict:
+    """Finish in one call when the evidence allows; otherwise say exactly what is missing.
+
+    With run_gate, the current files are observed first when no pass covers
+    them. Without it (`close --if-ready`, the Stop hook) a goal never
+    completes on files identical to its baseline observation: that pass
+    predates any work. An explicit close may complete them, and says so with
+    `unchanged_since_baseline`. When the budget is spent, the current tree is
+    recorded as the deliverable (anytime semantics) instead of being left open.
+    """
+    state = load(slug)
+    if state["status"] != "active":
+        return {"complete": state["status"] == "complete", "missing": [],
+                "summary": summary(state), "finalized": state.get("finalized"),
+                "observation": latest_observation(state)}
+    try:
+        observed = tree_hash.compute(state["cwd"], state.get("watch_paths"))
+    except Exception:
+        observed = gate.UNKNOWN_HASH
+    unchanged = _unchanged_since_baseline(state, observed)
+    observed_now = False
+    try:
+        if not run_gate and unchanged:
+            raise GateNotPassed(
+                "The files are unchanged since the baseline observation, so an automatic "
+                "close does not complete the goal. Run close (without --if-ready) to "
+                "complete a goal that needed no change.")
+        if (run_gate and state["gate"]["kind"] == "command"
+                and evidence.passing_record(state, observed) is None
+                and not budget_exhausted(state)):
+            observe(slug, "final", timeout=timeout)
+            observed_now = True
+        done = complete(slug, "")
+        result = {"complete": True, "missing": [], "summary": summary(done), "finalized": None,
+                  "observation": latest_observation(done)}
+        if unchanged:
+            result["unchanged_since_baseline"] = True
+        return result
+    except (GateNotPassed, AttemptOpen, RevisionConflict) as exc:
+        missing = [str(exc)]
+        if observed_now and isinstance(exc, GateNotPassed):
+            latest = latest_observation(load(slug))
+            if latest and latest["gate"] != "pass":
+                missing = ["The gate failed on the current files; see observation."]
+    state = load(slug)
+    if budget_exhausted(state) and not state.get("finalized"):
+        with filelock.goal_locked(_path(slug)):
+            state = load(slug)
+            if not state.get("finalized"):
+                try:
+                    require_idle(state)  # an open attempt owns the state; leave it be
+                except AttemptOpen:
+                    pass
+                else:
+                    record = evidence.passing_record(state, observed)
+                    state["finalized"] = {"reason": "budget_exhausted", "at": _now(),
+                                          "tree_hash": observed,
+                                          "gate": record["gate"] if record else "not passed"}
+                    state = _persist_mutation_locked(state)
+    return {"complete": False, "missing": missing, "summary": summary(state),
+            "finalized": state.get("finalized"), "observation": latest_observation(state)}
+
+
 
 
 def _persist_mutation_locked(state: dict) -> dict:
@@ -572,16 +699,22 @@ def _apply_review(state: dict, observed_hash: str, *, result: str,
     )
     if not criterion:
         raise GateNotPassed("This goal has no configured review criterion")
-    last = state["checkpoints"][-1] if state["checkpoints"] else None
-    if not last or last["tree_hash"] != digest or last.get("gate_spec") != state["gate"]:
-        raise GateNotPassed("The review does not match the current checkpoint")
-    if state["gate"]["kind"] == "command" and last["gate"] != "pass":
-        raise GateNotPassed("The command gate must pass before review")
     if (not isinstance(digest, str)
             or not re.fullmatch(r"[0-9a-f]{64}", digest)):
         raise GateNotPassed("No verified snapshot; run the gate again.")
     if observed_hash != digest:
         raise GateNotPassed("Artifacts changed after verification; run the gate again.")
+    if state["gate"]["kind"] == "command":
+        record = evidence_rules.passing_record(state, digest)
+        if record is None:
+            raise GateNotPassed("The command gate must pass on this snapshot before review")
+        turn = record.get("turn", state["used"]["turns"])
+        last = None
+    else:
+        last = state["checkpoints"][-1] if state["checkpoints"] else None
+        if not last or last["tree_hash"] != digest or last.get("gate_spec") != state["gate"]:
+            raise GateNotPassed("The review does not match the current checkpoint")
+        turn = last["turn"]
     evidence = evidence.strip()
     # A fail is kept whatever its shape: an unrecorded FAIL is the pilot's
     # failure, and a fail on the wrong snapshot still only blocks completion.
@@ -602,7 +735,7 @@ def _apply_review(state: dict, observed_hash: str, *, result: str,
                 "--result fail, or fix and review again."
             )
     state.setdefault("reviews", []).append({
-        "turn": last["turn"], "tree_hash": digest, "at": _now(),
+        "turn": turn, "tree_hash": digest, "at": _now(),
         "judge": judge.strip(), "criterion": criterion,
         "result": result, "evidence": _bounded_review(evidence),
     })
@@ -614,13 +747,12 @@ def _apply_review(state: dict, observed_hash: str, *, result: str,
         })
 
 
-def _apply_completion(state: dict, observed_hash: str, gate_output: str) -> None:
-    if state["status"] != "active":
-        raise GoalClosed(f"cannot complete: goal status is {state['status']!r}")
+def _apply_coverage_completion(state: dict, observed_hash: str, gate_output: str) -> None:
     last = state["checkpoints"][-1] if state["checkpoints"] else None
     if last is None or last["gate"] != "pass":
         raise GateNotPassed(
-            "The last gate did not pass; budget exhaustion is not success."
+            "The coverage review has not passed for the current files; "
+            "run check for a review brief, then record the reviewer's verdict with review."
         )
     evidence = (last.get("gate_output", gate_output) or "").strip()
     if state["gate"]["kind"] == "coverage":
@@ -662,6 +794,35 @@ def _apply_completion(state: dict, observed_hash: str, gate_output: str) -> None
     state["gate_evidence"] = _bounded(evidence)
     state["completed_at"] = _now()
 
+def _apply_completion(state: dict, observed_hash: str, gate_output: str) -> None:
+    if state["status"] != "active":
+        raise GoalClosed(f"cannot complete: goal status is {state['status']!r}")
+    if state["gate"]["kind"] == "coverage":
+        return _apply_coverage_completion(state, observed_hash, gate_output)
+    record = evidence.passing_record(state, observed_hash)
+    if record is None:
+        raise GateNotPassed(
+            "No passing gate result covers the current files; run close (or observe) first.")
+    changed = evidence.changed_baseline_tests(state)
+    if changed:
+        raise GateNotPassed(
+            "Baseline test files changed: " + ", ".join(changed)
+            + ". Completion needs a reviewer's or the user's approval: approve-test-change.")
+    reasons = evidence.review_reasons(state, _requirements(state))
+    if reasons:
+        criterion = state["gate"]["review_criterion"]
+        reviews = [r for r in state.get("reviews", [])
+                   if r["tree_hash"] == observed_hash and r["criterion"] == criterion]
+        if not reviews or reviews[-1]["result"] != "pass":
+            raise GateNotPassed(
+                "An independent review is required (" + "; ".join(reasons)
+                + ") and none has passed for this snapshot.")
+    text = (record.get("gate_output") or "").strip() or (
+        f"{state['gate']['value']} -> exit 0 (gate produced no output)")
+    state["status"] = "complete"
+    state["gate_evidence"] = _bounded(text)
+    state["completed_at"] = _now()
+
 def record_review(slug: str, result: str, evidence: str, judge: str,
                   digest: str) -> dict:
     """Record the fresh reviewer's verdict for one exact checkpoint."""
@@ -672,6 +833,19 @@ def record_review(slug: str, result: str, evidence: str, judge: str,
             judge=judge, digest=digest,
         ),
     )
+
+def _approve_test_change_locked(slug: str, path: str, reason: str) -> dict:
+    state = load(slug)
+    if state["status"] != "active":
+        raise GoalClosed(f"Goal is {state['status']}")
+    require_idle(state)
+    if not isinstance(reason, str) or len(reason.strip()) < 10:
+        raise EvidenceInsufficient("Say who approved the test change and why")
+    target = Path(state["cwd"]) / path
+    digest = evidence._sha(target) if target.is_file() else "deleted"
+    state.setdefault("approvals", []).append(
+        {"path": path, "sha256": digest, "reason": reason.strip(), "at": _now()})
+    return _persist_mutation_locked(state)
 
 
 
@@ -772,6 +946,8 @@ complete = _with_lock(_complete_locked)
 abandon = _with_lock(_abandon_locked)
 reopen = _with_lock(_reopen_locked)
 add_subagent = _with_lock(_add_subagent_locked)
+
+approve_test_change = _with_lock(_approve_test_change_locked)
 
 
 # Completion performs its fingerprint before acquiring the goal lock.

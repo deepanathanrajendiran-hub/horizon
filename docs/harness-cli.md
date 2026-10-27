@@ -27,6 +27,11 @@ when operating from an otherwise unmarked nested directory.
 | `check SLUG --did TEXT --next TEXT` | Run one check and checkpoint completed work; prints `review_brief` and `review_file` when a review is due |
 | `review SLUG --result pass\|fail --judge HANDLE --hash HASH --evidence-file PATH` | Record the actual review of the checkpoint's snapshot |
 | `complete SLUG` | Require all configured checks on current artifacts |
+| `observe SLUG [--role baseline\|resume\|final] [--timeout N]` | Run the gate now and record the result; charges no turn |
+| `close SLUG [--if-ready] [--timeout N]` | Complete when recorded evidence covers the current files, else say what is missing |
+| `approve-test-change SLUG --path P --reason R` | Record who approved a changed baseline test, and why |
+| `step-reclaim SLUG --attempt A --expected-revision N [--session S]` | Close a state-mode attempt whose lease went stale |
+| `hook SessionStart\|PostToolUse\|Stop`, `install-hooks`, `uninstall-hooks` | Claude Code hooks and their installation |
 | `abandon SLUG --reason TEXT` | Close incomplete work honestly |
 | `reopen SLUG --reason TEXT [--extra-turns N] [--extra-minutes N]` | Resume with an authorized budget extension |
 
@@ -36,6 +41,93 @@ reason, start and completion times, turns used, and the last gate and review
 results. Long text is clipped and ends in `…`. A goal file that cannot be read
 appears as `{"slug": ..., "error": ...}` instead of stopping the listing. `start` returns the same rows for
 the project's other goals as `other_goals`.
+
+## Evidence, close and recovery
+
+`start` runs the gate once as a baseline observation and charges no turn. Before
+that run it saves a manifest of the project's test files and a separate manifest
+of the gate's own files (project files named in the gate command, and any
+`conftest.py`, `pytest.ini` or `tox.ini` in the watched paths); completion
+compares against both. The `start` report includes
+the baseline result as `observation` (the same shape `observe` and `close` return;
+`null` for a coverage goal), and `start` still exits 0 when the baseline gate fails. In
+the claude runtime, `start` installs Horizon's hooks before the baseline run when
+they are missing (see Hooks below) and reports `"hooks": "installed"`, or
+`"hooks_error"` if it could not; the goal is created either way. After
+`uninstall-hooks`, `start` leaves the hooks alone until `install-hooks`.
+
+`observe SLUG [--role baseline|resume|final] [--timeout N]` runs the gate now and
+appends the result to the goal's `observations` list. `--role` defaults to
+`resume`. It never skips an unchanged tree and charges no turn. The report has
+`observation`. Only command gates can be observed. Exit 0 if the gate passed,
+1 if it did not, 2 on error.
+
+`close SLUG [--if-ready] [--timeout N]` completes the goal when a passing gate
+result (a checkpoint or an observation, from this session or an earlier one) covers
+the current files and nothing else is missing. It runs the gate itself when no
+pass covers the files, unless `--if-ready` is given (then it only completes or
+finalizes). Otherwise it returns `missing`, with `observation`. Rules:
+- A skipped check never blocks completion.
+- `close --if-ready` (and the Stop hook) never completes a goal whose files are
+  unchanged since a baseline observation: that pass predates any work. An
+  explicit `close` may complete them, and then reports
+  `"unchanged_since_baseline": true`.
+- A `--coverage` goal has no command to run: `check` records the checkpoint and
+  prints the review brief, `review` records the verdict, then `close` completes.
+- A review is required only for goals created with `--review` (or coverage gates),
+  and only when the gate is not "strong" (tests that existed at baseline and are
+  unchanged, gate files unchanged, no gate directory) or a requirement line is tagged `[review]`,
+  `[unverifiable]` or `[judgment]`. When one is required and a pass covers the
+  tree, the report includes `review_file` and `review_brief`; record the verdict
+  with `review`, then run `close` again.
+- A changed baseline test file blocks completion until `approve-test-change`.
+- When the budget is spent and the goal cannot complete, `close` records
+  `finalized: {reason: "budget_exhausted", ...}` for the current tree.
+
+Exit 0 when the goal is complete, 1 otherwise, 2 on error.
+
+`approve-test-change SLUG --path P --reason R` records that a changed baseline
+test is legitimate. `--reason` must say who approved it and why. Ask the user (or
+a fresh reviewer) first. It is refused while a state-mode attempt is open. Exit 0
+on success, 2 on error.
+
+`step-reclaim SLUG --attempt A --expected-revision N [--session S]` closes a
+state-mode attempt whose lease is stale. A lease is renewed by the PostToolUse
+hook and expires 600 s after its last renewal (300 s when a different session now
+asks). It returns `StepBusy` (exit 2) while the lease is live. Codex has no
+hooks, so nothing renews a lease after `step-begin` or `step-attach`: it lapses
+after 600 s while the worker may still be running. In Codex, reclaim only an
+attempt whose worker the host confirms has stopped, or that no worker was ever
+attached to. Leases live beside
+the goal file, in `SLUG.leases.json` in the goals directory, so renewals do not
+bump the goal's execution revision.
+
+```bash
+python3 "$HARNESS" --runtime "$RUNTIME" --project "$PROJECT" observe "$SLUG" --role resume
+python3 "$HARNESS" --runtime "$RUNTIME" --project "$PROJECT" close "$SLUG"
+python3 "$HARNESS" --runtime "$RUNTIME" --project "$PROJECT" approve-test-change "$SLUG" \
+  --path tests/test_parser.py --reason "Approved by the user: the old assertion encoded the bug"
+python3 "$HARNESS" --runtime "$RUNTIME" --project "$PROJECT" step-reclaim "$SLUG" \
+  --attempt "$ATTEMPT_ID" --expected-revision "$CURRENT_REVISION"
+```
+
+### Hooks
+
+Hooks exist for the claude runtime only; Codex has none. `install-hooks` adds
+Horizon's `SessionStart`, `PostToolUse` and `Stop` hooks to the project's
+`.claude/settings.json` and clears the opt-out; `uninstall-hooks` removes only
+those and writes the opt-out marker `hooks-optout` in the state directory, so a
+later `start` does not reinstall them. `hook EVENT` reads
+the event JSON on stdin and always exits 0, so a hook never blocks a session.
+- `SessionStart` records the session id, reports each active goal in one line and
+  reclaims a stale attempt automatically.
+- `PostToolUse` renews the lease of the session's open attempt.
+- `Stop` completes or finalizes goals whose recorded evidence already allows it
+  (the `close --if-ready` rules, so never on files unchanged since the
+  baseline); it never runs the gate.
+
+Claude Code loads hooks when a session starts, so hooks installed by `start` take
+effect from the next session.
 
 ## Requirements and review
 
@@ -102,7 +194,7 @@ The agent replaces only `<<ARTIFACTS>>` and `<<HOW_TO_RUN>>`. A goal without
 `--gate-path` also keeps `<<REQUEST>>`, `<<REQUIREMENTS>>` and `<<VERDICT_LINES>>`
 for the agent to fill. When the latest review was recorded as a fail, the brief ends with
 `Previous:` and that review's FAIL and UNVERIFIED lines and FAIL headlines, each
-prefixed with `> `. Do not dispatch a reviewer for a baseline check or for a last
+prefixed with `> `. Do not dispatch a reviewer for a last
 check before stopping; a coverage goal reports `review_required` on every check.
 
 `review` stores the reviewer's reply whole up to 16,000 characters. Beyond that it

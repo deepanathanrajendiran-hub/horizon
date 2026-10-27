@@ -1298,3 +1298,18 @@ def test_worker_update_cannot_overwrite_goal_control_fields(
     assert after["watch_paths"] == before["watch_paths"]
     assert after.get("reviews", []) == before.get("reviews", [])
     assert after["execution"]["attempts"][0]["status"] == "attached"
+
+
+@pytest.mark.parametrize("attach_first", [False, True])
+def test_approve_test_change_refuses_while_an_attempt_is_open(make_state_goal, attach_first):
+    state = make_state_goal()
+    begun = steps.begin(state["slug"], "r1")
+    if attach_first:
+        steps.attach(state["slug"], "r1", "worker-fixture",
+                     expected_revision=begun["execution_revision"])
+    before = goal.load(state["slug"])["execution"]["revision"]
+    with pytest.raises(goal.AttemptOpen):
+        goal.approve_test_change(state["slug"], "test_a.py", "Reviewer agreed the old assertion was wrong")
+    after = goal.load(state["slug"])
+    assert after["execution"]["revision"] == before
+    assert not after.get("approvals")

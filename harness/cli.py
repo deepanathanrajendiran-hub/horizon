@@ -16,6 +16,8 @@ import filelock
 import task_state
 import steps
 import reviewing
+import evidence
+import hooks
 
 
 def parser() -> argparse.ArgumentParser:
@@ -51,6 +53,23 @@ def parser() -> argparse.ArgumentParser:
     review.add_argument("--evidence-file", type=Path, required=True)
     complete = commands.add_parser("complete", help="Complete only after all checks pass on current artifacts")
     complete.add_argument("slug")
+    observe = commands.add_parser("observe", help="Run the gate now and record it; charges no turn")
+    observe.add_argument("slug")
+    observe.add_argument("--role", choices=("baseline", "resume", "final"), default="resume")
+    observe.add_argument("--timeout", type=int, default=gate.DEFAULT_TIMEOUT)
+    close = commands.add_parser("close", help="Complete when evidence allows, else report what is missing")
+    close.add_argument("slug")
+    close.add_argument("--if-ready", action="store_true", help="Never run the gate; complete or finalize only")
+    close.add_argument("--timeout", type=int, default=gate.DEFAULT_TIMEOUT)
+    approve = commands.add_parser("approve-test-change", help="Record a reviewer's or the user's approval of a changed baseline test")
+    approve.add_argument("slug")
+    approve.add_argument("--path", required=True)
+    approve.add_argument("--reason", required=True)
+    reclaim = commands.add_parser("step-reclaim", help="Close an attempt whose lease went stale")
+    reclaim.add_argument("slug")
+    reclaim.add_argument("--attempt", required=True)
+    reclaim.add_argument("--expected-revision", required=True, type=int)
+    reclaim.add_argument("--session")
     abandon = commands.add_parser("abandon")
     abandon.add_argument("slug")
     abandon.add_argument("--reason", required=True)
@@ -82,6 +101,10 @@ def parser() -> argparse.ArgumentParser:
     recover.add_argument("--reason", required=True)
     recover.add_argument("--worker-state", choices=("stopped", "not-started"), required=True)
     recover.add_argument("--evidence-file", type=Path, required=True)
+    hook = commands.add_parser("hook", help="Run a Claude Code hook; reads the event JSON on stdin and always exits 0")
+    hook.add_argument("event", choices=("SessionStart", "PostToolUse", "Stop"))
+    commands.add_parser("install-hooks", help="Add Horizon's hooks to .claude/settings.json")
+    commands.add_parser("uninstall-hooks", help="Remove only Horizon's hooks from .claude/settings.json")
     return p
 
 
@@ -93,6 +116,8 @@ def goal_rows(exclude: str | None = None) -> list[dict]:
     directory = paths.harness_root() / "goals"
     rows = []
     for path in sorted(directory.glob("*.json")):
+        if path.name.endswith(".leases.json"):
+            continue  # a side file of leases, not a goal
         if path.stem == exclude:
             continue
         # `start` lists siblings after saving the new goal; one broken file
@@ -108,6 +133,14 @@ def goal_rows(exclude: str | None = None) -> list[dict]:
 
 
 
+
+
+def _review_handoff(report: dict, state: dict, digest: str) -> None:
+    report["review_file"] = reviewing.review_file(
+        state["slug"], digest, len(state.get("reviews") or []) + 1,
+        watch_paths=state.get("watch_paths") or [state["cwd"]])
+    report["review_brief"] = reviewing.brief_for(
+        state, digest, report["review_file"], str(paths.harness_root()))
 
 
 def check(args) -> tuple[dict, int]:
@@ -143,14 +176,11 @@ def check(args) -> tuple[dict, int]:
     report = status(state)
     report["review_required"] = not error and (
         state["gate"]["kind"] == "coverage"
-        or (result == "pass" and bool(state["gate"].get("review_criterion")))
+        or (result == "pass"
+            and bool(evidence.review_reasons(state, goal._requirements(state))))
     )
     if report["review_required"]:
-        report["review_file"] = reviewing.review_file(
-            state["slug"], digest, len(state.get("reviews") or []) + 1,
-            watch_paths=state.get("watch_paths") or [state["cwd"]])
-        report["review_brief"] = reviewing.brief_for(
-            state, digest, report["review_file"], str(paths.harness_root()))
+        _review_handoff(report, state, digest)
     if error:
         report["error"] = error
     return report, (2 if error else 0 if result == "pass" else 1)
@@ -203,6 +233,11 @@ def _dispatch_step(args) -> tuple[dict, int]:
                 update_file=args.update_file, worker_evidence_file=args.worker_evidence_file,
                 timeout=args.timeout, force=args.force,
             )
+        elif args.action == "step-reclaim":
+            report = steps.reclaim(
+                args.slug, args.attempt, expected_revision=args.expected_revision,
+                session=args.session,
+            )
         else:
             report = steps.recover(
                 args.slug, args.attempt, expected_revision=args.expected_revision,
@@ -212,6 +247,20 @@ def _dispatch_step(args) -> tuple[dict, int]:
     except (goal.GoalStateError, task_state.StateError, OSError, ValueError) as error:
         return _step_error(args, error), 2
     return report, report["exit_code"]
+
+def _auto_install_hooks(entrypoint: str) -> dict:
+    """start installs the Claude Code hooks unless the user ran uninstall-hooks.
+
+    A failure is reported, never raised: the goal already exists.
+    """
+    if hooks.opted_out():
+        return {}
+    try:
+        if hooks.install(paths.project_root(), entrypoint):
+            return {"hooks": "installed"}
+    except (hooks.HookInstallError, OSError) as exc:
+        return {"hooks_error": str(exc)}
+    return {}
 
 
 def dispatch(args) -> tuple[dict, int]:
@@ -239,10 +288,25 @@ def dispatch(args) -> tuple[dict, int]:
             watch_paths=args.watch, review_criterion=args.review,
             execution=args.execution, gate_path=args.gate_path,
         )
+        # Hooks first: writing .claude/settings.json after the baseline would
+        # leave the baseline describing files that no longer exist.
+        installed = _auto_install_hooks(args.entrypoint) if paths.runtime() == "claude" else {}
+        if state["gate"]["kind"] == "command":
+            state = goal.observe(state["slug"], "baseline")
         report = status(state)
+        report["observation"] = goal.latest_observation(state)
         report["other_goals"] = goal_rows(exclude=state["slug"])
+        report.update(installed)
         return report, 0
-    if args.action in {"step-begin", "step-attach", "step-finish", "step-recover"}:
+    if args.action == "install-hooks":
+        changed = hooks.install(paths.project_root(), args.entrypoint)
+        hooks.set_opted_out(False)
+        return {"changed": changed}, 0
+    if args.action == "uninstall-hooks":
+        changed = hooks.uninstall(paths.project_root())
+        hooks.set_opted_out(True)
+        return {"changed": changed}, 0
+    if args.action in {"step-begin", "step-attach", "step-finish", "step-recover", "step-reclaim"}:
         return _dispatch_step(args)
     if args.action == "check":
         return check(args)
@@ -250,6 +314,28 @@ def dispatch(args) -> tuple[dict, int]:
         state = goal.record_review(args.slug, args.result, args.evidence_file.read_text(),
                                    args.judge, args.digest)
         return status(state), 0 if args.result == "pass" else 1
+    if args.action == "observe":
+        state = goal.observe(args.slug, args.role, timeout=args.timeout)
+        report = status(state)
+        report["observation"] = goal.latest_observation(state)
+        return report, 0 if report["observation"]["gate"] == "pass" else 1
+    if args.action == "close":
+        result = goal.close(args.slug, run_gate=not args.if_ready, timeout=args.timeout)
+        if not result["complete"]:
+            state = goal.load(args.slug)
+            try:
+                digest = tree_hash.compute(state["cwd"], state.get("watch_paths"))
+                needs_review = (state["status"] == "active" and bool(
+                    evidence.review_reasons(state, goal._requirements(state))))
+            except Exception:
+                # Unfingerprintable files or unreadable requirements: `missing`
+                # already says so, and there is no snapshot to hand a reviewer.
+                digest, needs_review = None, False
+            if needs_review and evidence.passing_record(state, digest):
+                _review_handoff(result, state, digest)
+        return result, 0 if result["complete"] else 1
+    if args.action == "approve-test-change":
+        return status(goal.approve_test_change(args.slug, args.path, args.reason)), 0
     if args.action == "complete":
         return status(goal.complete(args.slug, "")), 0
     if args.action == "abandon":
@@ -263,6 +349,20 @@ def dispatch(args) -> tuple[dict, int]:
 def main(argv=None) -> int:
     args = parser().parse_args(argv)
     os.environ["CONTINUAL_HARNESS_RUNTIME"] = args.runtime
+    args.entrypoint = os.path.abspath(sys.argv[0])
+    if args.action == "hook":
+        # Hooks never block or fail the host session, whatever they are fed.
+        try:
+            if args.project:
+                os.chdir(args.project.expanduser().resolve())
+            raw = sys.stdin.read()
+            payload = json.loads(raw) if raw.strip() else {}
+            out = hooks.run(args.event, payload)
+            if out:
+                print(json.dumps(out))
+        except BaseException:
+            pass
+        return 0
     try:
         if args.project:
             os.chdir(args.project.expanduser().resolve())

@@ -51,3 +51,12 @@ def goals_dir() -> Path:
     d = harness_root() / "goals"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def current_session() -> str | None:
+    """The session id the SessionStart hook last recorded, if any."""
+    try:
+        value = (harness_root() / "session").read_text().strip()
+    except OSError:
+        return None
+    return value or None
