@@ -328,3 +328,44 @@ def test_check_requires_review_when_tests_were_added(client):
     assert code == 0, report
     assert report["review_required"] is True
     assert report["review_file"] and report["review_brief"]
+
+
+def test_close_hands_out_no_brief_when_the_block_is_a_changed_test(state_client):
+    project, runtime, run = state_client
+    (project / "test_old.py").write_text("def test(): pass\n")
+    code, started = run("start", "Keep it green", "--gate", "true")
+    slug = started["slug"]
+    (project / "test_old.py").write_text("def test(): assert True\n")
+    code, closed = run("close", slug)
+    assert code == 1 and closed["complete"] is False
+    assert any("test_old.py" in m for m in closed["missing"])
+    assert "review_file" not in closed and "review_brief" not in closed
+
+
+def test_close_on_a_failing_gate_shows_the_gate_output(state_client):
+    project, runtime, run = state_client
+    (project / "g.sh").write_text("echo BOOM-OUTPUT\nexit 1\n")
+    code, started = run("start", "Make it pass", "--gate", "sh g.sh")
+    slug = started["slug"]
+    code, closed = run("close", slug)
+    assert code == 1 and closed["complete"] is False
+    assert closed["observation"]["gate"] == "fail"
+    assert closed["observation"]["role"] == "final"
+    assert "BOOM-OUTPUT" in closed["observation"]["gate_output"]
+    assert closed["observation"]["tree_hash"]
+    assert not any("run close" in m for m in closed["missing"])
+    assert any("gate failed" in m for m in closed["missing"])
+
+
+def test_observe_exit_code_follows_the_gate(state_client):
+    project, runtime, run = state_client
+    (project / "g.sh").write_text("echo BOOM-OUTPUT\nexit 1\n")
+    code, started = run("start", "Make it pass", "--gate", "sh g.sh")
+    slug = started["slug"]
+    code, seen = run("observe", slug)
+    assert code == 1
+    assert seen["observation"]["gate"] == "fail"
+    assert "BOOM-OUTPUT" in seen["observation"]["gate_output"]
+    (project / "g.sh").write_text("exit 0\n")
+    code, seen = run("observe", slug)
+    assert code == 0 and seen["observation"]["gate"] == "pass"

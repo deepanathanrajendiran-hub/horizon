@@ -567,6 +567,16 @@ def observe(slug: str, role: str, timeout: int = gate.DEFAULT_TIMEOUT) -> dict:
         state.setdefault("test_manifest", manifest)
         return _persist_mutation_locked(state)
 
+def latest_observation(state: dict) -> dict | None:
+    """The most recent recorded gate run, trimmed to what an agent needs to act on."""
+    records = state.get("observations") or []
+    if not records:
+        return None
+    last = records[-1]
+    return {"role": last["role"], "at": last["at"], "gate": last["gate"],
+            "gate_output": last["gate_output"], "tree_hash": last["tree_hash"]}
+
+
 def close(slug: str, *, run_gate: bool = True, timeout: int = gate.DEFAULT_TIMEOUT) -> dict:
     """Finish in one call when the evidence allows; otherwise say exactly what is missing.
 
@@ -577,20 +587,28 @@ def close(slug: str, *, run_gate: bool = True, timeout: int = gate.DEFAULT_TIMEO
     state = load(slug)
     if state["status"] != "active":
         return {"complete": state["status"] == "complete", "missing": [],
-                "summary": summary(state), "finalized": state.get("finalized")}
+                "summary": summary(state), "finalized": state.get("finalized"),
+                "observation": latest_observation(state)}
     try:
         observed = tree_hash.compute(state["cwd"], state.get("watch_paths"))
     except Exception:
         observed = gate.UNKNOWN_HASH
+    observed_now = False
     try:
         if (run_gate and state["gate"]["kind"] == "command"
                 and evidence.passing_record(state, observed) is None
                 and not budget_exhausted(state)):
             observe(slug, "final", timeout=timeout)
+            observed_now = True
         done = complete(slug, "")
-        return {"complete": True, "missing": [], "summary": summary(done), "finalized": None}
+        return {"complete": True, "missing": [], "summary": summary(done), "finalized": None,
+                "observation": latest_observation(done)}
     except (GateNotPassed, AttemptOpen, RevisionConflict) as exc:
         missing = [str(exc)]
+        if observed_now and isinstance(exc, GateNotPassed):
+            latest = latest_observation(load(slug))
+            if latest and latest["gate"] != "pass":
+                missing = ["The gate failed on the current files; see observation."]
     state = load(slug)
     if budget_exhausted(state) and not state.get("finalized"):
         with filelock.goal_locked(_path(slug)):
@@ -607,7 +625,7 @@ def close(slug: str, *, run_gate: bool = True, timeout: int = gate.DEFAULT_TIMEO
                                           "gate": record["gate"] if record else "not passed"}
                     state = _persist_mutation_locked(state)
     return {"complete": False, "missing": missing, "summary": summary(state),
-            "finalized": state.get("finalized")}
+            "finalized": state.get("finalized"), "observation": latest_observation(state)}
 
 
 

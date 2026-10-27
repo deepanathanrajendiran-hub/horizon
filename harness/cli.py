@@ -283,13 +283,23 @@ def dispatch(args) -> tuple[dict, int]:
                                    args.judge, args.digest)
         return status(state), 0 if args.result == "pass" else 1
     if args.action == "observe":
-        return status(goal.observe(args.slug, args.role, timeout=args.timeout)), 0
+        state = goal.observe(args.slug, args.role, timeout=args.timeout)
+        report = status(state)
+        report["observation"] = goal.latest_observation(state)
+        return report, 0 if report["observation"]["gate"] == "pass" else 1
     if args.action == "close":
         result = goal.close(args.slug, run_gate=not args.if_ready, timeout=args.timeout)
-        if not result["complete"] and any("review" in m for m in result["missing"]):
+        if not result["complete"]:
             state = goal.load(args.slug)
-            digest = tree_hash.compute(state["cwd"], state.get("watch_paths"))
-            if evidence.passing_record(state, digest):
+            try:
+                digest = tree_hash.compute(state["cwd"], state.get("watch_paths"))
+                needs_review = (state["status"] == "active" and bool(
+                    evidence.review_reasons(state, goal._requirements(state))))
+            except Exception:
+                # Unfingerprintable files or unreadable requirements: `missing`
+                # already says so, and there is no snapshot to hand a reviewer.
+                digest, needs_review = None, False
+            if needs_review and evidence.passing_record(state, digest):
                 _review_handoff(result, state, digest)
         return result, 0 if result["complete"] else 1
     if args.action == "approve-test-change":
