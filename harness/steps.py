@@ -231,7 +231,7 @@ def begin(slug: str, request_id: str) -> dict:
         state["execution"]["active_attempt"] = request_id
         state["execution"]["attempts"].append(attempt)
         state = goal.commit_revision(state, expected_revision=expected_revision)
-    leases.renew(slug, request_id, paths.current_session())
+    leases.renew(slug, request_id, None)
     return _begin_report(state, attempt, packet, replayed=False)
 
 
@@ -267,7 +267,7 @@ def attach(slug: str, attempt_id: str, worker: str, *, expected_revision: int) -
         attempt["worker"] = binding
         attempt["status"] = "attached"
         state = goal.commit_revision(state, expected_revision=expected_revision)
-    leases.renew(slug, attempt_id, paths.current_session())
+    leases.renew(slug, attempt_id, None)
     return report(state, attempt)
 
 def finish(slug: str, attempt_id: str, *, expected_revision: int,

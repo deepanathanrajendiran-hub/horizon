@@ -14,6 +14,7 @@ import goal
 import leases
 import paths
 import steps
+import sys
 
 MARK = "horizon-hook"
 _EVENTS = {"SessionStart": None, "PostToolUse": "*", "Stop": None}
@@ -47,7 +48,9 @@ def _write(path: Path, data: dict) -> None:
 
 
 def _command(entrypoint: str, event: str) -> str:
-    return f'python3 "{entrypoint}" --runtime claude hook {event} # {MARK}'
+    # `|| true`: a stale path or interpreter must never exit 2, which Claude Code treats as blocking.
+    return (f'"{sys.executable}" "{entrypoint}" --runtime claude --project "$CLAUDE_PROJECT_DIR" '
+            f'hook {event} || true # {MARK}')
 
 
 def _hook_table(settings: dict, path: Path) -> dict:
@@ -71,9 +74,20 @@ def install(project: Path, entrypoint: str) -> bool:
         groups = table.setdefault(event, [])
         if not isinstance(groups, list):
             raise HookInstallError(f"{path} has a non-list hooks.{event}; Horizon left it untouched")
-        if any(_ours(g) for g in groups):
+        wanted = _command(entrypoint, event)
+        current = [h.get("command") for g in groups if _ours(g) for h in g["hooks"]
+                   if isinstance(h, dict) and MARK in str(h.get("command", ""))]
+        if current == [wanted]:
             continue
-        group = {"hooks": [{"type": "command", "command": _command(entrypoint, event), "timeout": 30}]}
+        # Drop entries written for another path or interpreter, then write the current one.
+        for group in list(groups):
+            if _ours(group):
+                inner = [h for h in group["hooks"]
+                         if not (isinstance(h, dict) and MARK in str(h.get("command", "")))]
+                groups.remove(group)
+                if inner:
+                    groups.append({**group, "hooks": inner})
+        group = {"hooks": [{"type": "command", "command": wanted, "timeout": 30}]}
         if matcher:
             group["matcher"] = matcher
         groups.append(group)
@@ -169,7 +183,11 @@ def _post_tool_use(session: str | None) -> None:
     for state in _active_goals():
         try:
             attempt = (state.get("execution") or {}).get("active_attempt")
-            if attempt and (leases.read(state["slug"]).get(attempt) or {}).get("session") == session:
+            if not attempt:
+                continue
+            owner = (leases.read(state["slug"]).get(attempt) or {}).get("session")
+            # A lease begun without an owner belongs to the first session that works on it.
+            if owner is None or owner == session:
                 leases.renew(state["slug"], attempt, session)
         except Exception:
             continue

@@ -32,13 +32,26 @@ def _attached(make_state_goal):
     slug = state["slug"]
     begun = steps.begin(slug, "req-1")
     attached = steps.attach(slug, "req-1", "worker-1", expected_revision=begun["execution_revision"])
+    leases.renew(slug, "req-1", "s1")  # what the owning session's first PostToolUse hook does
     return slug, attached
 
 
-def test_attach_records_a_lease(make_state_goal, monkeypatch):
+def test_attach_records_an_unowned_lease(make_state_goal, monkeypatch):
+    # The shared session file is overwritten by every SessionStart, so it cannot name the owner;
+    # the first PostToolUse of the owning session claims the lease.
     monkeypatch.setattr(steps.paths, "current_session", lambda: "s1")
-    slug, _ = _attached(make_state_goal)
-    assert leases.read(slug)["req-1"]["session"] == "s1"
+    slug = make_state_goal()["slug"]
+    begun = steps.begin(slug, "req-1")
+    assert leases.read(slug)["req-1"]["session"] is None
+    steps.attach(slug, "req-1", "worker-1", expected_revision=begun["execution_revision"])
+    assert leases.read(slug)["req-1"]["session"] is None
+
+
+def test_unowned_lease_is_reclaimable_only_after_the_term():
+    lease = {"session": None, "renewed_at": 1000.0}
+    assert leases.reclaimable(lease, "s2", now=1000.0 + 301) is None
+    assert leases.reclaimable(lease, "s2", now=1000.0 + 599) is None
+    assert "expired" in leases.reclaimable(lease, "s2", now=1000.0 + 600)
 
 
 def test_reclaim_refuses_live_lease_then_closes_stale_one(make_state_goal, monkeypatch):

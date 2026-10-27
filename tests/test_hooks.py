@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -6,7 +7,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "harness"))
 
+import goal  # noqa: E402
 import hooks  # noqa: E402
+import leases  # noqa: E402
+import steps  # noqa: E402
+import time  # noqa: E402
 
 ENTRY = str(ROOT / ".claude/skills/horizon/scripts/harness.py")
 
@@ -140,3 +145,63 @@ def test_install_and_uninstall_commands(state_client):
     assert run("install-hooks")[1] == {"changed": False}
     assert run("uninstall-hooks")[1] == {"changed": True}
     assert run("uninstall-hooks")[1] == {"changed": False}
+
+
+def test_install_rewrites_a_stale_entrypoint_and_keeps_user_hooks(tmp_path):
+    project = tmp_path / "p"
+    (project / ".claude").mkdir(parents=True)
+    (project / ".claude/settings.json").write_text(json.dumps(
+        {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo mine"}]}]}}))
+    hooks.install(project, "/old/place/harness.py")
+    assert hooks.install(project, ENTRY) is True
+    assert hooks.install(project, ENTRY) is False
+    settings = json.loads((project / ".claude/settings.json").read_text())
+    commands = [h["command"] for groups in settings["hooks"].values() for g in groups for h in g["hooks"]]
+    assert "echo mine" in commands
+    ours = [c for c in commands if hooks.MARK in c]
+    assert len(ours) == 3 and all(f'"{ENTRY}"' in c and "/old/place" not in c for c in ours)
+
+
+def test_installed_command_exits_zero_with_a_missing_entrypoint(tmp_path):
+    project = tmp_path / "my project "
+    (project / ".claude").mkdir(parents=True)
+    hooks.install(project, str(tmp_path / "gone dir" / "harness.py"))
+    settings = json.loads((project / ".claude/settings.json").read_text())
+    for groups in settings["hooks"].values():
+        for g in groups:
+            for h in g["hooks"]:
+                proc = subprocess.run(["sh", "-c", h["command"]], input="{}", capture_output=True,
+                                      text=True, timeout=20,
+                                      env=dict(os.environ, CLAUDE_PROJECT_DIR=str(project)))
+                assert proc.returncode == 0, proc.stderr
+
+
+def _begin(make_state_goal):
+    state = make_state_goal()
+    slug = state["slug"]
+    steps.begin(slug, "req-1")
+    return slug
+
+
+def _age_lease(slug, owner, seconds):
+    leases._path(slug).write_text(json.dumps(
+        {"req-1": {"session": owner, "renewed_at": time.time() - seconds}}))
+
+
+def test_post_tool_use_claims_an_unowned_lease(make_state_goal):
+    slug = _begin(make_state_goal)
+    assert leases.read(slug)["req-1"]["session"] is None
+    hooks.run("PostToolUse", {"session_id": "s1"})
+    assert leases.read(slug)["req-1"]["session"] == "s1"
+    hooks.run("PostToolUse", {"session_id": "s2"})
+    assert leases.read(slug)["req-1"]["session"] == "s1"
+
+
+def test_other_session_start_leaves_a_recent_unowned_attempt_alone(make_state_goal):
+    slug = _begin(make_state_goal)
+    _age_lease(slug, None, 400)
+    hooks.run("SessionStart", {"session_id": "s2"})
+    assert goal.load(slug)["execution"]["active_attempt"] == "req-1"
+    _age_lease(slug, None, 601)
+    hooks.run("SessionStart", {"session_id": "s2"})
+    assert goal.load(slug)["execution"]["active_attempt"] is None
