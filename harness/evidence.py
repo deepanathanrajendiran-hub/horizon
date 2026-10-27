@@ -85,12 +85,14 @@ def _command_files(cwd: str, command: str):
             for part in (word, word.partition("=")[2]):
                 if not part:
                     continue
-                path = (root / part).resolve()
                 try:
+                    path = (root / part).resolve()
                     rel = path.relative_to(root).as_posix()
-                except ValueError:
+                    if not path.is_file():
+                        continue
+                except (OSError, ValueError):
                     continue
-                if path.is_file() and not _is_harness_state(rel):
+                if not _is_harness_state(rel):
                     yield rel, path
 
 

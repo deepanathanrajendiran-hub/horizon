@@ -1,3 +1,4 @@
+import errno
 import sys
 from pathlib import Path
 
@@ -273,3 +274,46 @@ def test_coverage_completion_message_points_at_the_review():
         goal.complete(state["slug"], "")
     assert "budget exhaustion" not in str(raised.value)
     assert "check" in str(raised.value) and "review" in str(raised.value)
+
+_LONG_TOKEN = "assert(1)" + "and(1)" * 50  # 309 characters, no slash, no whitespace
+
+
+def _long_gate():
+    assert len(_LONG_TOKEN) > 255 and "/" not in _LONG_TOKEN
+    return f'python3 -c "{_LONG_TOKEN}"'
+
+
+def test_command_files_skips_a_token_the_filesystem_rejects(monkeypatch):
+    # Python 3.10-3.12 raise from Path.is_file() for an over-long name; 3.14 does
+    # not, so raise it here to make the test discriminate on any version.
+    real_is_file = Path.is_file
+
+    def is_file(self, *a, **kw):
+        if len(self.name) > 255:
+            raise OSError(errno.ENAMETOOLONG, "File name too long")
+        return real_is_file(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "is_file", is_file)
+    (_project() / "run_tests.sh").write_text("true\n")
+    found = [rel for rel, _ in evidence._command_files(str(_project()), f"sh run_tests.sh {_LONG_TOKEN}")]
+    assert found == ["run_tests.sh"]
+    state = _make(gate_value=_long_gate())
+    assert state["slug"]
+
+
+def test_command_files_skips_a_token_whose_resolve_fails(monkeypatch):
+    real_resolve = Path.resolve
+
+    def resolve(self, *a, **kw):
+        if len(self.name) > 255:
+            raise OSError(errno.ENAMETOOLONG, "File name too long")
+        return real_resolve(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+    assert list(evidence._command_files(str(_project()), f"true {_LONG_TOKEN}")) == []
+
+
+def test_create_accepts_a_gate_with_a_300_character_token():
+    state = _make(gate_value=_long_gate())
+    assert state["slug"]
+    assert goal.load(state["slug"]) is not None
