@@ -749,6 +749,7 @@ def _approve_test_change_locked(slug: str, path: str, reason: str) -> dict:
     state = load(slug)
     if state["status"] != "active":
         raise GoalClosed(f"Goal is {state['status']}")
+    require_idle(state)
     if not isinstance(reason, str) or len(reason.strip()) < 10:
         raise EvidenceInsufficient("Say who approved the test change and why")
     target = Path(state["cwd"]) / path
