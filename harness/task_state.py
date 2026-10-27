@@ -521,7 +521,11 @@ def procedure(runtime: str) -> dict:
                    "claude": ".claude/skills/horizon/SKILL.md"}
     if runtime not in skill_names:
         raise StateError("runtime must be codex or claude")
-    skill_path = Path(__file__).resolve().parents[1] / skill_names[runtime]
+    # In the checkout this module is harness/task_state.py; an installed skill keeps it in scripts/ beside SKILL.md.
+    base = Path(__file__).resolve().parents[1]
+    skill_path = base / skill_names[runtime]
+    if not skill_path.is_file() and (base / "SKILL.md").is_file():
+        skill_path = base / "SKILL.md"
     try:
         skill_bytes = skill_path.read_bytes()
     except OSError as error:

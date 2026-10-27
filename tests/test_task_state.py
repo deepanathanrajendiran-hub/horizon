@@ -493,3 +493,40 @@ def test_packet_reservation_includes_mandatory_recovery_next_action():
         current_hash="a" * 64, runtime="codex", reserve_verdicts=True,
     )
     assert len(state.canonical_bytes(recovered)) <= state.PACKET_LIMIT
+
+
+def _installed_skill(root, runtime="claude"):
+    """Horizon laid out as an installed skill: SKILL.md beside scripts/ holding every harness module, with
+    cli.py as harness.py (what a copy of .claude/skills/horizon with its symlinks resolved looks like)."""
+    import shutil
+    repo = Path(__file__).resolve().parents[1]
+    home = ".agents" if runtime == "codex" else ".claude"
+    skill = root / home / "skills" / "horizon"
+    (skill / "scripts").mkdir(parents=True)
+    shutil.copyfile(repo / home / "skills" / "horizon" / "SKILL.md", skill / "SKILL.md")
+    for module in (repo / "harness").glob("*.py"):
+        shutil.copyfile(module, skill / "scripts" / ("harness.py" if module.name == "cli.py" else module.name))
+    return skill
+
+
+@pytest.mark.parametrize("runtime", ["claude", "codex"])
+def test_procedure_reads_the_skill_beside_an_installed_copy(tmp_path, runtime):
+    import subprocess
+    skill = _installed_skill(tmp_path / "install", runtime)
+    code = f"import json, task_state; print(json.dumps(task_state.procedure({runtime!r})))"
+    out = subprocess.run([sys.executable, "-c", code], cwd=skill / "scripts", capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout) == _state_module().procedure(runtime)  # same skill bytes, same digest
+
+
+def test_installed_copy_can_start_a_state_goal(tmp_path):
+    import subprocess
+    skill = _installed_skill(tmp_path / "install")
+    project = tmp_path / "project"
+    (project / ".claude").mkdir(parents=True)
+    out = subprocess.run(
+        [sys.executable, str(skill / "scripts" / "harness.py"), "--runtime", "claude", "--project", str(project),
+         "start", "Build it", "--execution", "state", "--gate", "true", "--max-turns", "5"],
+        capture_output=True, text=True, env={**os.environ, "HOME": str(tmp_path)})
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert json.loads(out.stdout)["status"] == "active"
