@@ -15,6 +15,8 @@ import tree_hash
 import copy
 import secrets
 import gate
+import leases
+import time
 
 
 
@@ -229,6 +231,7 @@ def begin(slug: str, request_id: str) -> dict:
         state["execution"]["active_attempt"] = request_id
         state["execution"]["attempts"].append(attempt)
         state = goal.commit_revision(state, expected_revision=expected_revision)
+    leases.renew(slug, request_id, paths.current_session())
     return _begin_report(state, attempt, packet, replayed=False)
 
 
@@ -264,6 +267,7 @@ def attach(slug: str, attempt_id: str, worker: str, *, expected_revision: int) -
         attempt["worker"] = binding
         attempt["status"] = "attached"
         state = goal.commit_revision(state, expected_revision=expected_revision)
+    leases.renew(slug, attempt_id, paths.current_session())
     return report(state, attempt)
 
 def finish(slug: str, attempt_id: str, *, expected_revision: int,
@@ -486,29 +490,8 @@ def _gate_liveness_resolved(evidence: str, gate_process: dict | None) -> bool:
     return int(pids[0]) == gate_process["pid"]
 
 
-def recover(slug: str, attempt_id: str, *, expected_revision: int,
-            reason: str, worker_state: str, evidence_file: Path) -> dict:
-    _require_slug(slug)
-    _require_id(attempt_id, "attempt_id")
-    if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 0:
-        raise StepError("expected_revision must be a nonnegative integer")
-    try:
-        task_state._require_text(
-            reason, "recovery reason", task_state.TEXT_LIMIT, nonempty=True
-        )
-    except task_state.StateError as error:
-        raise StepError(str(error)) from error
-    if worker_state not in {"stopped", "not-started"}:
-        raise StepError("worker_state must be stopped or not-started")
-
-    evidence_bytes, evidence_text = _read_recovery_evidence(Path(evidence_file))
-    evidence_ref = store_blob(slug, "recovery_evidence", evidence_bytes)
-    initial = _state(slug)
-    try:
-        observed_hash = tree_hash.compute(initial["cwd"], initial["watch_paths"])
-    except Exception:
-        observed_hash = gate.UNKNOWN_HASH
-
+def _close_interrupted(slug, attempt_id, *, expected_revision, reason, worker_state,
+                       evidence_ref, evidence_text, observed_hash):
     runner = goal._path(slug).with_name(f"{slug}.{attempt_id}.runner")
     try:
         with filelock.goal_locked(runner, timeout=0):
@@ -550,7 +533,7 @@ def recover(slug: str, attempt_id: str, *, expected_revision: int,
                     raise StepConflict(
                         "stopped recovery requires an attached or finishing attempt"
                     )
-                if attempt["status"] == "finishing" and not _gate_liveness_resolved(
+                if attempt["status"] == "finishing" and evidence_text is not None and not _gate_liveness_resolved(
                         evidence_text, attempt["gate_process"]):
                     raise StepError(
                         "finishing recovery evidence must include one gate-state "
@@ -590,3 +573,66 @@ def recover(slug: str, attempt_id: str, *, expected_revision: int,
             return report(state, attempt)
     except filelock.LockTimeout as error:
         raise StepBusy("another finish invocation owns this attempt") from error
+
+def recover(slug: str, attempt_id: str, *, expected_revision: int,
+            reason: str, worker_state: str, evidence_file: Path) -> dict:
+    _require_slug(slug)
+    _require_id(attempt_id, "attempt_id")
+    if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 0:
+        raise StepError("expected_revision must be a nonnegative integer")
+    try:
+        task_state._require_text(
+            reason, "recovery reason", task_state.TEXT_LIMIT, nonempty=True
+        )
+    except task_state.StateError as error:
+        raise StepError(str(error)) from error
+    if worker_state not in {"stopped", "not-started"}:
+        raise StepError("worker_state must be stopped or not-started")
+
+    evidence_bytes, evidence_text = _read_recovery_evidence(Path(evidence_file))
+    evidence_ref = store_blob(slug, "recovery_evidence", evidence_bytes)
+    initial = _state(slug)
+    try:
+        observed_hash = tree_hash.compute(initial["cwd"], initial["watch_paths"])
+    except Exception:
+        observed_hash = gate.UNKNOWN_HASH
+
+    return _close_interrupted(slug, attempt_id, expected_revision=expected_revision,
+                              reason=reason, worker_state=worker_state,
+                              evidence_ref=evidence_ref, evidence_text=evidence_text,
+                              observed_hash=observed_hash)
+
+def reclaim(slug: str, attempt_id: str, *, expected_revision: int,
+            session: str | None = None, now: float | None = None) -> dict:
+    """Close an attempt whose lease went stale; no liveness evidence is needed."""
+    _require_slug(slug)
+    _require_id(attempt_id, "attempt_id")
+    state = _state(slug)
+    attempt = _attempt(state, attempt_id)
+    if attempt is None:
+        raise StepConflict(f"unknown attempt: {attempt_id}")
+    if attempt["status"] in {"accepted", "recovered"}:
+        return report(state, attempt, replayed=True)
+    lease = leases.read(slug).get(attempt_id)
+    why = leases.reclaimable(lease, session or paths.current_session(), now)
+    if why is None:
+        raise StepBusy("the attempt's lease is still live; wait or let its worker finish")
+    clock = time.time() if now is None else now
+    process = attempt.get("gate_process")
+    if attempt["status"] == "finishing" and process:
+        started = goal.datetime.fromisoformat(process["started_at"]).timestamp()
+        if clock < started + gate.DEFAULT_TIMEOUT + 120:
+            raise StepBusy("the attempt's gate may still be running; wait for its timeout")
+    worker_state = ("not-started" if attempt["status"] == "reserved" and attempt["worker"] is None
+                    else "stopped")
+    payload = json.dumps({"reclaim": why, "lease": lease, "session": session},
+                         sort_keys=True).encode()
+    evidence_ref = store_blob(slug, "recovery_evidence", payload)
+    try:
+        observed_hash = tree_hash.compute(state["cwd"], state["watch_paths"])
+    except Exception:
+        observed_hash = gate.UNKNOWN_HASH
+    return _close_interrupted(slug, attempt_id, expected_revision=expected_revision,
+                              reason="Reclaimed: " + why, worker_state=worker_state,
+                              evidence_ref=evidence_ref, evidence_text=None,
+                              observed_hash=observed_hash)

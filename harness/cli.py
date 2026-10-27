@@ -93,6 +93,8 @@ def goal_rows(exclude: str | None = None) -> list[dict]:
     directory = paths.harness_root() / "goals"
     rows = []
     for path in sorted(directory.glob("*.json")):
+        if path.name.endswith(".leases.json"):
+            continue  # a side file of leases, not a goal
         if path.stem == exclude:
             continue
         # `start` lists siblings after saving the new goal; one broken file
