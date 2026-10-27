@@ -180,7 +180,7 @@ def test_horizon_skills_share_their_sections():
 def test_horizon_skills_carry_the_v2_contract(folder):
     text = _horizon_skill(folder)
     for phrase in ("## Earlier goals", "## Before `start`", "request.md", "requirements.md",
-                   "[unverifiable]", "[judgment]", "# Still passes:", "baseline before any change",
+                   "[unverifiable]", "[judgment]", "# Still passes:", "baseline `observation`",
                    "--gate-path", "review_brief", "NOT REVIEWED", "deadline",
                    "at most two review rounds", "## Final report"):
         assert phrase in text, phrase

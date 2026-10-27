@@ -369,3 +369,13 @@ def test_observe_exit_code_follows_the_gate(state_client):
     (project / "g.sh").write_text("exit 0\n")
     code, seen = run("observe", slug)
     assert code == 0 and seen["observation"]["gate"] == "pass"
+
+def test_start_report_shows_the_baseline_observation(state_client):
+    project, runtime, run = state_client
+    (project / "gate.sh").write_text("echo BASELINE-MARKER\nexit 1\n")
+    code, started = run("start", "Fix the parser", "--gate", "sh gate.sh")
+    assert code == 0
+    observation = started["observation"]
+    assert observation["role"] == "baseline"
+    assert observation["gate"] == "fail"
+    assert "BASELINE-MARKER" in observation["gate_output"]

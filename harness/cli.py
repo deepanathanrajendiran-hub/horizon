@@ -277,6 +277,7 @@ def dispatch(args) -> tuple[dict, int]:
         if state["gate"]["kind"] == "command":
             state = goal.observe(state["slug"], "baseline")
         report = status(state)
+        report["observation"] = goal.latest_observation(state)
         report["other_goals"] = goal_rows(exclude=state["slug"])
         if paths.runtime() == "claude":
             try:

@@ -91,12 +91,12 @@ python3 "$HARNESS" --runtime codex --project "$PROJECT" start "Requested outcome
   --max-turns 20 --max-minutes 60
 ```
 
-5. Before your first edit, run `check` (see Conversation-mode increments) on the
-   returned slug with `--did "baseline before any change"` and a `--next` naming
-   your first change. Checks of new lines must fail here where the request says
-   behaviour is broken or missing. Carried checks must pass; report a carried
-   check that fails here as a pre-existing regression. The baseline needs no
-   review: if it prints `review_required`, do not dispatch a reviewer.
+5. Before your first edit, read the baseline `observation` that `start` printed;
+   do not run `check` for the baseline. Checks of new requirement lines must fail
+   there where the request says behaviour is broken or missing. A check that
+   passes at baseline must be explained (for example, it guards existing
+   behaviour). Carried checks must pass; report a carried check that fails here
+   as a pre-existing regression.
 
 Use `--coverage` with the same criterion instead of `--gate` when no command can
 check any line. When you write the gate yourself (`--gate-path`), always pass
@@ -221,9 +221,8 @@ user would run (a goal started without `--gate-path` also needs `<<REQUEST>>` an
 `<<REQUIREMENTS>>` filled in). Add nothing else: no diagnosis, design choices,
 expected values, explanations of earlier findings, or questions that point to an
 answer. If no reviewer is available, report the unmet requirement. Never
-dispatch a reviewer for the baseline check or for a last `check` you run before
-stopping, whatever `review_required` says; a coverage goal sets it on every
-check.
+dispatch a reviewer for a last `check` you run before stopping, whatever
+`review_required` says; a coverage goal sets it on every check.
 
 The reviewer writes its reply to `review_file`. Pass that file, unedited, as
 `--evidence-file`. Record every verdict, FAIL included, with

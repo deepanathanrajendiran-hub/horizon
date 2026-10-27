@@ -45,7 +45,9 @@ the project's other goals as `other_goals`.
 ## Evidence, close and recovery
 
 `start` runs the gate once as a baseline observation and charges no turn. It also
-saves a manifest of the project's test files; completion compares against it. In
+saves a manifest of the project's test files; completion compares against it. The `start` report includes
+the baseline result as `observation` (the same shape `observe` and `close` return;
+`null` for a coverage goal), and `start` still exits 0 when the baseline gate fails. In
 the claude runtime, the first `start` in a project installs Horizon's hooks (see
 Hooks below) and reports `"hooks": "installed"`, or `"hooks_error"` if it could not.
 
@@ -174,7 +176,7 @@ The agent replaces only `<<ARTIFACTS>>` and `<<HOW_TO_RUN>>`. A goal without
 `--gate-path` also keeps `<<REQUEST>>`, `<<REQUIREMENTS>>` and `<<VERDICT_LINES>>`
 for the agent to fill. When the latest review was recorded as a fail, the brief ends with
 `Previous:` and that review's FAIL and UNVERIFIED lines and FAIL headlines, each
-prefixed with `> `. Do not dispatch a reviewer for a baseline check or for a last
+prefixed with `> `. Do not dispatch a reviewer for a last
 check before stopping; a coverage goal reports `review_required` on every check.
 
 `review` stores the reviewer's reply whole up to 16,000 characters. Beyond that it
