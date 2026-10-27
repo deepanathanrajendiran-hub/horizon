@@ -567,6 +567,48 @@ def observe(slug: str, role: str, timeout: int = gate.DEFAULT_TIMEOUT) -> dict:
         state.setdefault("test_manifest", manifest)
         return _persist_mutation_locked(state)
 
+def close(slug: str, *, run_gate: bool = True, timeout: int = gate.DEFAULT_TIMEOUT) -> dict:
+    """Finish in one call when the evidence allows; otherwise say exactly what is missing.
+
+    With run_gate, the current files are observed first when no pass covers
+    them. When the budget is spent, the current tree is recorded as the
+    deliverable (anytime semantics) instead of being left open.
+    """
+    state = load(slug)
+    if state["status"] != "active":
+        return {"complete": state["status"] == "complete", "missing": [],
+                "summary": summary(state), "finalized": state.get("finalized")}
+    try:
+        observed = tree_hash.compute(state["cwd"], state.get("watch_paths"))
+    except Exception:
+        observed = gate.UNKNOWN_HASH
+    try:
+        if (run_gate and state["gate"]["kind"] == "command"
+                and evidence.passing_record(state, observed) is None
+                and not budget_exhausted(state)):
+            observe(slug, "final", timeout=timeout)
+        done = complete(slug, "")
+        return {"complete": True, "missing": [], "summary": summary(done), "finalized": None}
+    except (GateNotPassed, AttemptOpen, RevisionConflict) as exc:
+        missing = [str(exc)]
+    state = load(slug)
+    if budget_exhausted(state) and not state.get("finalized"):
+        with filelock.goal_locked(_path(slug)):
+            state = load(slug)
+            if not state.get("finalized"):
+                try:
+                    require_idle(state)  # an open attempt owns the state; leave it be
+                except AttemptOpen:
+                    pass
+                else:
+                    record = evidence.passing_record(state, observed)
+                    state["finalized"] = {"reason": "budget_exhausted", "at": _now(),
+                                          "tree_hash": observed,
+                                          "gate": record["gate"] if record else "not passed"}
+                    state = _persist_mutation_locked(state)
+    return {"complete": False, "missing": missing, "summary": summary(state),
+            "finalized": state.get("finalized")}
+
 
 
 

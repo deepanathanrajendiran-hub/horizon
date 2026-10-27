@@ -50,11 +50,12 @@ def test_gate_runs_once_and_keeps_pre_gate_hash(client):
     project, _, run = client
     artifact = project / "counter.txt"
     artifact.write_text("")
+    slug = start(run, "--gate", "printf x >> counter.txt")  # the baseline run appends once
+    assert artifact.read_text() == "x"
     before = tree_hash.compute(project)
-    slug = start(run, "--gate", "printf x >> counter.txt")
     code, report = check(run, slug)
     assert code == 0, report
-    assert artifact.read_text() == "x"
+    assert artifact.read_text() == "xx"
     assert report["used"]["turns"] == 1
     assert report["last_checkpoint"]["tree_hash"] == before
     assert tree_hash.compute(project) != before
@@ -140,9 +141,9 @@ def test_force_reruns_gate_with_unchanged_local_inputs(client):
     slug = start(run, "--gate", cmd)
     check(run, slug)
     assert check(run, slug)[1]["last_checkpoint"]["gate"] == "skipped"
-    assert counter.read_text() == "x"
+    assert counter.read_text() == "xx"  # the baseline run at start plus the first check
     assert check(run, slug, "--force")[0] == 0
-    assert counter.read_text() == "xx"
+    assert counter.read_text() == "xxx"
 
 
 
@@ -251,3 +252,79 @@ def test_start_survives_an_unreadable_sibling_goal(client):
     assert "unreadable" in rows["broken"]["error"]
     code, listing = run("status")
     assert code == 0 and len(listing["goals"]) == 3
+
+
+def test_start_records_baseline_and_close_completes_in_one_call(state_client):
+    project, runtime, run = state_client
+    code, started = run("start", "Keep the build green", "--gate", "true")
+    assert code == 0
+    slug = started["slug"]
+    state_dir = project / (".codex" if runtime == "codex" else ".claude") / "harness" / "goals"
+    saved = json.loads((state_dir / f"{slug}.json").read_text())
+    assert [o["role"] for o in saved["observations"]] == ["baseline"]
+    code, closed = run("close", slug)
+    assert code == 0 and closed["complete"] is True
+
+
+def test_close_reports_missing_review_with_brief(state_client):
+    project, runtime, run = state_client
+    (project / "test_new.py").write_text("def test(): pass\n")
+    code, started = run("start", "Add a feature", "--gate", "true",
+                        "--review", "Every requirement holds")
+    slug = started["slug"]
+    (project / "test_more.py").write_text("def test(): pass\n")
+    code, closed = run("close", slug)
+    assert code == 1 and closed["complete"] is False
+    assert any("review" in m for m in closed["missing"])
+    assert closed["review_file"] and closed["review_brief"]
+
+
+def test_close_if_ready_finalizes_exhausted_budget(state_client):
+    project, runtime, run = state_client
+    code, started = run("start", "Make the gate pass", "--gate", "false", "--max-turns", "1")
+    slug = started["slug"]
+    run("check", slug, "--did", "tried", "--next", "stop")
+    code, closed = run("close", slug, "--if-ready")
+    assert closed["complete"] is False
+    assert closed["finalized"]["reason"] == "budget_exhausted"
+
+
+def test_step_reclaim_cli_refuses_live_lease(state_client):
+    project, runtime, run = state_client
+    code, started = run("start", "State goal", "--gate", "true", "--execution", "state")
+    slug = started["slug"]
+    code, begun = run("step-begin", slug, "--request-id", "r1")
+    code, out = run("step-reclaim", slug, "--attempt", "r1",
+                    "--expected-revision", str(begun["execution_revision"]))
+    assert code == 2 and out["error"] == "StepBusy"
+
+
+def test_step_reclaim_refuses_a_non_integer_revision_at_the_parser():
+    sys.path.insert(0, str(ROOT / "harness"))
+    import cli
+    base = ["--runtime", "claude", "step-reclaim", "g", "--attempt", "r1", "--expected-revision"]
+    assert cli.parser().parse_args([*base, "3"]).expected_revision == 3
+    with pytest.raises(SystemExit) as raised:
+        cli.parser().parse_args([*base, "abc"])
+    assert raised.value.code == 2
+
+
+def test_check_skips_review_when_a_strong_gate_needs_none(client):
+    project, _, run = client
+    (project / "test_old.py").write_text("def test(): pass\n")
+    slug = start(run, "--gate", "true", "--review", "Every line holds")
+    code, report = check(run, slug)
+    assert code == 0, report
+    assert report["review_required"] is False
+    assert "review_file" not in report
+
+
+def test_check_requires_review_when_tests_were_added(client):
+    project, _, run = client
+    (project / "test_old.py").write_text("def test(): pass\n")
+    slug = start(run, "--gate", "true", "--review", "Every line holds")
+    (project / "test_added.py").write_text("def test(): pass\n")
+    code, report = check(run, slug)
+    assert code == 0, report
+    assert report["review_required"] is True
+    assert report["review_file"] and report["review_brief"]

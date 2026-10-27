@@ -16,6 +16,7 @@ import filelock
 import task_state
 import steps
 import reviewing
+import evidence
 
 
 def parser() -> argparse.ArgumentParser:
@@ -51,6 +52,23 @@ def parser() -> argparse.ArgumentParser:
     review.add_argument("--evidence-file", type=Path, required=True)
     complete = commands.add_parser("complete", help="Complete only after all checks pass on current artifacts")
     complete.add_argument("slug")
+    observe = commands.add_parser("observe", help="Run the gate now and record it; charges no turn")
+    observe.add_argument("slug")
+    observe.add_argument("--role", choices=("baseline", "resume", "final"), default="resume")
+    observe.add_argument("--timeout", type=int, default=gate.DEFAULT_TIMEOUT)
+    close = commands.add_parser("close", help="Complete when evidence allows, else report what is missing")
+    close.add_argument("slug")
+    close.add_argument("--if-ready", action="store_true", help="Never run the gate; complete or finalize only")
+    close.add_argument("--timeout", type=int, default=gate.DEFAULT_TIMEOUT)
+    approve = commands.add_parser("approve-test-change", help="Record a reviewer's or the user's approval of a changed baseline test")
+    approve.add_argument("slug")
+    approve.add_argument("--path", required=True)
+    approve.add_argument("--reason", required=True)
+    reclaim = commands.add_parser("step-reclaim", help="Close an attempt whose lease went stale")
+    reclaim.add_argument("slug")
+    reclaim.add_argument("--attempt", required=True)
+    reclaim.add_argument("--expected-revision", required=True, type=int)
+    reclaim.add_argument("--session")
     abandon = commands.add_parser("abandon")
     abandon.add_argument("slug")
     abandon.add_argument("--reason", required=True)
@@ -112,6 +130,14 @@ def goal_rows(exclude: str | None = None) -> list[dict]:
 
 
 
+def _review_handoff(report: dict, state: dict, digest: str) -> None:
+    report["review_file"] = reviewing.review_file(
+        state["slug"], digest, len(state.get("reviews") or []) + 1,
+        watch_paths=state.get("watch_paths") or [state["cwd"]])
+    report["review_brief"] = reviewing.brief_for(
+        state, digest, report["review_file"], str(paths.harness_root()))
+
+
 def check(args) -> tuple[dict, int]:
     state = goal.load(args.slug)
     if goal.execution_mode(state) == "state":
@@ -145,14 +171,11 @@ def check(args) -> tuple[dict, int]:
     report = status(state)
     report["review_required"] = not error and (
         state["gate"]["kind"] == "coverage"
-        or (result == "pass" and bool(state["gate"].get("review_criterion")))
+        or (result == "pass"
+            and bool(evidence.review_reasons(state, goal._requirements(state))))
     )
     if report["review_required"]:
-        report["review_file"] = reviewing.review_file(
-            state["slug"], digest, len(state.get("reviews") or []) + 1,
-            watch_paths=state.get("watch_paths") or [state["cwd"]])
-        report["review_brief"] = reviewing.brief_for(
-            state, digest, report["review_file"], str(paths.harness_root()))
+        _review_handoff(report, state, digest)
     if error:
         report["error"] = error
     return report, (2 if error else 0 if result == "pass" else 1)
@@ -205,6 +228,11 @@ def _dispatch_step(args) -> tuple[dict, int]:
                 update_file=args.update_file, worker_evidence_file=args.worker_evidence_file,
                 timeout=args.timeout, force=args.force,
             )
+        elif args.action == "step-reclaim":
+            report = steps.reclaim(
+                args.slug, args.attempt, expected_revision=args.expected_revision,
+                session=args.session,
+            )
         else:
             report = steps.recover(
                 args.slug, args.attempt, expected_revision=args.expected_revision,
@@ -241,10 +269,12 @@ def dispatch(args) -> tuple[dict, int]:
             watch_paths=args.watch, review_criterion=args.review,
             execution=args.execution, gate_path=args.gate_path,
         )
+        if state["gate"]["kind"] == "command":
+            state = goal.observe(state["slug"], "baseline")
         report = status(state)
         report["other_goals"] = goal_rows(exclude=state["slug"])
         return report, 0
-    if args.action in {"step-begin", "step-attach", "step-finish", "step-recover"}:
+    if args.action in {"step-begin", "step-attach", "step-finish", "step-recover", "step-reclaim"}:
         return _dispatch_step(args)
     if args.action == "check":
         return check(args)
@@ -252,6 +282,18 @@ def dispatch(args) -> tuple[dict, int]:
         state = goal.record_review(args.slug, args.result, args.evidence_file.read_text(),
                                    args.judge, args.digest)
         return status(state), 0 if args.result == "pass" else 1
+    if args.action == "observe":
+        return status(goal.observe(args.slug, args.role, timeout=args.timeout)), 0
+    if args.action == "close":
+        result = goal.close(args.slug, run_gate=not args.if_ready, timeout=args.timeout)
+        if not result["complete"] and any("review" in m for m in result["missing"]):
+            state = goal.load(args.slug)
+            digest = tree_hash.compute(state["cwd"], state.get("watch_paths"))
+            if evidence.passing_record(state, digest):
+                _review_handoff(result, state, digest)
+        return result, 0 if result["complete"] else 1
+    if args.action == "approve-test-change":
+        return status(goal.approve_test_change(args.slug, args.path, args.reason)), 0
     if args.action == "complete":
         return status(goal.complete(args.slug, "")), 0
     if args.action == "abandon":
