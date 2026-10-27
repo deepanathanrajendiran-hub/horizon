@@ -19,8 +19,8 @@ python3 "$HARNESS" --runtime codex --project "$PROJECT" status
 ```
 
 Run `doctor` first and use the `state` and `gates` paths it prints for the whole
-session. Codex has no hooks, so at session start run `status`, and for any active
-attempt run `step-reclaim` (see Optional state mode).
+session. Codex has no hooks, so at session start run `status`, and handle any
+active attempt as described under Optional state mode before reclaiming it.
 
 ## Earlier goals
 
@@ -140,10 +140,12 @@ status evidence, and finish the attempt. Allow at most one formatting-only repai
 request to that worker. Further implementation requires another reserved attempt.
 Use existing independent review and completion checks after the attempt closes.
 
-If `status` shows an attempt you didn't start, its session may have died.
-Without hooks, run `step-reclaim` when `status` shows an attempt that no live
-worker owns. It refuses while the lease is live (state-mode leases go stale
-after 600 s without renewal).
+If `status` shows an attempt you didn't start, its session may have died. In
+Codex nothing renews an attempt's lease, so every lease lapses 600 s after
+`step-begin` or `step-attach` even while its worker is still running; a lapsed lease is not
+evidence that the worker stopped. Run `step-reclaim` only for an attempt whose
+worker the host's status/wait tools confirm has stopped, or that no worker was
+ever attached to. It refuses while the lease is live.
 
 ```bash
 python3 "$HARNESS" --runtime codex --project "$PROJECT" step-reclaim "$SLUG" \
@@ -179,13 +181,15 @@ python3 "$HARNESS" --runtime codex --project "$PROJECT" check "$SLUG" \
   --did "Concrete change and evidence" --next "Next useful action"
 ```
 
-A command pass does not complete the goal. Exit codes: 0 command pass, 1
-failed/skipped/awaiting review, 2 error. Continue from the saved next action
-while budget remains.
+`check` does not complete the goal; Codex has no hooks, so only `close` does.
+Exit codes: 0 command pass, 1 failed/skipped/awaiting review, 2 error. Continue
+from the saved next action while budget remains.
 
 When you believe the work is done, run `close SLUG`. It completes the goal if a
 passing gate result covers the current files and nothing else is missing;
-otherwise it lists what is missing.
+otherwise it lists what is missing. A `--coverage` goal has no command for
+`close` to run: run `check` to get the review brief, record the reviewer's
+verdict with `review`, then run `close`.
 
 ```bash
 python3 "$HARNESS" --runtime codex --project "$PROJECT" close "$SLUG"
@@ -207,7 +211,9 @@ python3 "$HARNESS" --runtime codex --project "$PROJECT" approve-test-change "$SL
 A skipped check never blocks completion. A pass recorded in an earlier session
 still counts if the files are unchanged. When the budget is spent and `close`
 cannot complete, it records the goal as finalized (`budget_exhausted`); give the
-final report. `close --if-ready` never runs the gate.
+final report. `close --if-ready` never runs the gate, and never completes a goal
+whose files are unchanged since the baseline. An explicit `close` can; it then
+reports `"unchanged_since_baseline": true`, which the final report must state.
 
 ## Independent review
 
@@ -236,8 +242,8 @@ spend the next increment on those lines while budget remains, or stop and report
 them as unverified. A reviewer's expectation ("should handle", "by design",
 "harmless") is not evidence. Use the real reviewer handle and the hash the
 reviewer was given and echoed. Never record a review against a later checkpoint
-or another goal. If anything changed after the reviewer saw it, run `check` and
-a new review.
+or another goal. If anything changed after the reviewer saw it, run `close` for
+a new brief (`check` for a `--coverage` goal) and a new review.
 
 ```bash
 python3 "$HARNESS" --runtime codex --project "$PROJECT" review "$SLUG" \

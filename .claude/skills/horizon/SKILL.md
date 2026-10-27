@@ -81,8 +81,9 @@ is a short label for this request that no directory there already uses.
 4. Start the goal before editing any deliverable; a gate written after the answer
    tends to check the answer's form. Write `request.md`, `requirements.md` and the
    gate in the same Bash call that runs `start`. `start` runs the gate once as the
-   baseline observation and charges no turn. In Claude Code, the first `start` in a
-   project also installs Horizon's hooks and reports `"hooks": "installed"`.
+   baseline observation and charges no turn. In Claude Code, `start` also installs
+   Horizon's hooks when they are missing and reports `"hooks": "installed"`; after
+   `uninstall-hooks` it leaves them out.
 
 ```bash
 python3 "$HARNESS" --runtime claude --project "$PROJECT" start "Requested outcome" \
@@ -145,10 +146,11 @@ request to that worker. Further implementation requires another reserved attempt
 Use existing independent review and completion checks after the attempt closes.
 
 If `status` shows an attempt you didn't start, its session may have died. An
-attempt holds a lease that the PostToolUse hook renews; once it goes 600 s
-without renewal, the session-start hook reclaims the attempt automatically.
-Until the hooks are loaded, or if a reclaim is still needed, run `step-reclaim`
-yourself. It refuses while the lease is live.
+attempt holds a lease that the PostToolUse hook renews. The session-start hook
+reclaims the attempt automatically once the lease goes 600 s without renewal,
+or 300 s when a different session owns it. Until the hooks are loaded, or if a
+reclaim is still needed, run `step-reclaim` yourself. It refuses while the lease
+is live.
 
 ```bash
 python3 "$HARNESS" --runtime claude --project "$PROJECT" step-reclaim "$SLUG" \
@@ -184,13 +186,17 @@ python3 "$HARNESS" --runtime claude --project "$PROJECT" check "$SLUG" \
   --did "Concrete change and evidence" --next "Next useful action"
 ```
 
-A command pass does not complete the goal. Exit codes: 0 command pass, 1
+`check` itself does not complete the goal, but once Horizon's hooks are loaded
+the Stop hook runs `close --if-ready` at the end of each turn, which completes
+the goal as soon as the recorded evidence allows. Exit codes: 0 command pass, 1
 failed/skipped/awaiting review, 2 error. Continue from the saved next action
 while budget remains.
 
 When you believe the work is done, run `close SLUG`. It completes the goal if a
 passing gate result covers the current files and nothing else is missing;
-otherwise it lists what is missing.
+otherwise it lists what is missing. A `--coverage` goal has no command for
+`close` to run: run `check` to get the review brief, record the reviewer's
+verdict with `review`, then run `close`.
 
 ```bash
 python3 "$HARNESS" --runtime claude --project "$PROJECT" close "$SLUG"
@@ -212,7 +218,10 @@ python3 "$HARNESS" --runtime claude --project "$PROJECT" approve-test-change "$S
 A skipped check never blocks completion. A pass recorded in an earlier session
 still counts if the files are unchanged. When the budget is spent and `close`
 cannot complete, it records the goal as finalized (`budget_exhausted`); give the
-final report. `close --if-ready` never runs the gate.
+final report. `close --if-ready` never runs the gate, and neither it nor the Stop
+hook completes a goal whose files are unchanged since the baseline. An explicit
+`close` can; it then reports `"unchanged_since_baseline": true`, which the final
+report must state.
 
 ## Independent review
 
@@ -241,8 +250,8 @@ spend the next increment on those lines while budget remains, or stop and report
 them as unverified. A reviewer's expectation ("should handle", "by design",
 "harmless") is not evidence. Use the real reviewer handle and the hash the
 reviewer was given and echoed. Never record a review against a later checkpoint
-or another goal. If anything changed after the reviewer saw it, run `check` and
-a new review.
+or another goal. If anything changed after the reviewer saw it, run `close` for
+a new brief (`check` for a `--coverage` goal) and a new review.
 
 ```bash
 python3 "$HARNESS" --runtime claude --project "$PROJECT" review "$SLUG" \
