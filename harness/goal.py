@@ -19,6 +19,8 @@ import task_state
 from typing import Callable
 import reviewing
 from pathlib import Path
+import evidence
+import gate
 
 MAX_GATE_OUTPUT = 4000
 
@@ -36,6 +38,8 @@ MIN_COVERAGE_EVIDENCE = 40
 # judge that genuinely ran -- the one direction that teaches an agent to
 # route around the check.
 JUDGE_ROLE_MARKER = "judge"
+
+OBSERVATION_ROLES = ("baseline", "resume", "final")
 
 
 class GateRequired(Exception):
@@ -527,6 +531,40 @@ def budget_exhausted(state: dict) -> bool:
         if elapsed >= max_minutes:
             return True
     return False
+
+
+def observe(slug: str, role: str, timeout: int = gate.DEFAULT_TIMEOUT) -> dict:
+    """Run the command gate now and record what it found, outside any increment.
+
+    Charges no turn and never skips: an unchanged tree is exactly when a
+    resumed session needs a fresh reading. The first observation also saves
+    the test-file manifest that completion compares against.
+    """
+    if role not in OBSERVATION_ROLES:
+        raise ValueError(f"role must be one of {', '.join(OBSERVATION_ROLES)}")
+    before = load(slug)
+    if before["status"] != "active":
+        raise GoalClosed(f"cannot observe: goal status is {before['status']!r}")
+    if before["gate"]["kind"] != "command":
+        raise GateNotPassed("Coverage gates are judged by a reviewer; observe runs command gates only.")
+    require_idle(before)
+    try:
+        result, output, digest = gate.run_gate_at(dict(before, checkpoints=[]), timeout=timeout)
+    except gate.GateUnrunnable as exc:
+        result, output = "fail", str(exc)
+        digest = getattr(exc, "tree_hash", gate.UNKNOWN_HASH)
+    manifest = evidence.test_manifest(before["cwd"], before.get("watch_paths"))
+    with filelock.goal_locked(_path(slug)):
+        state = load(slug)
+        if state["status"] != "active":
+            raise GoalClosed(f"cannot observe: goal status is {state['status']!r}")
+        require_idle(state)
+        state.setdefault("observations", []).append({
+            "kind": "observation", "role": role, "at": _now(), "tree_hash": digest,
+            "gate": result, "gate_output": _bounded(output), "gate_spec": dict(state["gate"]),
+        })
+        state.setdefault("test_manifest", manifest)
+        return _persist_mutation_locked(state)
 
 
 
