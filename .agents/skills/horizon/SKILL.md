@@ -19,7 +19,8 @@ python3 "$HARNESS" --runtime codex --project "$PROJECT" status
 ```
 
 Run `doctor` first and use the `state` and `gates` paths it prints for the whole
-session.
+session. Codex has no hooks, so at session start run `status`, and for any active
+attempt run `step-reclaim` (see Optional state mode).
 
 ## Earlier goals
 
@@ -79,7 +80,9 @@ is a short label for this request that no directory there already uses.
    check that does not depend on how the artifact is produced, or retag that line
    `[review]` or `[unverifiable]`.
 4. Start the goal before editing any deliverable; a gate written after the answer
-   tends to check the answer's form:
+   tends to check the answer's form. Write `request.md`, `requirements.md` and the
+   gate in the same Bash call that runs `start`. `start` runs the gate once as the
+   baseline observation and charges no turn.
 
 ```bash
 python3 "$HARNESS" --runtime codex --project "$PROJECT" start "Requested outcome" \
@@ -96,7 +99,10 @@ python3 "$HARNESS" --runtime codex --project "$PROJECT" start "Requested outcome
    review: if it prints `review_required`, do not dispatch a reviewer.
 
 Use `--coverage` with the same criterion instead of `--gate` when no command can
-check any line. Omit `--review` only when every line is tagged `[gate]`. `start`
+check any line. When you write the gate yourself (`--gate-path`), always pass
+`--review`: such a gate is never "strong", and without `--review` no reviewer
+would check it. Without `--gate-path`, omit `--review` only when every line is
+tagged `[gate]`. `start`
 refuses a `--gate-path` without request.md and at least one requirement line, and
 watches that directory for you. Keep the gate, its fixtures, request.md and
 requirements.md in `$GATES`; keep logs and generated output elsewhere, outside the
@@ -109,7 +115,8 @@ over the example. Save the returned slug. State belongs to this runtime's projec
 
 ## Optional state mode
 
-Use state mode when the user requests it. Add `--execution state` at goal creation;
+State mode is for long unattended runs or parallel work; use conversation mode
+otherwise. Use it when the user requests it. Add `--execution state` at goal creation;
 existing goals keep their original mode. Read `status` before dispatching work.
 For state goals, follow `step-begin`, fresh worker dispatch, `step-attach`, and
 `step-finish` in the [shared CLI reference](references/commands.md#state-mode-worker-protocol).
@@ -132,6 +139,16 @@ After the worker stops, inspect its evidence and proposed changes, save its term
 status evidence, and finish the attempt. Allow at most one formatting-only repair
 request to that worker. Further implementation requires another reserved attempt.
 Use existing independent review and completion checks after the attempt closes.
+
+If `status` shows an attempt you didn't start, its session may have died.
+Without hooks, run `step-reclaim` when `status` shows an attempt that no live
+worker owns. It refuses while the lease is live (state-mode leases go stale
+after 600 s without renewal).
+
+```bash
+python3 "$HARNESS" --runtime codex --project "$PROJECT" step-reclaim "$SLUG" \
+  --attempt "$ATTEMPT_ID" --expected-revision "$CURRENT_REVISION"
+```
 
 If interrupted, establish worker and gate liveness before `step-recover`. Preserve
 workspace edits and inspect them on the next increment. Never kill a process using
@@ -162,15 +179,41 @@ python3 "$HARNESS" --runtime codex --project "$PROJECT" check "$SLUG" \
   --did "Concrete change and evidence" --next "Next useful action"
 ```
 
-A command pass does not complete the goal. Coverage checks initially record an
-awaiting-review result. Exit codes: 0 command pass, 1 failed/skipped/awaiting
-review, 2 error. Continue from the saved next action while budget remains.
+A command pass does not complete the goal. Exit codes: 0 command pass, 1
+failed/skipped/awaiting review, 2 error. Continue from the saved next action
+while budget remains.
+
+When you believe the work is done, run `close SLUG`. It completes the goal if a
+passing gate result covers the current files and nothing else is missing;
+otherwise it lists what is missing.
+
+```bash
+python3 "$HARNESS" --runtime codex --project "$PROJECT" close "$SLUG"
+```
+
+- If it says a review is required, dispatch the fresh reviewer with the
+  `review_brief` it printed, record the verdict with `review`, then run `close`
+  again.
+- If it says a baseline test file changed, stop and ask the user (or a fresh
+  reviewer) whether the change is legitimate. Only then run
+  `approve-test-change`, naming who approved it and why. Never approve a
+  changed test on your own judgment.
+
+```bash
+python3 "$HARNESS" --runtime codex --project "$PROJECT" approve-test-change "$SLUG" \
+  --path "tests/test_parser.py" --reason "Approved by the user: the old assertion encoded the bug"
+```
+
+A skipped check never blocks completion. A pass recorded in an earlier session
+still counts if the files are unchanged. When the budget is spent and `close`
+cannot complete, it records the goal as finalized (`budget_exhausted`); give the
+final report. `close --if-ready` never runs the gate.
 
 ## Independent review
 
-When `review_required` is true, `check` also prints `review_brief` and
-`review_file`. Dispatch a **fresh independent reviewer** with the available
-Codex subagent tool; in this desktop runtime it is `collaboration.spawn_agent`
+When `close` (or `check`) reports that a review is required, it prints
+`review_brief` and `review_file`. Dispatch a **fresh independent reviewer** with the
+available Codex subagent tool; in this desktop runtime it is `collaboration.spawn_agent`
 with `fork_turns: "none"`. Wait for it to finish with the host's wait tools
 before anything else. Send it the `review_brief` unchanged, except that you replace
 `<<ARTIFACTS>>` with the artifact paths and `<<HOW_TO_RUN>>` with the commands a
@@ -201,18 +244,17 @@ a new review.
 python3 "$HARNESS" --runtime codex --project "$PROJECT" review "$SLUG" \
   --result pass --judge "$JUDGE_HANDLE" --hash "$CHECKPOINT_HASH" \
   --evidence-file "$REVIEW_FILE"
-python3 "$HARNESS" --runtime codex --project "$PROJECT" complete "$SLUG"
 ```
 
-Complete only after all configured checks pass. Missing/failed review, changed
-artifacts, a changed gate, or an unreadable snapshot blocks completion. After any
-change to reviewed files, check and review again, within the round limit. The
-ledger records reviewer provenance; it cannot prove independence by itself.
+After a recorded pass, run `close` again. It refuses on a missing or failed
+review, changed artifacts or gate, or an unreadable snapshot. After any change
+to reviewed files, run `close` for a new brief and review again, within the
+round limit. The ledger records reviewer provenance; it cannot prove
+independence by itself.
 
 Never end a turn, or schedule a wakeup (an automation or thread heartbeat),
 while your own reviewer or gate is running. When the reviewer passes an unchanged
-checkpoint, run `review` and then `complete` at once. Another `check` on unchanged
-files records `skipped` and blocks both.
+checkpoint, run `review` and then `close` at once.
 
 A finding blocks only if it bears on whether a requirement line holds, that is,
 it makes the line FAIL or UNVERIFIED. Record other findings as non-blocking gaps
@@ -231,7 +273,14 @@ goal: continue through a new goal as described under Earlier goals, or stop and
 report. A skipped command needs changed inputs or `check --force` for external
 state. Missing tools, unreadable inputs, and timeouts retain a failed checkpoint:
 diagnose the cause, never fabricate a pass. Use `--timeout SECONDS` for a slow
-gate. Read [the CLI reference](references/commands.md) for watch paths, lifecycle
+gate. To record the gate's current result without spending an increment, run
+`observe`; it exits 1 unless the gate passed.
+
+```bash
+python3 "$HARNESS" --runtime codex --project "$PROJECT" observe "$SLUG"
+```
+
+Read [the CLI reference](references/commands.md) for watch paths, lifecycle
 commands, the review brief, and upgrade rules.
 
 Disk checkpoints survive interruption; they do not wake the application.

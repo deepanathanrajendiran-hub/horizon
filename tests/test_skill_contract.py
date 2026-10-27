@@ -40,6 +40,7 @@ def test_documented_commands_parse_with_the_real_cli(runtime, folder, name):
 
     commands = 0
     documented_state_commands = set()
+    documented_by_source = {"SKILL.md": set(), "commands.md": set()}
     fence = chr(96) * 3
     for source in sources:
         text = source.read_text()
@@ -54,6 +55,7 @@ def test_documented_commands_parse_with_the_real_cli(runtime, folder, name):
                     args = cli.parser().parse_args(shlex.split(expanded)[2:])
                     assert args.runtime == runtime
                     commands += 1
+                    documented_by_source[source.name].add(args.action)
                     if source.name == "commands.md":
                         documented_state_commands.add(args.action)
 
@@ -65,6 +67,9 @@ def test_documented_commands_parse_with_the_real_cli(runtime, folder, name):
             "step-finish",
             "step-recover",
         } <= documented_state_commands
+        evidence_flow = {"close", "observe", "step-reclaim", "approve-test-change"}
+        assert evidence_flow <= documented_by_source["SKILL.md"]
+        assert evidence_flow <= documented_by_source["commands.md"]
 
 @pytest.mark.parametrize("runtime", ["codex", "claude"])
 def test_state_mode_command_forms_parse(runtime):
@@ -186,3 +191,17 @@ def test_documented_review_template_matches_the_harness():
     section = text.split("## Requirements and review", 1)[1]
     block = re.search(chr(96) * 3 + r"text\n(.*?)" + chr(96) * 3, section, re.S).group(1)
     assert block == reviewing.TEMPLATE
+
+@pytest.mark.parametrize("folder", [".claude", ".agents"])
+def test_horizon_skills_carry_the_close_protocol(folder):
+    text = " ".join(_horizon_skill(folder).split())
+    for phrase in ("run `close", "always pass `--review`", "Never approve a changed test on your own judgment",
+                   "A skipped check never blocks completion", "`step-reclaim`",
+                   "baseline test file changed"):
+        assert phrase in text, phrase
+    assert "Another `check` on unchanged files records `skipped`" not in text
+    assert "`complete` at once" not in text and "run `review` and then `complete`" not in text
+    if folder == ".claude":
+        assert "next session" in text and '"hooks": "installed"' in text
+    else:
+        assert "has no hooks" in text
