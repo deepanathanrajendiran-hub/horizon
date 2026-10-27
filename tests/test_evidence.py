@@ -182,3 +182,94 @@ def test_old_goal_without_new_fields_completes_after_observe(isolated_goals):
     goal._save(raw)
     goal.observe(state["slug"], "final")
     assert goal.complete(state["slug"], "")["status"] == "complete"
+
+
+def test_old_goal_with_review_and_edited_baseline_test_requires_review(isolated_goals):
+    p = _project()
+    (p / "test_a.py").write_text("def test(): assert 1\n")
+    state = _make(review_criterion="Every requirement holds")
+    raw = goal.load(state["slug"])
+    raw.pop("observations", None)
+    raw.pop("test_manifest", None)
+    goal._save(raw)
+    (p / "test_a.py").write_text("def test(): pass\n")
+    result = goal.close(state["slug"])
+    assert result["complete"] is False
+    assert any("review" in m for m in result["missing"])
+    assert "test_manifest" not in goal.load(state["slug"])
+
+
+def test_create_records_the_test_manifest_before_any_gate_run():
+    p = _project()
+    (p / "test_a.py").write_text("one\n")
+    state = _make()
+    assert set(state["test_manifest"]) == {"test_a.py"}
+    (p / "test_a.py").write_text("two\n")
+    saved = goal.observe(state["slug"], "baseline")
+    assert saved["test_manifest"] == state["test_manifest"]
+
+
+def test_close_if_ready_does_not_complete_an_unchanged_baseline():
+    state = _make()
+    goal.observe(state["slug"], "baseline")
+    waited = goal.close(state["slug"], run_gate=False)
+    assert waited["complete"] is False
+    assert any("baseline" in m for m in waited["missing"])
+    assert goal.load(state["slug"])["status"] == "active"
+    done = goal.close(state["slug"])
+    assert done["complete"] is True and done["unchanged_since_baseline"] is True
+
+
+def test_close_if_ready_completes_once_the_tree_changed():
+    state = _make()
+    goal.observe(state["slug"], "baseline")
+    (_project() / "new.py").write_text("x = 2\n")
+    goal.observe(state["slug"], "final")
+    done = goal.close(state["slug"], run_gate=False)
+    assert done["complete"] is True and "unchanged_since_baseline" not in done
+
+
+def _script_gate_goal():
+    p = _project()
+    (p / "tests").mkdir()
+    (p / "tests" / "test_a.py").write_text("def test(): pass\n")
+    (p / "run_tests.sh").write_text("exit 0\n")
+    state = _make(gate_value="sh run_tests.sh", review_criterion="Every requirement holds")
+    goal.observe(state["slug"], "baseline")
+    return p, state
+
+
+def test_unchanged_gate_script_keeps_the_gate_strong():
+    p, state = _script_gate_goal()
+    assert set(goal.load(state["slug"])["gate_manifest"]) == {"run_tests.sh"}
+    (p / "src.py").write_text("x = 1\n")
+    assert goal.close(state["slug"])["complete"] is True
+
+
+def test_edited_gate_script_requires_review():
+    p, state = _script_gate_goal()
+    (p / "run_tests.sh").write_text("# skip everything\nexit 0\n")
+    result = goal.close(state["slug"])
+    assert result["complete"] is False
+    assert any("review" in m for m in result["missing"])
+
+
+def test_edited_conftest_requires_review():
+    p = _project()
+    (p / "conftest.py").write_text("")
+    (p / "test_a.py").write_text("def test(): pass\n")
+    state = _make(review_criterion="Every requirement holds")
+    assert "conftest.py" in state["gate_manifest"]
+    goal.observe(state["slug"], "baseline")
+    (p / "conftest.py").write_text("collect_ignore = ['test_a.py']\n")
+    result = goal.close(state["slug"])
+    assert result["complete"] is False
+    assert any("review" in m for m in result["missing"])
+
+
+def test_coverage_completion_message_points_at_the_review():
+    state = _make(gate_kind="coverage", gate_value="The parser rejects empty input")
+    with pytest.raises(goal.GateNotPassed) as raised:
+        goal.complete(state["slug"], "")
+    assert "budget exhaustion" not in str(raised.value)
+    assert "check" in str(raised.value) and "review" in str(raised.value)

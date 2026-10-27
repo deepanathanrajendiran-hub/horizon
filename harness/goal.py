@@ -350,6 +350,11 @@ def _initial_state(goal, cwd, gate_kind, gate_value, max_turns,
         state["gate_path"] = gate_path
         if not any(_covers(watch, gate_path) for watch in state["watch_paths"]):
             state["watch_paths"].append(gate_path)
+    if gate_kind == "command":
+        # Recorded before any gate run, so a later edit to a test or to the
+        # gate's own scripts shows up as a change rather than as the baseline.
+        state["test_manifest"] = evidence.test_manifest(cwd, state["watch_paths"])
+        state["gate_manifest"] = evidence.gate_manifest(cwd, str(gate_value), state["watch_paths"])
     return state
 
 
@@ -538,8 +543,10 @@ def observe(slug: str, role: str, timeout: int = gate.DEFAULT_TIMEOUT) -> dict:
     """Run the command gate now and record what it found, outside any increment.
 
     Charges no turn and never skips: an unchanged tree is exactly when a
-    resumed session needs a fresh reading. The first observation also saves
-    the test-file manifest that completion compares against.
+    resumed session needs a fresh reading. Goals record their test-file
+    manifest at creation; a baseline observation of a goal that has none
+    saves it then. Any other role leaves it absent, so an old goal stays
+    fail-closed instead of adopting tests edited during the work.
     """
     if role not in OBSERVATION_ROLES:
         raise ValueError(f"role must be one of {', '.join(OBSERVATION_ROLES)}")
@@ -549,12 +556,14 @@ def observe(slug: str, role: str, timeout: int = gate.DEFAULT_TIMEOUT) -> dict:
     if before["gate"]["kind"] != "command":
         raise GateNotPassed("Coverage gates are judged by a reviewer; observe runs command gates only.")
     require_idle(before)
+    manifest = None
+    if role == "baseline" and "test_manifest" not in before:
+        manifest = evidence.test_manifest(before["cwd"], before.get("watch_paths"))
     try:
         result, output, digest = gate.run_gate_at(dict(before, checkpoints=[]), timeout=timeout)
     except gate.GateUnrunnable as exc:
         result, output = "fail", str(exc)
         digest = getattr(exc, "tree_hash", gate.UNKNOWN_HASH)
-    manifest = evidence.test_manifest(before["cwd"], before.get("watch_paths"))
     with filelock.goal_locked(_path(slug)):
         state = load(slug)
         if state["status"] != "active":
@@ -564,7 +573,8 @@ def observe(slug: str, role: str, timeout: int = gate.DEFAULT_TIMEOUT) -> dict:
             "kind": "observation", "role": role, "at": _now(), "tree_hash": digest,
             "gate": result, "gate_output": _bounded(output), "gate_spec": dict(state["gate"]),
         })
-        state.setdefault("test_manifest", manifest)
+        if manifest is not None:
+            state.setdefault("test_manifest", manifest)
         return _persist_mutation_locked(state)
 
 def latest_observation(state: dict) -> dict | None:
@@ -576,13 +586,22 @@ def latest_observation(state: dict) -> dict | None:
     return {"role": last["role"], "at": last["at"], "gate": last["gate"],
             "gate_output": last["gate_output"], "tree_hash": last["tree_hash"]}
 
+def _unchanged_since_baseline(state: dict, observed: str) -> bool:
+    """True when the files are exactly those a baseline observation recorded."""
+    return (isinstance(observed, str) and observed != gate.UNKNOWN_HASH
+            and any(o.get("role") == "baseline" and o.get("tree_hash") == observed
+                    for o in state.get("observations") or []))
+
 
 def close(slug: str, *, run_gate: bool = True, timeout: int = gate.DEFAULT_TIMEOUT) -> dict:
     """Finish in one call when the evidence allows; otherwise say exactly what is missing.
 
     With run_gate, the current files are observed first when no pass covers
-    them. When the budget is spent, the current tree is recorded as the
-    deliverable (anytime semantics) instead of being left open.
+    them. Without it (`close --if-ready`, the Stop hook) a goal never
+    completes on files identical to its baseline observation: that pass
+    predates any work. An explicit close may complete them, and says so with
+    `unchanged_since_baseline`. When the budget is spent, the current tree is
+    recorded as the deliverable (anytime semantics) instead of being left open.
     """
     state = load(slug)
     if state["status"] != "active":
@@ -593,16 +612,25 @@ def close(slug: str, *, run_gate: bool = True, timeout: int = gate.DEFAULT_TIMEO
         observed = tree_hash.compute(state["cwd"], state.get("watch_paths"))
     except Exception:
         observed = gate.UNKNOWN_HASH
+    unchanged = _unchanged_since_baseline(state, observed)
     observed_now = False
     try:
+        if not run_gate and unchanged:
+            raise GateNotPassed(
+                "The files are unchanged since the baseline observation, so an automatic "
+                "close does not complete the goal. Run close (without --if-ready) to "
+                "complete a goal that needed no change.")
         if (run_gate and state["gate"]["kind"] == "command"
                 and evidence.passing_record(state, observed) is None
                 and not budget_exhausted(state)):
             observe(slug, "final", timeout=timeout)
             observed_now = True
         done = complete(slug, "")
-        return {"complete": True, "missing": [], "summary": summary(done), "finalized": None,
-                "observation": latest_observation(done)}
+        result = {"complete": True, "missing": [], "summary": summary(done), "finalized": None,
+                  "observation": latest_observation(done)}
+        if unchanged:
+            result["unchanged_since_baseline"] = True
+        return result
     except (GateNotPassed, AttemptOpen, RevisionConflict) as exc:
         missing = [str(exc)]
         if observed_now and isinstance(exc, GateNotPassed):
@@ -723,7 +751,8 @@ def _apply_coverage_completion(state: dict, observed_hash: str, gate_output: str
     last = state["checkpoints"][-1] if state["checkpoints"] else None
     if last is None or last["gate"] != "pass":
         raise GateNotPassed(
-            "The last gate did not pass; budget exhaustion is not success."
+            "The coverage review has not passed for the current files; "
+            "run check for a review brief, then record the reviewer's verdict with review."
         )
     evidence = (last.get("gate_output", gate_output) or "").strip()
     if state["gate"]["kind"] == "coverage":
