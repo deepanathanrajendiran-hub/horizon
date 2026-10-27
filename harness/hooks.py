@@ -125,6 +125,23 @@ def uninstall(project: Path) -> bool:
         _write(path, settings)
     return changed
 
+def _optout_path() -> Path:
+    return paths.harness_root() / "hooks-optout"
+
+
+def opted_out() -> bool:
+    """True after uninstall-hooks, until install-hooks: start then leaves settings alone."""
+    return _optout_path().exists()
+
+
+def set_opted_out(value: bool) -> None:
+    marker = _optout_path()
+    if value:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("uninstall-hooks was run; start will not reinstall the hooks.\n")
+    else:
+        marker.unlink(missing_ok=True)
+
 
 def _active_goals() -> list[dict]:
     out = []

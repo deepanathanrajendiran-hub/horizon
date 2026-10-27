@@ -248,6 +248,20 @@ def _dispatch_step(args) -> tuple[dict, int]:
         return _step_error(args, error), 2
     return report, report["exit_code"]
 
+def _auto_install_hooks(entrypoint: str) -> dict:
+    """start installs the Claude Code hooks unless the user ran uninstall-hooks.
+
+    A failure is reported, never raised: the goal already exists.
+    """
+    if hooks.opted_out():
+        return {}
+    try:
+        if hooks.install(paths.project_root(), entrypoint):
+            return {"hooks": "installed"}
+    except (hooks.HookInstallError, OSError) as exc:
+        return {"hooks_error": str(exc)}
+    return {}
+
 
 def dispatch(args) -> tuple[dict, int]:
     if args.action == "doctor":
@@ -274,22 +288,24 @@ def dispatch(args) -> tuple[dict, int]:
             watch_paths=args.watch, review_criterion=args.review,
             execution=args.execution, gate_path=args.gate_path,
         )
+        # Hooks first: writing .claude/settings.json after the baseline would
+        # leave the baseline describing files that no longer exist.
+        installed = _auto_install_hooks(args.entrypoint) if paths.runtime() == "claude" else {}
         if state["gate"]["kind"] == "command":
             state = goal.observe(state["slug"], "baseline")
         report = status(state)
         report["observation"] = goal.latest_observation(state)
         report["other_goals"] = goal_rows(exclude=state["slug"])
-        if paths.runtime() == "claude":
-            try:
-                if hooks.install(paths.project_root(), args.entrypoint):
-                    report["hooks"] = "installed"
-            except hooks.HookInstallError as exc:
-                report["hooks_error"] = str(exc)
+        report.update(installed)
         return report, 0
     if args.action == "install-hooks":
-        return {"changed": hooks.install(paths.project_root(), args.entrypoint)}, 0
+        changed = hooks.install(paths.project_root(), args.entrypoint)
+        hooks.set_opted_out(False)
+        return {"changed": changed}, 0
     if args.action == "uninstall-hooks":
-        return {"changed": hooks.uninstall(paths.project_root())}, 0
+        changed = hooks.uninstall(paths.project_root())
+        hooks.set_opted_out(True)
+        return {"changed": changed}, 0
     if args.action in {"step-begin", "step-attach", "step-finish", "step-recover", "step-reclaim"}:
         return _dispatch_step(args)
     if args.action == "check":

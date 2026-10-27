@@ -130,6 +130,7 @@ def test_stop_completes_goal_whose_evidence_allows_it(state_client):
     if runtime != "claude":
         return
     run("start", "Keep the build green", "--gate", "true")
+    (project / "work.py").write_text("x = 1\n")  # the baseline alone never completes on Stop
     run("observe", "keep-the-build-green", "--role", "final")
     proc = _hook(project, "Stop", {"session_id": "s1"})
     assert proc.returncode == 0
@@ -205,3 +206,58 @@ def test_other_session_start_leaves_a_recent_unowned_attempt_alone(make_state_go
     _age_lease(slug, None, 601)
     hooks.run("SessionStart", {"session_id": "s2"})
     assert goal.load(slug)["execution"]["active_attempt"] is None
+
+
+def test_stop_does_not_complete_from_the_baseline_alone(state_client):
+    project, runtime, run = state_client
+    if runtime != "claude":
+        return
+    run("install-hooks")
+    run("start", "Keep the build green", "--gate", "true")
+    proc = _hook(project, "Stop", {"session_id": "s1"})
+    assert proc.returncode == 0
+    assert run("status", "keep-the-build-green")[1]["status"] == "active"
+    code, closed = run("close", "keep-the-build-green")
+    assert code == 0 and closed["complete"] is True
+    assert closed["unchanged_since_baseline"] is True
+
+
+def test_first_start_baseline_covers_the_tree_after_installing_hooks(state_client):
+    project, runtime, run = state_client
+    if runtime != "claude":
+        return
+    code, started = run("start", "Keep the build green", "--gate", "true")
+    assert started["hooks"] == "installed"
+    code, closed = run("close", started["slug"], "--if-ready")
+    assert closed["complete"] is False
+    assert not any("No passing gate result" in m for m in closed["missing"])
+    assert any("baseline" in m for m in closed["missing"])
+
+
+def test_start_respects_uninstall_hooks(state_client):
+    project, runtime, run = state_client
+    if runtime != "claude":
+        return
+    run("start", "Keep the build green", "--gate", "true")
+    assert run("uninstall-hooks")[1] == {"changed": True}
+    before = (project / ".claude/settings.json").read_text()
+    code, started = run("start", "Another goal", "--gate", "true")
+    assert code == 0 and "hooks" not in started
+    assert (project / ".claude/settings.json").read_text() == before
+    assert run("install-hooks")[1] == {"changed": True}
+    run("uninstall-hooks")
+    run("install-hooks")
+    code, started = run("start", "Third goal", "--gate", "true")
+    assert "hooks" not in started  # already installed, and the opt-out was cleared
+    assert not (project / ".claude/harness/hooks-optout").exists()
+
+
+def test_start_reports_an_unwritable_settings_file_and_keeps_the_goal(state_client):
+    project, runtime, run = state_client
+    if runtime != "claude":
+        return
+    (project / ".claude/settings.json").mkdir()
+    code, started = run("start", "Keep the build green", "--gate", "true")
+    assert code == 0 and started["hooks_error"]
+    assert run("status")[1]["goals"][0]["slug"] == "keep-the-build-green"
+    assert len(run("status")[1]["goals"]) == 1
