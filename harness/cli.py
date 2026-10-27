@@ -17,6 +17,7 @@ import task_state
 import steps
 import reviewing
 import evidence
+import hooks
 
 
 def parser() -> argparse.ArgumentParser:
@@ -100,6 +101,10 @@ def parser() -> argparse.ArgumentParser:
     recover.add_argument("--reason", required=True)
     recover.add_argument("--worker-state", choices=("stopped", "not-started"), required=True)
     recover.add_argument("--evidence-file", type=Path, required=True)
+    hook = commands.add_parser("hook", help="Run a Claude Code hook; reads the event JSON on stdin and always exits 0")
+    hook.add_argument("event", choices=("SessionStart", "PostToolUse", "Stop"))
+    commands.add_parser("install-hooks", help="Add Horizon's hooks to .claude/settings.json")
+    commands.add_parser("uninstall-hooks", help="Remove only Horizon's hooks from .claude/settings.json")
     return p
 
 
@@ -273,7 +278,17 @@ def dispatch(args) -> tuple[dict, int]:
             state = goal.observe(state["slug"], "baseline")
         report = status(state)
         report["other_goals"] = goal_rows(exclude=state["slug"])
+        if paths.runtime() == "claude":
+            try:
+                if hooks.install(paths.project_root(), args.entrypoint):
+                    report["hooks"] = "installed"
+            except hooks.HookInstallError as exc:
+                report["hooks_error"] = str(exc)
         return report, 0
+    if args.action == "install-hooks":
+        return {"changed": hooks.install(paths.project_root(), args.entrypoint)}, 0
+    if args.action == "uninstall-hooks":
+        return {"changed": hooks.uninstall(paths.project_root())}, 0
     if args.action in {"step-begin", "step-attach", "step-finish", "step-recover", "step-reclaim"}:
         return _dispatch_step(args)
     if args.action == "check":
@@ -317,6 +332,20 @@ def dispatch(args) -> tuple[dict, int]:
 def main(argv=None) -> int:
     args = parser().parse_args(argv)
     os.environ["CONTINUAL_HARNESS_RUNTIME"] = args.runtime
+    args.entrypoint = os.path.abspath(sys.argv[0])
+    if args.action == "hook":
+        # Hooks never block or fail the host session, whatever they are fed.
+        try:
+            if args.project:
+                os.chdir(args.project.expanduser().resolve())
+            raw = sys.stdin.read()
+            payload = json.loads(raw) if raw.strip() else {}
+            out = hooks.run(args.event, payload)
+            if out:
+                print(json.dumps(out))
+        except BaseException:
+            pass
+        return 0
     try:
         if args.project:
             os.chdir(args.project.expanduser().resolve())
