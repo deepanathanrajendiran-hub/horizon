@@ -261,3 +261,26 @@ def test_start_reports_an_unwritable_settings_file_and_keeps_the_goal(state_clie
     assert code == 0 and started["hooks_error"]
     assert run("status")[1]["goals"][0]["slug"] == "keep-the-build-green"
     assert len(run("status")[1]["goals"]) == 1
+
+def test_post_tool_use_records_the_host_process(make_state_goal, monkeypatch):
+    slug = _begin(make_state_goal)
+    host = {"pid": 4242, "started": "Tue Oct 27 22:15:00 2026"}
+    monkeypatch.setattr(leases, "host_process", lambda names=("claude",): host)
+    hooks.run("PostToolUse", {"session_id": "s1"})
+    assert leases.read(slug)["req-1"]["host"] == host
+
+
+def test_session_start_reclaims_at_once_when_the_owner_process_is_gone(make_state_goal):
+    # The mini GPT pilot: a capped session dies holding an attempt, and the next one starts seconds later.
+    slug = _begin(make_state_goal)
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    host = {"pid": child.pid, "started": leases._ps(child.pid)[1]}
+    leases._path(slug).write_text(json.dumps(
+        {"req-1": {"session": "s1", "renewed_at": time.time() - 5, "host": host}}))
+    hooks.run("SessionStart", {"session_id": "s2"})
+    assert goal.load(slug)["execution"]["active_attempt"] == "req-1"  # owner still running
+    child.kill()
+    child.wait()
+    out = hooks.run("SessionStart", {"session_id": "s2"})
+    assert goal.load(slug)["execution"]["active_attempt"] is None
+    assert "exited" in out["hookSpecificOutput"]["additionalContext"]
