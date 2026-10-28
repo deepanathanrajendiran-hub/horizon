@@ -225,3 +225,29 @@ def test_untracked_caches_do_not_change_the_hash(tmp_path):
     assert tree_hash.compute(repo) == before
     (repo / "pkg" / "module.py").write_text("VALUE = 1")
     assert tree_hash.compute(repo) != before
+
+def test_session_records_do_not_change_the_hash(tmp_path):
+    """SessionStart writes the new session's id to harness/session. Hashing it made every new
+    session see changed files, so no review or carried verdict ever outlived its session
+    (mini GPT Stage A pilot 2: nine sessions, nine checkpoints, no tracked change)."""
+    repo = _repo(tmp_path)
+    for runtime in (".claude", ".codex"):
+        (repo / runtime / "harness").mkdir(parents=True)
+    before = tree_hash.compute(repo)
+    for runtime in (".claude", ".codex"):
+        (repo / runtime / "harness" / "session").write_text("session-2\n")
+        (repo / runtime / "harness" / "hooks-optout").write_text("opted out\n")
+    assert tree_hash.compute(repo) == before
+    (repo / ".claude" / "harness" / "gates").mkdir()
+    (repo / ".claude" / "harness" / "gates" / "check.py").write_text("assert True\n")
+    assert tree_hash.compute(repo) != before
+
+
+def test_a_new_session_keeps_the_checkpoint(make_state_goal):
+    import hooks
+
+    state = make_state_goal()
+    hooks.run("SessionStart", {"session_id": "s1"})
+    before = tree_hash.compute(state["cwd"], state["watch_paths"])
+    hooks.run("SessionStart", {"session_id": "s2"})
+    assert tree_hash.compute(state["cwd"], state["watch_paths"]) == before

@@ -24,6 +24,10 @@ EXCLUDED_DIRS = {
     "__pycache__", ".mypy_cache", ".pytest_cache",
 }
 
+# Harness records under <runtime>/harness that change without any task work: goal
+# state, undo data, the changelog, and what the hooks write at every session start.
+BOOKKEEPING = ("goals", "undo", "CHANGELOG.md", "session", "hooks-optout")
+
 
 def _git(cwd, *args) -> str | None:
     """Run a git command, returning stdout or None if git is unusable here."""
@@ -49,7 +53,7 @@ def _bookkeeping(path: Path) -> bool:
     for i, part in enumerate(parts):
         if part.lower() in ('.claude', '.codex') and parts[i + 1:i + 2] == ('harness',):
             tail = parts[i + 2:]
-            return bool(tail) and tail[0] in ('goals', 'undo', 'CHANGELOG.md')
+            return bool(tail) and tail[0] in BOOKKEEPING
     return False
 
 
@@ -93,9 +97,10 @@ def compute(cwd, watch_paths: list[str] | None = None) -> str:
     cwd = Path(cwd).resolve()
     h = hashlib.sha256()
     h.update(b'HEAD\x00' + (_git(cwd, 'rev-parse', 'HEAD') or 'NONE').encode() + b'\x00')
-    exclusions = [f':(glob,exclude)**/{runtime}/harness/{part}'
+    exclusions = [f':(glob,exclude)**/{runtime}/harness/{part}{suffix}'
                   for runtime in ('.claude', '.codex')
-                  for part in ('goals/**', 'undo/**', 'CHANGELOG.md')]
+                  for part in BOOKKEEPING
+                  for suffix in ('', '/**')]
     # The walk skips cache directories; git must too, or the caches a gate or
     # a reviewer's own checks write make the checkpoint stale.
     exclusions += [f':(glob,exclude)**/{name}/**' for name in sorted(EXCLUDED_DIRS - {'.git'})]
