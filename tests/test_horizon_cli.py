@@ -269,6 +269,33 @@ def test_a_cut_off_review_is_continued_by_the_next_check(client):
     code, closed = run("close", slug)
     assert code == 0 and closed["complete"], closed
 
+def test_a_round_that_decides_nothing_shrinks_the_next_brief(client):
+    # NL2Repo cerberus: nine reviewers of one checkpoint each read the spec until the
+    # cap, decided no line, and every next session briefed all 33 lines again.
+    project, runtime, run = client
+    gates = _gate_dir(run, project, runtime)
+    (gates / "requirements.md").write_text(
+        "".join(f'R{n} [gate] "ready.txt says ready, part {n}"\n' for n in range(1, 8)))
+    (project / "ready.txt").write_text("ready")
+    slug = start(run, "--gate", "true", "--gate-path", str(gates), "--review", "Every line holds")
+    _, first = check(run, slug)
+    digest = first["last_checkpoint"]["tree_hash"]
+    assert first["review_scope"] is None
+    assert "R7: ?\nEND VERDICTS" in first["review_brief"]
+    Path(first["review_file"]).write_text(f"Reviewed checkpoint: {digest}\n")  # cut off
+    _, second = run("close", slug)
+    assert second["review_scope"] == ["R1", "R2", "R3", "R4"]
+    assert "\nVERDICTS\nR1: ?\nR2: ?\nR3: ?\nR4: ?\nR5: NOT REVIEWED\nR6: NOT REVIEWED\nR7: NOT REVIEWED\nEND VERDICTS\n" \
+        in second["review_brief"]
+    Path(second["review_file"]).write_text(f"Reviewed checkpoint: {digest}\n")  # cut off again
+    _, third = run("close", slug)
+    assert third["review_scope"] == ["R1", "R2"]
+    Path(third["review_file"]).write_text(f"Reviewed checkpoint: {digest}\nR1: PASS - cat - ready\n"
+                                          "R2: PASS - cat - ready\n")
+    _, fourth = run("close", slug)
+    assert fourth["review_carried"] == ["R1", "R2"]
+    assert fourth["review_scope"] == ["R3", "R4", "R5", "R6"]
+
 def test_start_survives_an_unreadable_sibling_goal(client):
     project, runtime, run = client
     first = start(run, "--gate", "true")

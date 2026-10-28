@@ -238,6 +238,14 @@ line, an earlier reviewer finished but its reply was never recorded: record the
 newest file in `review_carried_from` with `review`, and dispatch a reviewer only
 if the CLI refuses it.
 
+When earlier rounds were cut off, the brief covers only the lines in
+`review_scope`, and the other open lines read NOT REVIEWED; a round that decided
+nothing gets a smaller scope next time. Dispatch the brief unchanged. If the
+reviewer passes every line in its scope, record nothing and run `close` for the
+next brief, which carries those lines; record the reply with `review --result
+fail` if it has a FAIL or UNVERIFIED line. Rounds whose scoped lines all pass
+do not count toward the two-round limit.
+
 The reviewer writes its reply to `review_file`. Pass that file, unedited, as
 `--evidence-file`. Record every verdict, FAIL included, with
 `review --result fail|pass` before changing anything. Record `pass` only when

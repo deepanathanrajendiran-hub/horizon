@@ -18,6 +18,7 @@ import steps
 import reviewing
 import evidence
 import hooks
+from datetime import datetime
 
 
 def parser() -> argparse.ArgumentParser:
@@ -146,9 +147,17 @@ def _review_handoff(report: dict, state: dict, digest: str) -> None:
     # Lines an earlier reviewer of this same checkpoint passed before it was cut off.
     report["review_carried"], report["review_carried_from"] = reviewing.carried(
         state["slug"], digest, requirements, report["review_file"])
+    # After a cut-off round, a smaller batch of the open lines; smaller again after a round that decided none.
+    try:
+        since = datetime.fromisoformat(state["used"]["started"]).timestamp()
+    except (KeyError, TypeError, ValueError):
+        since = 0.0
+    report["review_scope"] = reviewing.review_scope(
+        requirements, report["review_carried"],
+        reviewing.batch_size(reviewing.decided_counts(state["slug"], report["review_file"], since)))
     report["review_brief"] = reviewing.brief_for(
         state, digest, report["review_file"], str(paths.harness_root()),
-        carried=report["review_carried"])
+        carried=report["review_carried"], scope=report["review_scope"])
 
 
 def check(args) -> tuple[dict, int]:

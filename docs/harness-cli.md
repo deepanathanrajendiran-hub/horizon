@@ -202,6 +202,16 @@ for the agent to fill. When the latest review was recorded as a fail, the brief 
 prefixed with `> `. Do not dispatch a reviewer for a last
 check before stopping; a coverage goal reports `review_required` on every check.
 
+A reviewer cut off by a session limit leaves the verdict lines it appended in its
+round's file. The next `check` or `close` on the same checkpoint reports them as
+`review_carried` (with the files in `review_carried_from`) and pre-fills them as
+PASS. Once any earlier round of the goal exists, the brief also covers only a
+batch of the open lines, listed in `review_scope` (`null` means all of them):
+twice as many as the last round decided, or 4, 2 and then 1 after one, two or
+three rounds in a row that decided none. The other open lines read
+`NOT REVIEWED`, and the brief ends with a note naming the batch. Lines left out
+of a batch are never only `[unverifiable]` ones.
+
 `review` stores the reviewer's reply whole up to 16,000 characters. Beyond that it
 keeps the reply's head and tail. A pass must contain the first 12 characters of
 `--hash`; a fail is recorded without that echo, so no reviewer's FAIL is lost.

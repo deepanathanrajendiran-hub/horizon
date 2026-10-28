@@ -328,9 +328,68 @@ def carried(slug: str, digest: str, requirements: dict, review_file: str) -> tup
                  key=_order)
     return ids, files
 
+REVIEW_BATCH = 8
+
+
+def decided_counts(slug: str, review_file: str, since: float = 0.0) -> list[int]:
+    """How many requirement lines each earlier round file of this goal decided,
+    oldest first, across every checkpoint. Files older than `since` (the goal's
+    start, as a timestamp) belong to another goal that had the same slug."""
+    directory = os.path.dirname(review_file)
+    name = re.compile(re.escape(f"horizon-review-{slug}-") + r"[0-9a-f]{%d}-\d+\.md" % HASH_ECHO)
+    try:
+        entries = os.listdir(directory)
+    except OSError:
+        return []
+    rounds = []
+    for entry in entries:
+        path = os.path.join(directory, entry)
+        if not name.fullmatch(entry) or path == review_file:
+            continue
+        try:
+            at = os.path.getmtime(path)
+            text = Path(path).read_text()
+        except (OSError, UnicodeError):
+            continue
+        if at < since:
+            continue
+        decided = {_rid(m.group(1)) for line in text.splitlines()
+                   if not line.lstrip().startswith(">") and (m := _DECIDED.match(line))}
+        rounds.append((at, entry, len(decided)))
+    return [count for _, _, count in sorted(rounds)]
+
+
+def batch_size(counts: list[int]) -> int | None:
+    """How many open lines the next reviewer is given: all of them (None) while
+    no earlier round exists; after one, twice what the last round decided, or
+    REVIEW_BATCH halved for each round in a row that decided nothing.
+    NL2Repo cerberus: nine reviewers handed all 33 lines decided none."""
+    if not counts:
+        return None
+    empty = 0
+    for count in reversed(counts):
+        if count:
+            break
+        empty += 1
+    if empty:
+        return max(1, REVIEW_BATCH >> empty)
+    return 2 * counts[-1]
+
+
+def review_scope(requirements: dict, carried, batch: int | None) -> list[str] | None:
+    """The open requirement lines this round reviews, in order, or None for all.
+    Lines left out are never only [unverifiable] ones: a pass would skip them untried."""
+    open_ids = [rid for rid in requirements if rid not in carried]
+    if batch is None or batch >= len(open_ids):
+        return None
+    scope, rest = open_ids[:batch], open_ids[batch:]
+    if all("unverifiable" in requirements[rid] for rid in rest):
+        return None
+    return scope
+
 
 def brief(*, digest: str, request: str, requirements: str, verdicts: str, harness_dir: str,
-          review_file: str, previous: list[str], carried=()) -> str:
+          review_file: str, previous: list[str], carried=(), scope=None) -> str:
     text = TEMPLATE.format(digest=digest, request=request, requirements=requirements,
                            verdicts=verdicts, harness_dir=harness_dir, review_file=review_file)
     if previous:
@@ -338,6 +397,12 @@ def brief(*, digest: str, request: str, requirements: str, verdicts: str, harnes
     if carried:
         text += ("\nAlready passed by an earlier reviewer of this checkpoint, who was cut off: "
                  + ", ".join(carried) + ". Leave those lines as PASS and test only the lines marked `?`.\n")
+    if scope:
+        text += ("\nThis round reviews only " + ", ".join(scope) + ". Earlier reviewers were cut off "
+                 "before deciding enough lines, so the lines marked NOT REVIEWED are left for a later "
+                 "round: leave them as they are and do not test them. Read only the parts of the request "
+                 "these lines need. Decide the lines in order, and append its verdict to "
+                 f"{review_file} before you start the next.\n")
     return text
 
 
@@ -355,18 +420,23 @@ def _gate_text(gate_path: str | None, name: str, placeholder: str) -> str:
     return text.rstrip("\n")
 
 
-def _skeleton(gate_path: str | None, carried=()) -> str:
+def _skeleton(gate_path: str | None, carried=(), scope=None) -> str:
     if gate_path:
         try:
             ids = list(requirement_lines((Path(gate_path) / "requirements.md").read_text()))
         except (OSError, UnicodeError):
             ids = []
         if ids:
-            return "\n".join(f"{rid}: {'PASS' if rid in carried else '?'}" for rid in ids)
+            def verdict(rid):
+                if rid in carried:
+                    return "PASS"
+                return "?" if scope is None or rid in scope else "NOT REVIEWED"
+            return "\n".join(f"{rid}: {verdict(rid)}" for rid in ids)
     return "<<VERDICT_LINES: one `Rk: ?` line per requirement>>"
 
 
-def brief_for(state: dict, digest: str, review_file: str, harness_dir: str, carried=()) -> str:
+def brief_for(state: dict, digest: str, review_file: str, harness_dir: str, carried=(),
+              scope=None) -> str:
     """The brief for this goal's checkpoint. Never raises: `check` has already
     written the checkpoint, so a crash here would lose its report."""
     reviews = state.get("reviews") or []
@@ -376,6 +446,6 @@ def brief_for(state: dict, digest: str, review_file: str, harness_dir: str, carr
     return brief(digest=digest,
                  request=_gate_text(gate_path, "request.md", "REQUEST"),
                  requirements=_gate_text(gate_path, "requirements.md", "REQUIREMENTS"),
-                 verdicts=_skeleton(gate_path, carried),
+                 verdicts=_skeleton(gate_path, carried, scope),
                  harness_dir=harness_dir, review_file=review_file, previous=previous,
-                 carried=carried)
+                 carried=carried, scope=scope)

@@ -297,3 +297,49 @@ def test_brief_asks_for_verdicts_as_they_are_decided():
                                     harness_dir="h", review_file="/tmp/r.md", previous=[]).split())
     assert "as soon as you decide a requirement, append" in text
     assert "replace the contents of /tmp/r.md with your complete reply" in text
+
+def test_decided_counts_reads_this_goals_rounds_oldest_first(tmp_path):
+    # NL2Repo cerberus: nine rounds on one checkpoint, each cut off before deciding a line.
+    import os
+    old = _round(tmp_path, 1, f"Reviewed checkpoint: {DIGEST}\nR1: PASS\n")
+    first = _round(tmp_path, 2, f"Reviewed checkpoint: {DIGEST}\nR1: PASS - x\n- **R2:** FAIL\nR1: PASS\n"
+                                "> R3: PASS - quoted\n")
+    second = _round(tmp_path, 1, f"Reviewed checkpoint: {'d' * 64}\n", digest="d" * 64)
+    other = _round(tmp_path, 1, f"Reviewed checkpoint: {DIGEST}\nR1: PASS\n", slug="other")
+    for path, at in ((old, 50), (first, 100), (second, 200), (other, 150)):
+        os.utime(path, (at, at))
+    counts = reviewing.decided_counts("s", str(tmp_path / "horizon-review-s-x-9.md"), since=60)
+    assert counts == [2, 0]
+    assert reviewing.decided_counts("s", str(tmp_path / "missing" / "r.md")) == []
+
+
+@pytest.mark.parametrize("counts, size", [
+    ([], None), ([0], 4), ([0, 0], 2), ([0, 0, 0], 1), ([0] * 9, 1),
+    ([3], 6), ([15], 30), ([15, 0], 4), ([0, 6], 12), ([0, 0, 1], 2),
+])
+def test_batch_size_halves_after_an_empty_round_and_doubles_after_a_productive_one(counts, size):
+    assert reviewing.batch_size(counts) == size
+
+
+def test_review_scope_takes_the_first_open_lines_in_order():
+    reqs = {"R1": {"gate"}, "R2": {"gate"}, "R3": {"review"}, "R4": {"gate"}, "R5": {"unverifiable"}}
+    assert reviewing.review_scope(reqs, [], None) is None
+    assert reviewing.review_scope(reqs, ["R1"], 2) == ["R2", "R3"]
+    # Lines left out may not all be [unverifiable]: a pass would then skip them untried.
+    assert reviewing.review_scope(reqs, ["R1"], 3) is None
+    assert reviewing.review_scope(reqs, [], 3) == ["R1", "R2", "R3"]
+    assert reviewing.review_scope(reqs, [], 9) is None
+
+
+def test_brief_for_a_batch_leaves_the_other_lines_for_later(tmp_path):
+    gates = tmp_path / "gates"
+    gates.mkdir()
+    (gates / "request.md").write_text("Fix it.")
+    (gates / "requirements.md").write_text('R1 [gate] "a"\nR2 [gate] "b"\nR3 [review] "c"\nR4 [gate] "d"\n')
+    text = reviewing.brief_for({"slug": "s", "gate_path": str(gates), "reviews": []},
+                               DIGEST, "/tmp/r.md", "/p/.claude/harness", carried=["R1"],
+                               scope=["R2", "R3"])
+    assert "\nVERDICTS\nR1: PASS\nR2: ?\nR3: ?\nR4: NOT REVIEWED\nEND VERDICTS\n" in text
+    flat = " ".join(text.split())
+    assert "This round reviews only R2, R3." in flat
+    assert "append its verdict to /tmp/r.md before you start the next" in flat
