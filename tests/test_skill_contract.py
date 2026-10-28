@@ -197,7 +197,7 @@ def test_horizon_skills_carry_the_close_protocol(folder):
     text = " ".join(_horizon_skill(folder).split())
     for phrase in ("run `close", "always pass `--review`", "Never approve a changed test on your own judgment",
                    "A skipped check never blocks completion", "`step-reclaim`",
-                   "baseline test file changed"):
+                   "baseline test file changed", "`review_carried`", "`review_carried_from`"):
         assert phrase in text, phrase
     assert "Another `check` on unchanged files records `skipped`" not in text
     assert "`complete` at once" not in text and "run `review` and then `complete`" not in text

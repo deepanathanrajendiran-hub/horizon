@@ -230,6 +230,14 @@ answer. If no reviewer is available, report the unmet requirement. Never
 dispatch a reviewer for a last `check` you run before stopping, whatever
 `review_required` says; a coverage goal sets it on every check.
 
+A session can end before its reviewer returns. The reviewer records each
+verdict in `review_file` as it goes, and the next `close` on the same files
+prints a new brief whose `review_carried` lines are already PASS: dispatch a
+fresh reviewer with it as usual. If `review_carried` lists every requirement
+line, an earlier reviewer finished but its reply was never recorded: record the
+newest file in `review_carried_from` with `review`, and dispatch a reviewer only
+if the CLI refuses it.
+
 The reviewer writes its reply to `review_file`. Pass that file, unedited, as
 `--evidence-file`. Record every verdict, FAIL included, with
 `review --result fail|pass` before changing anything. Record `pass` only when

@@ -226,6 +226,11 @@ Requirements:
 Artifacts: <<ARTIFACTS>>
 How to run: <<HOW_TO_RUN>>
 
+This session may end before you finish. Start {review_file} with the line
+`Reviewed checkpoint: {digest}`; then, as soon as you decide a requirement,
+append its line to that file: `Rk: VERDICT - <command> - <what you observed>`.
+A later reviewer of this checkpoint continues from the lines you recorded.
+
 Build your own checks from the request. Do not create, change or delete files
 inside the project: put any scripts and outputs in a new directory next to
 {review_file}, and leave the project's git state as you found it. Do not read
@@ -250,7 +255,7 @@ VERDICTS
 {verdicts}
 END VERDICTS
 
-Before returning, write your complete reply to {review_file}.
+Before returning, replace the contents of {review_file} with your complete reply.
 """
 
 
@@ -275,13 +280,64 @@ def review_file(slug: str, digest: str, n: int, watch_paths=()) -> str:
             return os.path.join(base, name)
     return os.path.join(candidates[0], name)
 
+def next_review_file(slug: str, digest: str, n: int, watch_paths=()) -> str:
+    """Round `n`'s file, or the first later one not on disk: a reviewer cut off
+    before its reply was recorded leaves its round's file behind."""
+    path = review_file(slug, digest, n, watch_paths)
+    while os.path.exists(path):
+        n += 1
+        path = review_file(slug, digest, n, watch_paths)
+    return path
+
+
+# `Rk: VERDICT`, optionally followed by evidence: the line a reviewer appends as
+# soon as it decides a requirement, so a cut-off review still leaves its verdicts.
+_DECIDED = re.compile(
+    r"^[ \t]*(?:[-*+•][ \t]+)?[*_`]*" + _ID + r"[*_`]*[ \t]*:[ \t]*[*_`]*[ \t]*"
+    r"(PASS|FAIL(?:ED|S)?|UNVERIFIED|NOT[ \t]+REVIEWED)(?!\w)", re.I)
+
+
+def carried(slug: str, digest: str, requirements: dict, review_file: str) -> tuple[list, list]:
+    """Requirement lines that every earlier round's file for this checkpoint
+    passed and none failed, with those files. Only files that name the
+    checkpoint count, and lines quoted with `>` are ignored."""
+    directory = os.path.dirname(review_file)
+    name = re.compile(re.escape(f"horizon-review-{slug}-{str(digest)[:HASH_ECHO]}-") + r"(\d+)\.md")
+    try:
+        entries = os.listdir(directory)
+    except OSError:
+        return [], []
+    rounds = sorted((int(m.group(1)), entry) for entry in entries
+                    if (m := name.fullmatch(entry)) and os.path.join(directory, entry) != review_file)
+    verdicts: dict[str, set[str]] = {}
+    files = []
+    for _, entry in rounds:
+        path = os.path.join(directory, entry)
+        try:
+            text = Path(path).read_text()
+        except (OSError, UnicodeError):
+            continue
+        if not echoes(text, digest):
+            continue
+        files.append(path)
+        for line in text.splitlines():
+            match = None if line.lstrip().startswith(">") else _DECIDED.match(line)
+            if match:
+                verdicts.setdefault(_rid(match.group(1)), set()).add(_kind(match.group(2)))
+    ids = sorted((rid for rid, kinds in verdicts.items() if kinds == {"PASS"} and rid in requirements),
+                 key=_order)
+    return ids, files
+
 
 def brief(*, digest: str, request: str, requirements: str, verdicts: str, harness_dir: str,
-          review_file: str, previous: list[str]) -> str:
+          review_file: str, previous: list[str], carried=()) -> str:
     text = TEMPLATE.format(digest=digest, request=request, requirements=requirements,
                            verdicts=verdicts, harness_dir=harness_dir, review_file=review_file)
     if previous:
         text += "\nPrevious:\n" + "".join(f"> {line}\n" for line in previous)
+    if carried:
+        text += ("\nAlready passed by an earlier reviewer of this checkpoint, who was cut off: "
+                 + ", ".join(carried) + ". Leave those lines as PASS and test only the lines marked `?`.\n")
     return text
 
 
@@ -299,18 +355,18 @@ def _gate_text(gate_path: str | None, name: str, placeholder: str) -> str:
     return text.rstrip("\n")
 
 
-def _skeleton(gate_path: str | None) -> str:
+def _skeleton(gate_path: str | None, carried=()) -> str:
     if gate_path:
         try:
             ids = list(requirement_lines((Path(gate_path) / "requirements.md").read_text()))
         except (OSError, UnicodeError):
             ids = []
         if ids:
-            return "\n".join(f"{rid}: ?" for rid in ids)
+            return "\n".join(f"{rid}: {'PASS' if rid in carried else '?'}" for rid in ids)
     return "<<VERDICT_LINES: one `Rk: ?` line per requirement>>"
 
 
-def brief_for(state: dict, digest: str, review_file: str, harness_dir: str) -> str:
+def brief_for(state: dict, digest: str, review_file: str, harness_dir: str, carried=()) -> str:
     """The brief for this goal's checkpoint. Never raises: `check` has already
     written the checkpoint, so a crash here would lose its report."""
     reviews = state.get("reviews") or []
@@ -320,5 +376,6 @@ def brief_for(state: dict, digest: str, review_file: str, harness_dir: str) -> s
     return brief(digest=digest,
                  request=_gate_text(gate_path, "request.md", "REQUEST"),
                  requirements=_gate_text(gate_path, "requirements.md", "REQUIREMENTS"),
-                 verdicts=_skeleton(gate_path),
-                 harness_dir=harness_dir, review_file=review_file, previous=previous)
+                 verdicts=_skeleton(gate_path, carried),
+                 harness_dir=harness_dir, review_file=review_file, previous=previous,
+                 carried=carried)

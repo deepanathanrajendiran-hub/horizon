@@ -136,11 +136,19 @@ def goal_rows(exclude: str | None = None) -> list[dict]:
 
 
 def _review_handoff(report: dict, state: dict, digest: str) -> None:
-    report["review_file"] = reviewing.review_file(
+    report["review_file"] = reviewing.next_review_file(
         state["slug"], digest, len(state.get("reviews") or []) + 1,
         watch_paths=state.get("watch_paths") or [state["cwd"]])
+    try:
+        requirements = goal._requirements(state) or {}
+    except Exception:
+        requirements = {}
+    # Lines an earlier reviewer of this same checkpoint passed before it was cut off.
+    report["review_carried"], report["review_carried_from"] = reviewing.carried(
+        state["slug"], digest, requirements, report["review_file"])
     report["review_brief"] = reviewing.brief_for(
-        state, digest, report["review_file"], str(paths.harness_root()))
+        state, digest, report["review_file"], str(paths.harness_root()),
+        carried=report["review_carried"])
 
 
 def check(args) -> tuple[dict, int]:
