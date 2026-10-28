@@ -334,9 +334,12 @@ REVIEW_BATCH = 8
 def decided_counts(slug: str, review_file: str, since: float = 0.0) -> list[int]:
     """How many requirement lines each earlier round file of this goal decided,
     oldest first, across every checkpoint. Files older than `since` (the goal's
-    start, as a timestamp) belong to another goal that had the same slug."""
+    start, as a timestamp) belong to another goal that had the same slug. A
+    reviewer's complete reply repeats its brief's VERDICTS block, so NOT
+    REVIEWED lines and lines an earlier round of the same checkpoint passed
+    (carried into the brief) are not counted as decided."""
     directory = os.path.dirname(review_file)
-    name = re.compile(re.escape(f"horizon-review-{slug}-") + r"[0-9a-f]{%d}-\d+\.md" % HASH_ECHO)
+    name = re.compile(re.escape(f"horizon-review-{slug}-") + r"([0-9a-f]{%d})-\d+\.md" % HASH_ECHO)
     try:
         entries = os.listdir(directory)
     except OSError:
@@ -344,7 +347,8 @@ def decided_counts(slug: str, review_file: str, since: float = 0.0) -> list[int]
     rounds = []
     for entry in entries:
         path = os.path.join(directory, entry)
-        if not name.fullmatch(entry) or path == review_file:
+        match = name.fullmatch(entry)
+        if not match or path == review_file:
             continue
         try:
             at = os.path.getmtime(path)
@@ -353,10 +357,20 @@ def decided_counts(slug: str, review_file: str, since: float = 0.0) -> list[int]
             continue
         if at < since:
             continue
-        decided = {_rid(m.group(1)) for line in text.splitlines()
-                   if not line.lstrip().startswith(">") and (m := _DECIDED.match(line))}
-        rounds.append((at, entry, len(decided)))
-    return [count for _, _, count in sorted(rounds)]
+        verdicts: dict[str, set[str]] = {}
+        for line in text.splitlines():
+            decided = None if line.lstrip().startswith(">") else _DECIDED.match(line)
+            if decided:
+                verdicts.setdefault(_rid(decided.group(1)), set()).add(_kind(decided.group(2)))
+        rounds.append((at, entry, match.group(1), verdicts))
+    counts = []
+    passed: dict[str, set[str]] = {}
+    for _, _, prefix, verdicts in sorted(rounds):
+        earlier = passed.setdefault(prefix, set())
+        counts.append(sum(1 for rid, kinds in verdicts.items()
+                          if kinds - {"NOT REVIEWED"} and rid not in earlier))
+        earlier.update(rid for rid, kinds in verdicts.items() if kinds == {"PASS"})
+    return counts
 
 
 def batch_size(counts: list[int]) -> int | None:

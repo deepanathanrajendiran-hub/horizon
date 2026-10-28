@@ -343,3 +343,15 @@ def test_brief_for_a_batch_leaves_the_other_lines_for_later(tmp_path):
     flat = " ".join(text.split())
     assert "This round reviews only R2, R3." in flat
     assert "append its verdict to /tmp/r.md before you start the next" in flat
+
+def test_decided_counts_skip_not_reviewed_and_carried_lines(tmp_path):
+    # NL2Repo cerberus rerun: a reviewer's complete reply repeats the brief's VERDICTS block, so its carried
+    # PASS lines and NOT REVIEWED lines counted as decided (36 for 4), and the next brief went back to all lines.
+    import os
+    first = _round(tmp_path, 1, f"Reviewed checkpoint: {DIGEST}\nR1: PASS - x\nR2: PASS - y\n")
+    second = _round(tmp_path, 2, f"Reviewed checkpoint: {DIGEST}\nR3: FAIL - z\n\nVERDICTS\nR1: PASS\nR2: PASS\n"
+                                 "R3: FAIL\nR4: NOT REVIEWED\nR5: NOT REVIEWED\nEND VERDICTS\n")
+    other = _round(tmp_path, 1, f"Reviewed checkpoint: {'d' * 12}\nR1: PASS\n", digest="d" * 64)
+    for path, at in ((first, 100), (second, 200), (other, 300)):
+        os.utime(path, (at, at))
+    assert reviewing.decided_counts("s", str(tmp_path / "horizon-review-s-x-9.md")) == [2, 1, 1]
