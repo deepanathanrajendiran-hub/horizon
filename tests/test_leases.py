@@ -9,6 +9,8 @@ import cli  # noqa: E402
 import goal  # noqa: E402
 import leases  # noqa: E402
 import steps  # noqa: E402
+import os
+import subprocess
 
 
 def test_reclaimable_rules():
@@ -103,3 +105,67 @@ def test_renewing_a_lease_does_not_bump_the_execution_revision(make_state_goal):
     slug, attached = _attached(make_state_goal)
     leases.renew(slug, "req-1", "s1")
     assert goal.load(slug)["execution"]["revision"] == attached["execution_revision"]
+
+def _dead_host():
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        host = {"pid": child.pid, "started": leases._ps(child.pid)[1]}
+    finally:
+        child.kill()
+        child.wait()
+    return host
+
+
+def test_ps_reads_this_process():
+    ppid, started, comm = leases._ps(os.getpid())
+    assert ppid == os.getppid()
+    assert len(started.split()) == 5
+    assert comm
+
+
+def test_host_process_is_the_nearest_named_ancestor(monkeypatch):
+    table = {10: (9, "Tue Oct 27 22:16:00 2026", "/bin/zsh"),
+             9: (8, "Tue Oct 27 22:15:00 2026", "/usr/local/bin/claude"),
+             8: (1, "Tue Oct 27 22:00:00 2026", "/sbin/launchd")}
+    monkeypatch.setattr(leases.os, "getppid", lambda: 10)
+    monkeypatch.setattr(leases, "_ps", table.get)
+    assert leases.host_process() == {"pid": 9, "started": "Tue Oct 27 22:15:00 2026"}
+    assert leases.host_process(names=("codex",)) is None
+    monkeypatch.setattr(leases, "_ps", lambda pid: None)
+    assert leases.host_process() is None
+
+
+def test_gone_only_when_the_process_provably_ended(monkeypatch):
+    dead = _dead_host()
+    assert leases.gone(dead) is True
+    me = {"pid": os.getpid(), "started": leases._ps(os.getpid())[1]}
+    assert leases.gone(me) is False
+    assert leases.gone({**me, "started": "Mon Jan  1 00:00:00 2001"}) is True  # pid reused
+    for bad in (None, {}, {"pid": "1", "started": "x"}, {"pid": 5}, {"pid": 0, "started": "x"}):
+        assert leases.gone(bad) is False
+
+    def denied(pid, sig):
+        raise PermissionError
+    monkeypatch.setattr(leases.os, "kill", denied)
+    assert leases.gone(dead) is False  # cannot tell, so the timers decide
+
+
+def test_reclaimable_at_once_when_the_owning_process_is_gone():
+    dead = {"session": "s1", "renewed_at": 1000.0, "host": _dead_host()}
+    assert "exited" in leases.reclaimable(dead, "s2", now=1000.0 + 5)
+    assert leases.reclaimable(dead, "s1", now=1000.0 + 5) is None
+    assert leases.reclaimable(dead, None, now=1000.0 + 5) is None
+    live = {**dead, "host": {"pid": os.getpid(), "started": leases._ps(os.getpid())[1]}}
+    assert leases.reclaimable(live, "s2", now=1000.0 + 5) is None
+
+
+def test_renew_records_and_keeps_the_host(make_state_goal):
+    slug = make_state_goal()["slug"]
+    steps.begin(slug, "req-1")
+    host = {"pid": 4242, "started": "Tue Oct 27 22:15:00 2026"}
+    leases.renew(slug, "req-1", "s1", host=host)
+    assert leases.read(slug)["req-1"]["host"] == host
+    leases.renew(slug, "req-1", "s1")
+    assert leases.read(slug)["req-1"]["host"] == host
+    leases.renew(slug, "req-1", "s2")
+    assert "host" not in leases.read(slug)["req-1"]

@@ -23,8 +23,11 @@ def client(tmp_path, request):
     entry = ROOT / folder / "skills/horizon/scripts/harness.py"
     home = tmp_path / "isolated home"
     home.mkdir()
+    # Review files live in the temporary directory; a shared one would carry rounds between tests.
+    temp = tmp_path / "temp"
+    temp.mkdir()
     env = dict(os.environ, HOME=str(home), CODEX_HOME=str(home / ".codex"),
-               PYTHONDONTWRITEBYTECODE="1")
+               PYTHONDONTWRITEBYTECODE="1", TMPDIR=str(temp))
 
     def run(*args, cwd=None):
         result = subprocess.run(
@@ -239,6 +242,32 @@ def test_brief_after_a_failed_review_quotes_its_open_lines(client):
     assert report["review_brief"].endswith("Previous:\n> R1: FAIL - ready.txt is missing\n")
     assert report["review_file"].endswith("-2.md")
     assert "<<REQUEST>>" in report["review_brief"]
+
+def test_a_cut_off_review_is_continued_by_the_next_check(client):
+    # Mini GPT Stage A pilot: every session's reviewer hit the call cap before returning.
+    project, runtime, run = client
+    gates = _gate_dir(run, project, runtime)
+    (gates / "requirements.md").write_text('R1 [gate] "ready.txt says ready"\nR2 [review] "it reads well"\n')
+    (project / "ready.txt").write_text("ready")
+    slug = start(run, "--gate", "true", "--gate-path", str(gates), "--review", "Every line holds")
+    _, first = check(run, slug)
+    digest = first["last_checkpoint"]["tree_hash"]
+    assert first["review_carried"] == []
+    Path(first["review_file"]).write_text(f"Reviewed checkpoint: {digest}\nR1: PASS - cat ready.txt - ready\n")
+    code, second = run("close", slug)  # the next session, on the unchanged tree
+    assert code == 1 and not second["complete"]
+    assert second["review_file"].endswith("-2.md")
+    assert second["review_carried"] == ["R1"]
+    assert second["review_carried_from"] == [first["review_file"]]
+    assert "\nVERDICTS\nR1: PASS\nR2: ?\nEND VERDICTS\n" in second["review_brief"]
+    reply = (f"Reviewed checkpoint: {digest}\nR2: reads well.\n\n"
+             "VERDICTS\nR1: PASS\nR2: PASS\nEND VERDICTS\n")
+    Path(second["review_file"]).write_text(reply)
+    code, _ = run("review", slug, "--result", "pass", "--judge", "judge-2",
+                  "--hash", digest, "--evidence-file", second["review_file"])
+    assert code == 0
+    code, closed = run("close", slug)
+    assert code == 0 and closed["complete"], closed
 
 def test_start_survives_an_unreadable_sibling_goal(client):
     project, runtime, run = client

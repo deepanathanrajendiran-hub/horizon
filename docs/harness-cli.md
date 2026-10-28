@@ -163,6 +163,11 @@ Requirements:
 Artifacts: <<ARTIFACTS>>
 How to run: <<HOW_TO_RUN>>
 
+This session may end before you finish. Start {review_file} with the line
+`Reviewed checkpoint: {digest}`; then, as soon as you decide a requirement,
+append its line to that file: `Rk: VERDICT - <command> - <what you observed>`.
+A later reviewer of this checkpoint continues from the lines you recorded.
+
 Build your own checks from the request. Do not create, change or delete files
 inside the project: put any scripts and outputs in a new directory next to
 {review_file}, and leave the project's git state as you found it. Do not read
@@ -187,7 +192,7 @@ VERDICTS
 {verdicts}
 END VERDICTS
 
-Before returning, write your complete reply to {review_file}.
+Before returning, replace the contents of {review_file} with your complete reply.
 ```
 
 The agent replaces only `<<ARTIFACTS>>` and `<<HOW_TO_RUN>>`. A goal without

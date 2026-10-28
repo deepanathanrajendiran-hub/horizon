@@ -202,10 +202,13 @@ def _post_tool_use(session: str | None) -> None:
             attempt = (state.get("execution") or {}).get("active_attempt")
             if not attempt:
                 continue
-            owner = (leases.read(state["slug"]).get(attempt) or {}).get("session")
+            lease = leases.read(state["slug"]).get(attempt) or {}
+            owner = lease.get("session")
             # A lease begun without an owner belongs to the first session that works on it.
             if owner is None or owner == session:
-                leases.renew(state["slug"], attempt, session)
+                # The host process lets a later session see at once that this one died.
+                host = None if owner == session and lease.get("host") else leases.host_process()
+                leases.renew(state["slug"], attempt, session, host=host)
         except Exception:
             continue
 

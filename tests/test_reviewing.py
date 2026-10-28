@@ -3,6 +3,7 @@ and from the replies two adversarial probes wrote against the first parsers."""
 import pytest
 
 import reviewing
+from pathlib import Path
 
 REQUIREMENTS = """# Requirements
 R1 [gate] "the CLI prints the turnaround time"
@@ -241,3 +242,58 @@ def test_block_lines_may_carry_markdown_decoration_and_nothing_else(line, readab
     assert any("unreadable" in refusal for refusal in refusals) != readable, refusals
     if line.endswith("❌"):
         assert "R1: FAIL" in refusals
+
+DIGEST = "c98b12a9e830" + "0" * 52
+
+
+def _round(directory, n, text, slug="s", digest=DIGEST):
+    path = directory / f"horizon-review-{slug}-{digest[:12]}-{n}.md"
+    path.write_text(text)
+    return path
+
+
+def test_carried_keeps_lines_every_earlier_round_passed(tmp_path):
+    # Reviewers cut off by a session cap leave their decided lines behind.
+    _round(tmp_path, 1, f"Reviewed checkpoint: {DIGEST}\nR1: PASS - ran tok - ok\nR2: FAIL - broke\n")
+    _round(tmp_path, 2, f"Reviewed checkpoint: {DIGEST[:12]}\n- **R2:** PASS\nR3: PASS - x\n"
+                        "> R1: FAIL - an earlier reviewer, quoted\nR9: PASS - not a requirement\n")
+    _round(tmp_path, 3, "no echo of the checkpoint\nR4: PASS\n")
+    _round(tmp_path, 1, f"Reviewed checkpoint: {'d' * 12}\nR4: PASS\n", digest="d" * 64)
+    _round(tmp_path, 1, f"Reviewed checkpoint: {DIGEST}\nR4: PASS\n", slug="other")
+    ids, files = reviewing.carried("s", DIGEST, {"R1": set(), "R2": set(), "R3": set(), "R4": set()},
+                                   str(tmp_path / "horizon-review-s-x-4.md"))
+    assert ids == ["R1", "R3"]
+    assert [Path(f).name for f in files] == [f"horizon-review-s-{DIGEST[:12]}-{n}.md" for n in (1, 2)]
+
+
+def test_carried_is_empty_without_earlier_rounds(tmp_path):
+    assert reviewing.carried("s", DIGEST, {"R1": set()}, str(tmp_path / "r.md")) == ([], [])
+    assert reviewing.carried("s", DIGEST, {"R1": set()}, str(tmp_path / "missing" / "r.md")) == ([], [])
+
+
+def test_next_review_file_skips_rounds_already_on_disk(tmp_path, monkeypatch):
+    monkeypatch.setattr(reviewing.tempfile, "gettempdir", lambda: str(tmp_path))
+    first = reviewing.next_review_file("s", DIGEST, 1)
+    assert first.endswith("-1.md")
+    Path(first).write_text("cut off")
+    assert reviewing.next_review_file("s", DIGEST, 1).endswith("-2.md")
+    assert reviewing.next_review_file("s", DIGEST, 3).endswith("-3.md")
+
+
+def test_brief_prefills_carried_lines_and_says_so(tmp_path):
+    gates = tmp_path / "gates"
+    gates.mkdir()
+    (gates / "request.md").write_text("Fix it.")
+    (gates / "requirements.md").write_text('R1 [gate] "a"\nR1a [review] "b"\nR2 [review] "c"\n')
+    text = reviewing.brief_for({"slug": "s", "gate_path": str(gates), "reviews": []},
+                               DIGEST, "/tmp/r.md", "/p/.claude/harness", carried=["R1", "R2"])
+    assert "\nVERDICTS\nR1: PASS\nR1a: ?\nR2: PASS\nEND VERDICTS\n" in text
+    assert text.endswith("\nAlready passed by an earlier reviewer of this checkpoint, who was cut off: "
+                         "R1, R2. Leave those lines as PASS and test only the lines marked `?`.\n")
+
+
+def test_brief_asks_for_verdicts_as_they_are_decided():
+    text = " ".join(reviewing.brief(digest=DIGEST, request="r", requirements="R1 x", verdicts="R1: ?",
+                                    harness_dir="h", review_file="/tmp/r.md", previous=[]).split())
+    assert "as soon as you decide a requirement, append" in text
+    assert "replace the contents of /tmp/r.md with your complete reply" in text
