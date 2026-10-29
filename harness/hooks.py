@@ -29,6 +29,8 @@ _EVENTS = {"SessionStart": None, "PostToolUse": "*", "Stop": None}
 _TIMEOUTS = {"SessionStart": 300}
 
 _CODE = (".py", ".pyi", ".js", ".ts", ".go", ".rs", ".java", ".rb", ".c", ".h", ".cpp", ".toml", ".cfg")
+
+_NOT_SOURCE = {"venv", "env", "site-packages", "node_modules", "build", "dist", "__pycache__"}
 SESSION_GATE_S = 240  # all goals together; HORIZON_SESSION_GATE_S overrides (tests)
 
 
@@ -172,16 +174,20 @@ def _active_goals() -> list[dict]:
     return out
 
 
-_FAILED = re.compile(r"^(?:FAILED|ERROR)\s+(\S+)", re.M)
+_FAILED = re.compile(r"^(?:FAILED|ERROR)\s+(\S+::\S+)", re.M)
+
 _SUMMARY = re.compile(r"^=*\s*(\d+ (?:failed|passed|errors?)\b[^\n=]*?)\s*=*\s*$", re.M)
 
 
 def _gate_digest(output: str) -> str:
     """The failing checks by name when the output lists them, else the output's tail."""
     output = output or ""
+    # pytest's own list; captured log lines such as `ERROR    lib:x.py:4 boom` come before it
+    summary_at = output.rfind("short test summary info")
+    listed = output[summary_at:] if summary_at >= 0 else output
     ids = []
-    for found in _FAILED.findall(output):
-        name = found.split("::")[-1] if "::" in found else found
+    for found in _FAILED.findall(listed):
+        name = found.split("::")[-1]
         if name not in ids:
             ids.append(name)
     if ids:
@@ -193,30 +199,39 @@ def _gate_digest(output: str) -> str:
 
 
 def _files_line(root: Path, limit: int = 40) -> str:
-    """The project's files with their line counts, so a session need not list them."""
+    """The project's files with their line counts, so a session need not list them. Never raises."""
     try:
-        out = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
-                             capture_output=True, timeout=10)
-    except (OSError, subprocess.SubprocessError):
+        listed = []
+        for extra in ([], ["--others", "--exclude-standard"]):  # tracked files first
+            out = subprocess.run(["git", "-C", str(root), "ls-files", "-z", *extra],
+                                 capture_output=True, timeout=10)
+            if out.returncode:
+                return ""
+            listed += [n for n in out.stdout.decode(errors="replace").split("\0") if n]
+        names = []
+        for name in dict.fromkeys(listed):
+            parts = name.split("/")
+            if any(p.startswith(".") or p in _NOT_SOURCE or p.endswith(".egg-info") for p in parts[:-1]):
+                continue
+            names.append(name)
+        more = ""
+        if len(names) > limit:
+            code = [n for n in names if n.endswith(_CODE)]
+            more = f" (and {len(names) - limit} more)"
+            names = (code + [n for n in names if n not in code])[:limit]
+        shown = []
+        for name in names:
+            path = root / name
+            size = path.stat().st_size
+            if size > 1024 * 1024:
+                shown.append(f"{name} ({size // (1024 * 1024)} MB)")
+                continue
+            data = path.read_bytes()
+            count = data.count(b"\n") + (1 if data and not data.endswith(b"\n") else 0)
+            shown.append(f"{name} {count}")
+        return ("Files (lines): " + ", ".join(shown) + more + ".") if shown else ""
+    except Exception:
         return ""
-    if out.returncode:
-        return ""
-    names = sorted({n for n in out.stdout.decode(errors="replace").split("\0")
-                    if n and not n.startswith((".claude/", ".agents/")) and "__pycache__" not in n})
-    extra = ""
-    if len(names) > limit:
-        code = [n for n in names if n.endswith(_CODE)]
-        extra = f" (and {len(names) - limit} more)"
-        names = (code + [n for n in names if n not in code])[:limit]
-    newline = b"\n"
-    shown = []
-    for name in names:
-        try:
-            count = (root / name).read_bytes().count(newline)
-        except OSError:
-            continue
-        shown.append(f"{name} {count}")
-    return ("Files (lines): " + ", ".join(shown) + extra + ".") if shown else ""
 
 def _goal_line(state: dict, fresh: bool = False) -> str:
     row = goal.row(state)

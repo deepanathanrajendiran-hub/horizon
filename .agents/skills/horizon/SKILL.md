@@ -43,7 +43,8 @@ python3 "$HARNESS" --runtime codex --project "$PROJECT" note "$SLUG" --next "Wri
 
 ## Large inputs
 
-Read a large input in large parts, up to about 800 lines per call. Never `cat`
+Read a large input in parts of up to about 250 lines per command, since longer
+output is cut. Never `cat`
 it (the output is cut to a short preview), and never read it in small slices:
 a small read costs a call, as a large one does. Read a spec whole, once, in the
 first session, before you write code. The goal's notes file (`notes_file` in
@@ -95,8 +96,9 @@ create it. Let `GATES` be the `gates` path `doctor` printed, plus `/NAME`, where
 is a short label for this request that no directory there already uses.
 
 1. Save the request verbatim to `$GATES/request.md`. Read the inputs it names, the
-   code it concerns, and that code's existing tests and callers. For a build from a large spec, read the whole spec now, in large parts (see "Large
-   inputs" and "Building from a spec" below).
+   code it concerns, and that code's existing tests and callers. For a build from a large spec, read its first part now, which holds its outline
+   and module list, and the rest right after `start` (see "Building from a spec"
+   below).
 2. Write `$GATES/requirements.md` with one numbered line (R1, R2, ...) for each
    requirement, reported symptom, deliverable and constraint in the request, quoted
    in the request's words. Keep qualifiers such as "exact", "all" and "unchanged",
@@ -142,10 +144,11 @@ python3 "$HARNESS" --runtime codex --project "$PROJECT" start "Requested outcome
 ### Building from a spec
 
 For a build from a spec, such as a library or an application described in a
-document, the first session goes: read the whole spec in large parts; then, in
-one Bash call, write request.md and requirements.md (one line per module or
-section is enough at first), write the surface gate and run `start` with it;
-then write the modules.
+document, the first session goes: right after the first part of the spec, which holds its
+outline and module list, write request.md and requirements.md (one line per
+module or section is enough at first), write the surface gate and run `start`
+with it, all in one Bash call, so that a session cut off early still leaves a
+goal; then read the rest of the spec in large parts, and write the modules.
 
 ```bash
 python3 "$HARNESS" --runtime codex --project "$PROJECT" surface --spec "$PROJECT/SPEC.md" --package pkg --out "$GATES/test_surface.py"
@@ -154,16 +157,18 @@ python3 "$HARNESS" --runtime codex --project "$PROJECT" surface --spec "$PROJECT
 The surface gate has one test per public name the spec gives (`pkg.mod.Name`,
 `from pkg.mod import Name`), and fails when a package directory lacks its
 `__init__.py`, because a directory without one still imports, as a namespace
-package. Delete a name from it only when the spec says it must not exist. Run it
+package. Delete a name from it only when the spec says it must not exist, or when it is a
+file name, a URL or a local variable in an example. Run it
 as the gate (`python -m pytest -q "$GATES"`), with the spec's own examples as
 further checks when you have them. Write each module complete where the spec
 allows, in dependency order, and the package `__init__.py` re-exporting the names
 the spec lists. Keep the package importable after every write: define a name in
 the same edit that exports it, and never import a module that does not exist
 yet. When a probe, example or caller fails on a name or behaviour the spec gives,
-add it to the library; never rewrite the probe around it. Grow the gate only
-with behaviour you are about to write or an example from the spec; do not write
-checks for code that already passes them.
+add it to the library; never rewrite the probe around it. Grow the gate with the
+code: add checks for the part you are about to write, and the spec's own examples
+for parts already built. A check you invent for code that is already built
+usually passes and buys nothing.
 
 Use `--coverage` with the same criterion instead of `--gate` when no command can
 check any line. When you write the gate yourself (`--gate-path`), always pass
@@ -299,7 +304,8 @@ report, listing the lines no reviewer passed as unverified. Dispatch a reviewer
 at the start of a session, with most of the session left, not near its end.
 
 A passing gate means your checks pass, not that the request is met. While budget
-remains, extend the gate to the next part of the request it does not check yet:
+remains, extend the gate to the next part of the request it does not check yet,
+preferring parts that are not built yet:
 every item the spec enumerates (each module and public name, each listed table
 or range as a whole, not only the examples shown; docs, CI and config files only
 when the request asks for them, and after the library) and the

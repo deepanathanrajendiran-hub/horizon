@@ -173,3 +173,78 @@ def test_the_session_start_message_gives_the_gate_command_failing_checks_and_fil
     files = next(line for line in context.splitlines() if line.startswith("Files (lines): "))
     assert "pkg/b.py 2" in files and "gate.sh 4" in files
     assert ".claude/" not in files
+
+PROSE_SPEC = """\
+Users must be able to write `from pkg import get_logger, configure, JSONRenderer` at the top level.
+
+>>> from pkg.jwks import PyJWKClient
+# or from pkg.client import Client
+
+The package `__init__.py`:
+
+```python
+__all__ = [
+    "decode_complete",
+    "register_algorithm",
+]
+```
+
+Files: pkg.dev.py, pkg.api_jwt.md and the docs at pkg.readthedocs.io.
+"""
+
+
+def test_surface_takes_names_from_prose_doctests_comments_and_the_init_all():
+    # review of 5268e44: the structlog spec's `from structlog import configure, ..., JSONRenderer` (prose) and
+    # the jwt spec's `__init__` `__all__` were missed, though they are the top-level names `surface` exists for.
+    refs = surface.refs(PROSE_SPEC, "pkg")
+    for want in ("pkg.get_logger", "pkg.configure", "pkg.JSONRenderer", "pkg.jwks.PyJWKClient",
+                 "pkg.client.Client", "pkg.decode_complete", "pkg.register_algorithm"):
+        assert want in refs, want
+    assert not any(r.endswith((".py", ".md", ".io", ".readthedocs")) for r in refs), refs
+
+
+def test_surface_refuses_to_write_an_empty_gate(project):
+    # review of 5268e44: `--package pyjwt` on the jwt spec gave 0 names and a gate that passed.
+    p, cli = project
+    (p / "SPEC.md").write_text("Use jwt.encode.\n")
+    code, err = cli("surface", "--spec", str(p / "SPEC.md"), "--package", "pyjwt", "--out", str(p / "t.py"))
+    assert code != 0 and "no names" in str(err)
+
+
+def test_a_generated_surface_gate_finds_the_package_from_the_gate_directory_and_a_single_module(tmp_path):
+    spec = tmp_path / "SPEC.md"
+    spec.write_text("Use pkg.helper.\n")
+    gate = tmp_path / ".claude" / "harness" / "gates" / "g" / "test_surface.py"
+    gate.parent.mkdir(parents=True)
+    surface.write_gate(spec, "pkg", gate)
+    (tmp_path / "pkg.py").write_text("def helper():\n    pass\n")
+    done = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "test_surface.py"],
+                          cwd=gate.parent, capture_output=True, text=True, timeout=120)
+    assert done.returncode == 0, done.stdout[-500:]
+
+
+def test_the_failing_list_ignores_captured_log_lines():
+    # review of 5268e44: `ERROR    lib:test.py:4 boom` lines from captured logging pushed the real ids out.
+    import hooks
+    output = ("----- Captured log call -----\n" + "ERROR    lib0:test_l.py:4 boom\n" * 15 +
+              "=========== short test summary info ===========\n"
+              "FAILED tests/test_l.py::test_one - AssertionError\n"
+              "ERROR tests/test_l.py::test_two - RuntimeError\n"
+              "=========== 1 failed, 1 error in 0.1s ===========\n")
+    assert hooks._gate_digest(output) == ". Failing: test_one, test_two (1 failed, 1 error in 0.1s)."
+
+
+def test_the_files_line_skips_environments_and_does_not_read_big_files(tmp_path):
+    # review of 5268e44: an un-ignored .venv filled the 40 slots, and a 1.5 GB file was read whole.
+    import hooks
+    _git(tmp_path, "init", "-q")
+    (tmp_path / ".venv" / "lib").mkdir(parents=True)
+    (tmp_path / ".venv" / "lib" / "m.py").write_text("x\n")
+    (tmp_path / "pkg.egg-info").mkdir()
+    (tmp_path / "pkg.egg-info" / "PKG-INFO").write_text("x\n")
+    (tmp_path / "a.py").write_text("x = 1\ny = 2")  # no final newline: still 2 lines
+    with open(tmp_path / "big.bin", "wb") as f:
+        f.truncate(3 * 1024 * 1024)
+    line = hooks._files_line(tmp_path)
+    assert ".venv" not in line and "egg-info" not in line
+    assert "a.py 2" in line and "big.bin (3 MB)" in line

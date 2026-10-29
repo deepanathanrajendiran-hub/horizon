@@ -151,8 +151,9 @@ the event JSON on stdin and always exits 0, so a hook never blocks a session.
   lists `FAILED`/`ERROR` lines it gives the failing checks by name, up to 12, and
   the summary line; otherwise the last 300 characters. Then the notes file and
   its parts, the files the last commit changed (relative to the repository root),
-  and the project's files outside `.claude/` and `.agents/` with their line
-  counts, up to 40, code files first. An install from before this behaviour has a
+  and the project's files with their line counts, up to 40, tracked files and
+  code files first; files in dot-directories, environments, `build`, `dist` and
+  `*.egg-info` are left out, and a file over 1 MB shows its size instead. An install from before this behaviour has a
   30-second hook: the hook upgrades it for the next session and runs no gate in
   this one. `install-hooks` keeps a longer timeout you set.
 - `PostToolUse` renews the lease of the session's open attempt.
@@ -553,10 +554,15 @@ never silently migrated between Codex and Claude.
 
 `surface --spec SPEC.md --package NAME --out $GATES/test_surface.py` reads a spec
 and writes one pytest test per public name it gives for the package:
-`NAME.mod.Name` references and `from NAME.mod import a, b` / `import NAME.mod`
-lines. Each test imports the deepest module on the name's path and checks the next
-name on it, no deeper; it fails when a package directory on the path has no
-`__init__.py` (a namespace package). URLs, file names, Python keywords, test
+`NAME.mod.Name` references, `from NAME.mod import a, b` anywhere in a line (code,
+prose in backticks, doctests, comments), `import NAME.mod`, and the names of an
+`__all__` given within 30 lines after a mention of `__init__`. Each test imports
+the deepest module on the name's path and checks the next name on it, no deeper;
+it fails when a package directory on the path has no `__init__.py` (a namespace
+package), and a missing dependency is an error, not a missing name. URLs, file
+names and domains (`NAME.dev.py`, `NAME.readthedocs.io`), Python keywords, test
 modules and names within two lines above a mention of `AttributeError` are left
-out. The test finds the package in the working directory or in `src/`. It reads
-only the spec, so it can be written before the code.
+out. The test finds the package (a directory or `NAME.py`) from the working
+directory or the test file's own directories, and their `src/`. It reads only the
+spec, so it can be written before the code. A spec that gives no names for the
+package is an error (check `--package`: the import name, such as `jwt` for PyJWT).

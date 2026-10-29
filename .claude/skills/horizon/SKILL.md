@@ -27,8 +27,8 @@ goal for this request, use those values and go straight to Resuming: do not run
 
 When a goal for this same request is already active, resume from what the session-start message shows: the next action, the gate
 command and its latest result with the failing checks by name, the notes file,
-the files the last commit changed and every file with its line count. Do not run
-`status`, `ls` or `wc` to get these again.
+the files the last commit changed and every file with its line count. Do not run `status` to get these again, nor `ls` or `wc` for the files it
+lists.
 Skip "Earlier goals" and "Before `start`". Do not re-read request.md,
 requirements.md, the gate or a large input unless the next action needs part of
 it, and then read only that part. Make your first edit within your first few
@@ -97,8 +97,9 @@ create it. Let `GATES` be the `gates` path `doctor` printed, plus `/NAME`, where
 is a short label for this request that no directory there already uses.
 
 1. Save the request verbatim to `$GATES/request.md`. Read the inputs it names, the
-   code it concerns, and that code's existing tests and callers. For a build from a large spec, read the whole spec now, in large parts (see "Large
-   inputs" and "Building from a spec" below).
+   code it concerns, and that code's existing tests and callers. For a build from a large spec, read its first part now, which holds its outline
+   and module list, and the rest right after `start` (see "Building from a spec"
+   below).
 2. Write `$GATES/requirements.md` with one numbered line (R1, R2, ...) for each
    requirement, reported symptom, deliverable and constraint in the request, quoted
    in the request's words. Keep qualifiers such as "exact", "all" and "unchanged",
@@ -146,10 +147,11 @@ python3 "$HARNESS" --runtime claude --project "$PROJECT" start "Requested outcom
 ### Building from a spec
 
 For a build from a spec, such as a library or an application described in a
-document, the first session goes: read the whole spec in large parts; then, in
-one Bash call, write request.md and requirements.md (one line per module or
-section is enough at first), write the surface gate and run `start` with it;
-then write the modules.
+document, the first session goes: right after the first part of the spec, which holds its
+outline and module list, write request.md and requirements.md (one line per
+module or section is enough at first), write the surface gate and run `start`
+with it, all in one Bash call, so that a session cut off early still leaves a
+goal; then read the rest of the spec in large parts, and write the modules.
 
 ```bash
 python3 "$HARNESS" --runtime claude --project "$PROJECT" surface --spec "$PROJECT/SPEC.md" --package pkg --out "$GATES/test_surface.py"
@@ -158,16 +160,18 @@ python3 "$HARNESS" --runtime claude --project "$PROJECT" surface --spec "$PROJEC
 The surface gate has one test per public name the spec gives (`pkg.mod.Name`,
 `from pkg.mod import Name`), and fails when a package directory lacks its
 `__init__.py`, because a directory without one still imports, as a namespace
-package. Delete a name from it only when the spec says it must not exist. Run it
+package. Delete a name from it only when the spec says it must not exist, or when it is a
+file name, a URL or a local variable in an example. Run it
 as the gate (`python -m pytest -q "$GATES"`), with the spec's own examples as
 further checks when you have them. Write each module complete where the spec
 allows, in dependency order, and the package `__init__.py` re-exporting the names
 the spec lists. Keep the package importable after every write: define a name in
 the same edit that exports it, and never import a module that does not exist
 yet. When a probe, example or caller fails on a name or behaviour the spec gives,
-add it to the library; never rewrite the probe around it. Grow the gate only
-with behaviour you are about to write or an example from the spec; do not write
-checks for code that already passes them.
+add it to the library; never rewrite the probe around it. Grow the gate with the
+code: add checks for the part you are about to write, and the spec's own examples
+for parts already built. A check you invent for code that is already built
+usually passes and buys nothing.
 
 Claude Code loads hooks when a session starts, so hooks installed by `start` take
 effect from the next session. Until then, run `close` yourself at the end, and
@@ -311,7 +315,8 @@ report, listing the lines no reviewer passed as unverified. Dispatch a reviewer
 at the start of a session, with most of the session left, not near its end.
 
 A passing gate means your checks pass, not that the request is met. While budget
-remains, extend the gate to the next part of the request it does not check yet:
+remains, extend the gate to the next part of the request it does not check yet,
+preferring parts that are not built yet:
 every item the spec enumerates (each module and public name, each listed table
 or range as a whole, not only the examples shown; docs, CI and config files only
 when the request asks for them, and after the library) and the

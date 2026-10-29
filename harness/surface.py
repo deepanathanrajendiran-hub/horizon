@@ -8,7 +8,10 @@ import re
 from pathlib import Path
 
 _URL = re.compile(r"(?:https?://|www\.)\S+")
-_NOT_REFS = {"org", "com", "net", "edu", "html", "md", "py", "txt", "toml", "cfg", "rst"}
+
+# File extensions and domain parts: `pkg.dev.py`, `pkg.readthedocs.io` name files and sites, not the library.
+_NOT_REFS = {"org", "com", "net", "edu", "io", "readthedocs", "html", "md", "py", "txt", "toml", "cfg", "rst",
+             "ini", "yml", "yaml"}
 
 
 def _is_test(name: str) -> bool:
@@ -30,8 +33,11 @@ def _keep(segments: list[str]) -> list[str]:
 def _line_refs(line: str, package: str, pkg: str) -> set[str]:
     found = set()
     for chain in re.findall(rf"(?<![\w./-]){pkg}((?:\.[A-Za-z_]\w*)+)(?![\w/-])", line):
-        segments = _keep(chain.strip(".").split("."))
-        if segments and segments[0] not in _NOT_REFS:
+        whole = chain.strip(".").split(".")
+        if whole[0] in _NOT_REFS or whole[-1] in _NOT_REFS:
+            continue  # a file name or a domain: pkg.dev.py, pkg.readthedocs.io
+        segments = _keep(whole)
+        if segments:
             found.add(".".join([package, *segments]))
     for module in re.findall(rf"^\s*import\s+({pkg}(?:\.\w+)+)", line):
         segments = _keep(module.split(".")[1:])
@@ -40,11 +46,11 @@ def _line_refs(line: str, package: str, pkg: str) -> set[str]:
     return found
 
 
-def _from_imports(text: str, package: str, pkg: str) -> set[str]:
+def _from_imports(lines: list[str], package: str, pkg: str) -> set[str]:
+    """`from pkg.mod import a, b` anywhere in a line: code, prose in backticks, doctests or comments."""
     found = set()
-    lines = text.splitlines()
     for i, line in enumerate(lines):
-        m = re.match(rf"\s*from\s+({pkg}(?:\.\w+)*)\s+import\s+(.*)$", line)
+        m = re.search(rf"\bfrom\s+({pkg}(?:\.\w+)*)\s+import\s+(.*)$", line)
         if not m:
             continue
         module, names = m.group(1), m.group(2)
@@ -55,39 +61,66 @@ def _from_imports(text: str, package: str, pkg: str) -> set[str]:
                 names += "," + lines[j]
                 j += 1
             names = names.split(")", 1)[0]
+        # The import ends where its own characters end; in prose a sentence follows it.
+        names = re.match(r"[\w\s,\\]*", names).group(0)
         base = _keep(module.split(".")[1:])
-        if len(base) != len(module.split(".")) - 1:
+        if len(base) != len(module.split(".")) - 1 or (base and base[-1] in _NOT_REFS):
             continue
-        for item in names.split(","):
-            words = item.strip().split()
-            if not words or not words[0].isidentifier() or keyword.iskeyword(words[0]):
+        items = names.split(",")
+        for k, item in enumerate(items):
+            words = item.strip().strip("\\").split()
+            # `Name` or `Name as alias`; the last item may run on into prose ("JSONRenderer at the top level")
+            if not (len(words) == 1 or (len(words) == 3 and words[1] == "as") or (words and k == len(items) - 1)):
                 continue
-            if _is_test(words[0]):
+            if not words[0].isidentifier() or keyword.iskeyword(words[0]) or _is_test(words[0]):
                 continue
             found.add(".".join([package, *base, words[0]]))
     return found
 
+
+def _init_all(lines: list[str], package: str) -> set[str]:
+    """The names in an `__all__` the spec gives for the package's `__init__.py` (within 30 lines after a
+    mention of `__init__`)."""
+    found = set()
+    for i, line in enumerate(lines):
+        if not re.match(r"\s*__all__\s*(?::[^=]*)?=\s*[\[(]", line):
+            continue
+        if not any("__init__" in near for near in lines[max(0, i - 30):i]):
+            continue
+        block = line
+        j = i + 1
+        while not re.search(r"[\])]", block) and j < len(lines):
+            block += lines[j]
+            j += 1
+        for name in re.findall(r"['\"]([A-Za-z_]\w*)['\"]", block):
+            if not keyword.iskeyword(name) and not _is_test(name):
+                found.add(f"{package}.{name}")
+    return found
 
 def refs(text: str, package: str) -> list[str]:
     """Every `package.x[.Y]` the spec names, sorted. A name on a line at most two lines above a mention
     of AttributeError is an example of a name that must not exist, so it is left out."""
     pkg = re.escape(package)
     text = _URL.sub(" ", text)
-    lines = text.splitlines()
+    # Prose in backticks, doctest prompts and comments hold imports too.
+    lines = [re.sub(r"^\s*(?:>>>|\.\.\.|#)\s?", "", line).replace("`", " ") for line in text.splitlines()]
     kept = set()
     for i, line in enumerate(lines):
         # `try: x = pkg.missing` / `except AttributeError:` shows a name that must not exist.
         if any("AttributeError" in near for near in lines[i:i + 3]):
             continue
         kept |= _line_refs(line, package, pkg)
-    kept |= _from_imports(text, package, pkg)
+    kept |= _from_imports(lines, package, pkg)
+    kept |= _init_all(lines, package)
     return sorted(kept)
+
+
 
 
 _TEMPLATE = '''"""Public names {spec} gives for `{package}` (written by Horizon `surface`; one test per name).
 
-Delete a name only when the spec says it must not exist. A failure means the library lacks the name:
-add it to the library."""
+A failure means the library lacks the name: add it to the library. Delete a name only when the spec says it
+must not exist, or when it is a file name, a URL or a local variable in an example, not a library name."""
 import importlib
 import sys
 from pathlib import Path
@@ -97,10 +130,19 @@ import pytest
 PACKAGE = {package!r}
 NAMES = {names}
 
-for _base in (Path.cwd(), Path.cwd() / "src"):
-    if (_base / PACKAGE).is_dir():
-        sys.path.insert(0, str(_base))
-        break
+
+def _find_package():
+    here = Path(__file__).resolve()
+    for base in (Path.cwd(), *here.parents):
+        for root in (base, base / "src"):
+            if (root / PACKAGE).is_dir() or (root / (PACKAGE + ".py")).is_file():
+                return root
+    return None
+
+
+_ROOT = _find_package()
+if _ROOT is not None and str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
 
 def _deepest_module(parts):
@@ -109,6 +151,7 @@ def _deepest_module(parts):
         try:
             return importlib.import_module(name), i
         except ModuleNotFoundError as exc:
+            # Only a missing module on this name's own path falls back; a missing dependency is an error.
             if not exc.name or not (name == exc.name or name.startswith(exc.name + ".")):
                 raise
     pytest.fail(f"package {{PACKAGE}} does not import")
@@ -126,9 +169,11 @@ def test_spec_name_exists(name):
         assert hasattr(module, parts[depth]), f"{{'.'.join(parts[:depth])}} has no attribute {{parts[depth]}}"
 '''
 
-
 def write_gate(spec: Path, package: str, out: Path) -> int:
     names = refs(Path(spec).read_text(errors="replace"), package)
+    if not names:
+        raise ValueError(f"no names for package {package!r} in {spec}: check --package (the import name, "
+                         "such as jwt for PyJWT)")
     body = "[\n" + "".join(f"    {n!r},\n" for n in names) + "]"
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
