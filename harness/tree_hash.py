@@ -96,26 +96,36 @@ def compute(cwd, watch_paths: list[str] | None = None) -> str:
     """Hash task content; writing a checkpoint or committing is not task work."""
     cwd = Path(cwd).resolve()
     h = hashlib.sha256()
-    # Every file git can see (tracked or untracked, not ignored), by content, so an edit outside narrow
-    # watch paths still counts. The set and the contents are the same before and after a commit.
+    # Every file git can see in the whole repository (tracked or untracked, not ignored), by content, so an
+    # edit outside narrow watch paths, or outside a project that is a subdirectory, still counts. The set
+    # and the contents are the same before and after a commit.
+    top = (_git(cwd, 'rev-parse', '--show-toplevel') or '').strip()
+    covered = not watch_paths and top and Path(top).resolve() == cwd  # the walk below sees every file
     exclusions = [f':(glob,exclude)**/{runtime}/harness/{part}{suffix}'
                   for runtime in ('.claude', '.codex')
                   for part in BOOKKEEPING
                   for suffix in ('', '/**')]
     exclusions += [f':(glob,exclude)**/{name}/**' for name in sorted(EXCLUDED_DIRS - {'.git'})]
-    listed = _git(cwd, 'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', *exclusions)
-    if listed is None:
+    listed = None if covered or not top else _git(
+        Path(top), 'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', *exclusions)
+    if listed is None and not covered:
         h.update(b'GIT\x00NONE\x00')
-    else:
-        for rel in sorted(set(filter(None, listed.split('\0')))):
-            path = cwd / rel
-            if _bookkeeping(path):
-                continue
-            try:
-                entry = _file_entry(path) if not path.is_symlink() else f'{path}\x00LINK\x00{os.readlink(path)}'
-            except FileNotFoundError:
-                entry = f'{path}\x00MISSING'
-            h.update(b'GIT\x00' + entry.encode() + b'\x00')
+    for rel in sorted(set(filter(None, (listed or '').split('\0')))):
+        path = Path(top) / rel.rstrip('/')
+        if _bookkeeping(path):
+            continue
+        try:
+            if path.is_symlink():
+                entry = f'{path}\x00LINK\x00{os.readlink(path)}'
+            elif path.is_dir():
+                # a submodule or a nested repository: its own commit and its own changes
+                state = (_git(path, 'rev-parse', 'HEAD') or '') + (_git(path, 'status', '--porcelain') or '')
+                entry = f'{path}\x00REPO\x00{hashlib.sha256(state.encode()).hexdigest()}'
+            else:
+                entry = _file_entry(path)
+        except FileNotFoundError:
+            entry = f'{path}\x00MISSING'
+        h.update(b'GIT\x00' + entry.encode() + b'\x00')
     for wp in sorted(str(p) for p in (watch_paths or [cwd])):
         root = Path(wp)
         if not root.is_absolute():

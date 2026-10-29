@@ -93,12 +93,15 @@ create it. Let `GATES` be the `gates` path `doctor` printed, plus `/NAME`, where
 is a short label for this request that no directory there already uses.
 
 1. Save the request verbatim to `$GATES/request.md`. Read the inputs it names, the
-   code it concerns, and that code's existing tests and callers.
+   code it concerns, and that code's existing tests and callers. For a build from
+   a large spec, read only its outline and module list now (see "Building from a
+   spec" below).
 2. Write `$GATES/requirements.md` with one numbered line (R1, R2, ...) for each
    requirement, reported symptom, deliverable and constraint in the request, quoted
    in the request's words. Keep qualifiers such as "exact", "all" and "unchanged",
    and keep stated limits. When the request names a class ("all X", "every Y"),
-   list each member. Tag each line `[gate]`, `[review]` or `[unverifiable]`. If a
+   list each member; for a build from a large spec, one line per module or
+   section is enough at first. Tag each line `[gate]`, `[review]` or `[unverifiable]`. If a
    line admits more than one reasonable reading, also tag it `[judgment]` and
    record the reading you chose. This file states what was asked: leave out your
    diagnosis, method and planned fix. The reviewer tests `[unverifiable]` lines it
@@ -130,6 +133,15 @@ python3 "$HARNESS" --runtime claude --project "$PROJECT" start "Requested outcom
   --max-turns 20 --max-minutes 60
 ```
 
+5. Before your first edit, read the baseline `observation` that `start` printed;
+   do not run `check` for the baseline. Checks of new requirement lines must fail
+   there where the request says behaviour is broken or missing. A check that
+   passes at baseline must be explained (for example, it guards existing
+   behaviour). Carried checks must pass; report a carried check that fails here
+   as a pre-existing regression.
+
+### Building from a spec
+
 For a build from a spec, such as a library or an application described in a
 document, go breadth first. Before `start`, read the spec's outline and module
 list, not all of it; requirements.md may give one line per module or section,
@@ -144,13 +156,6 @@ imports inside the test. It also checks that each package directory has its
 package. Grow the gate by a few checks with each increment. Keep the package
 importable after every write: define a name in the same edit that exports it,
 and never import a module that does not exist yet.
-
-5. Before your first edit, read the baseline `observation` that `start` printed;
-   do not run `check` for the baseline. Checks of new requirement lines must fail
-   there where the request says behaviour is broken or missing. A check that
-   passes at baseline must be explained (for example, it guards existing
-   behaviour). Carried checks must pass; report a carried check that fails here
-   as a pre-existing regression.
 
 Claude Code loads hooks when a session starts, so hooks installed by `start` take
 effect from the next session. Until then, run `close` yourself at the end, and
@@ -221,7 +226,8 @@ the worker. State mode itself creates no native goal, task, schedule, or API cli
 
 ## Conversation-mode increments
 
-1. Read `status SLUG` before work. Continue only when status is active and
+1. Read `status SLUG` before work, or the session-start message when it shows
+   the goal's budget. Continue only when status is active and
    `budget_exhausted` is false. Inspect the recorded next action. Start an
    increment or a review only if it, `check`, the review and the final report can
    all finish before the `deadline` that `status` prints. Near the deadline, leave

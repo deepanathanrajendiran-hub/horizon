@@ -70,8 +70,10 @@ run, so a session that ends before `check` still hands it on. A goal's
 `status SLUG` also reports `last_observation` (the newest gate run, with the last
 600 characters of its output), and the Claude Code session-start message adds
 `Last gate run:` when that run is newer than the last checkpoint. `status SLUG`
-stays small: the latest review is listed without its evidence, and gate outputs
-are clipped to their last 600 characters.
+stays small: the latest review is listed without its evidence (a failed review
+keeps its FAIL and UNVERIFIED lines as `fail_lines`), and gate outputs are
+clipped to their last 600 characters. `check` and the other commands keep the
+full output.
 
 `start` creates the goal's notes file, `<state>/notes/SLUG.md`, for what the agent
 learns from large inputs, part by part. `start` and `status SLUG` report it as
@@ -137,12 +139,17 @@ those and writes the opt-out marker `hooks-optout` in the state directory, so a
 later `start` does not reinstall them. `hook EVENT` reads
 the event JSON on stdin and always exits 0, so a hook never blocks a session.
 - `SessionStart` records the session id and reclaims a stale attempt
-  automatically. For each active conversation-mode goal with a command gate, it
-  runs the gate as a `resume` observation unless one already covers the current
-  files (at most 240 seconds; the hook's timeout is 300). It then reports the
-  `HARNESS` and `PROJECT` values to use, each goal's next action and gate result
-  (`Gate now:` when it just ran the gate), the notes file and its parts, and the
-  files the last commit changed.
+  automatically. When a session starts (not on resume, clear or compaction), for
+  each active conversation-mode goal with a command gate, it runs the gate as a
+  `resume` observation unless an observation or checkpoint already covers the
+  current files. All goals share 240 seconds, and the hook's timeout is 300. A
+  run cut short by that limit is not recorded; the message says so. It then
+  reports the `HARNESS` and `PROJECT` values to use, each goal's budget, deadline,
+  gate directory, next action and gate result (`Gate now:` when it just ran the
+  gate), the notes file and its parts, and the files the last commit changed
+  (relative to the repository root). An install from before this behaviour has a
+  30-second hook: the hook upgrades it for the next session and runs no gate in
+  this one. `install-hooks` keeps a longer timeout you set.
 - `PostToolUse` renews the lease of the session's open attempt.
 - `Stop` completes or finalizes goals whose recorded evidence already allows it
   (the `close --if-ready` rules, so never on files unchanged since the
@@ -502,8 +509,9 @@ sandbox.
 Repeat `--watch PATH` on `start` to select the complete set of relevant inputs.
 Paths are relative to the discovered project; the default is the whole project.
 The fingerprint covers the content and mode of every watched file and of every
-file Git can see (tracked or untracked, not ignored), even outside the watch
-paths. It leaves out Git's own state, so a commit that changes no file keeps the
+file Git can see in the repository (tracked or untracked, not ignored), even
+outside the watch paths or the project directory; a nested repository or
+submodule counts by its commit and its changes. It leaves out Git's own state, so a commit that changes no file keeps the
 checkpoint. It excludes common dependency/cache directories and mutable
 `.claude/harness` and `.codex/harness` goals, notes, undo records, and
 changelogs. Harness source remains an

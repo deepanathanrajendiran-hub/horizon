@@ -126,6 +126,7 @@ def test_session_start_runs_the_gate_on_changed_files_and_hands_over_everything(
     assert "Next: write pkg/testing.py from SPEC lines 1599-1741" in context
     assert "Gate now: pass" in context and "ALL-OK" in context
     assert "notes/" in context and "pkg/__init__.py" in context  # notes file, and the last commit's files
+    assert "0/20 turns" in context and "gate dir none" in context  # what the skill's budget check needs
     before = len(goal_observations(p, slug))
     _session_start(p, "s3")  # nothing changed since: the gate is not run again
     assert len(goal_observations(p, slug)) == before
@@ -144,3 +145,108 @@ def test_the_session_start_hook_gets_time_to_run_the_gate(tmp_path):
     start = [h for g in settings["hooks"]["SessionStart"] for h in g["hooks"] if hooks.MARK in h["command"]]
     assert start[0]["timeout"] >= 300
     assert hooks.install(project, ENTRY) is False
+
+
+def test_a_nested_repository_is_fingerprinted_not_refused(tmp_path):
+    # Review of fix/bench2-findings: `git ls-files --others` lists an untracked nested repo as a directory,
+    # and hashing it as a file raised, so no goal in such a project could complete.
+    repo = tmp_path / "repo"
+    (repo / "vendor" / "dep").mkdir(parents=True)
+    _git(repo, "init", "-q")
+    _git(repo / "vendor" / "dep", "init", "-q")
+    (repo / "vendor" / "dep" / "d.py").write_text("d = 1\n")
+    _git(repo / "vendor" / "dep", "add", "-A")
+    _git(repo / "vendor" / "dep", "commit", "-q", "-m", "dep")
+    (repo / "a.py").write_text("x = 1\n")
+    before = tree_hash.compute(str(repo))
+    (repo / "vendor" / "dep" / "d.py").write_text("d = 2\n")
+    assert tree_hash.compute(str(repo)) != before
+
+
+def test_an_edit_elsewhere_in_the_repository_counts_when_the_project_is_a_subdirectory(tmp_path):
+    repo = tmp_path / "mono"
+    (repo / "pkg" / "foo").mkdir(parents=True)
+    (repo / "pkg" / "shared").mkdir()
+    _git(repo, "init", "-q")
+    (repo / "pkg" / "foo" / "f.py").write_text("import shared\n")
+    (repo / "pkg" / "shared" / "s.py").write_text("s = 1\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "one")
+    project = repo / "pkg" / "foo"
+    before = tree_hash.compute(str(project), [str(project)])
+    (repo / "pkg" / "shared" / "s.py").write_text("s = 2\n")
+    assert tree_hash.compute(str(project), [str(project)]) != before
+
+
+def test_session_start_does_not_rerun_a_gate_that_check_just_ran(project):
+    p, cli = project
+    _, started = cli("start", "Keep it green", "--gate", "true")
+    slug = started["slug"]
+    (p / "a.py").write_text("x = 1\n")
+    cli("check", slug, "--did", "d", "--next", "n")
+    _session_start(p)
+    assert [o["role"] for o in goal_observations(p, slug)] == ["baseline"]
+
+
+def test_session_start_runs_gates_only_at_startup_and_never_records_its_own_timeout(project):
+    p, cli = project
+    (p / "slow.sh").write_text("sleep 5\n")
+    _, started = cli("start", "Slow gate", "--gate", "sh slow.sh", "--timeout", "30")
+    slug = started["slug"]
+    (p / "a.py").write_text("x = 1\n")
+    done = subprocess.run([sys.executable, ENTRY, "--runtime", "claude", "--project", str(p), "hook", "SessionStart"],
+                          input=json.dumps({"session_id": "s2", "source": "compact"}), capture_output=True,
+                          text=True, timeout=60)
+    assert len(goal_observations(p, slug)) == 1  # a compaction is not a new session
+    env = dict(os.environ, HORIZON_SESSION_GATE_S="3")
+    done = subprocess.run([sys.executable, ENTRY, "--runtime", "claude", "--project", str(p), "hook", "SessionStart"],
+                          input=json.dumps({"session_id": "s3", "source": "startup"}), capture_output=True,
+                          text=True, timeout=60, env=env)
+    context = json.loads(done.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert len(goal_observations(p, slug)) == 1  # a run cut short by the hook's own budget is not a result
+    assert "did not finish" in context
+
+
+def test_an_old_thirty_second_hook_is_upgraded(tmp_path):
+    import hooks
+    project = tmp_path / "p"
+    (project / ".claude").mkdir(parents=True)
+    old = {"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": hooks._command(ENTRY, "SessionStart"),
+                                                   "timeout": 30}]}]}}
+    (project / ".claude" / "settings.json").write_text(json.dumps(old))
+    assert hooks.install(project, ENTRY) is True
+    settings = json.loads((project / ".claude" / "settings.json").read_text())
+    assert [h["timeout"] for g in settings["hooks"]["SessionStart"] for h in g["hooks"]] == [300]
+    # a timeout the user raised is kept
+    settings["hooks"]["SessionStart"][0]["hooks"][0]["timeout"] = 900
+    (project / ".claude" / "settings.json").write_text(json.dumps(settings))
+    assert hooks.install(project, ENTRY) is False
+
+
+def test_check_still_shows_the_full_gate_output(project):
+    p, cli = project
+    (p / "g.sh").write_text("python3 -c \"print('TRACEBACK-HEAD ' + 'x' * 2000)\"\nexit 1\n")
+    _, started = cli("start", "Make it pass", "--gate", "sh g.sh")
+    (p / "a.py").write_text("x = 1\n")
+    _, checked = cli("check", started["slug"], "--did", "d", "--next", "n")
+    assert "TRACEBACK-HEAD" in checked["last_checkpoint"]["gate_output"]
+
+
+def test_a_compact_review_row_keeps_its_fail_lines(project):
+    p, cli = project
+    _, started = cli("start", "Keep it green", "--gate", "true", "--review", "Every line holds")
+    slug = started["slug"]
+    (p / "a.py").write_text("x = 1\n")
+    _, checked = cli("check", slug, "--did", "d", "--next", "n")
+    reply = p.parent / "reply.md"
+    reply.write_text("R1: FAIL - pool keeps 3 idle connections\n" + "context " * 2000)
+    cli("review", slug, "--result", "fail", "--judge", "r", "--hash", checked["last_checkpoint"]["tree_hash"],
+        "--evidence-file", str(reply))
+    _, status = cli("status", slug)
+    assert any("pool keeps 3 idle" in line for line in status["reviews"][-1]["fail_lines"])
+
+
+def test_unverifiable_lines_come_last_in_a_review_scope():
+    reqs = {"R1": {"gate"}, "R2": {"gate"}, "R3": {"unverifiable"}, "R4": {"unverifiable"}, "R5": {"review"}}
+    assert reviewing.review_scope(reqs, [], 1) == ["R5"]
+    assert reviewing.review_scope(reqs, [], 2) == ["R1", "R5"]

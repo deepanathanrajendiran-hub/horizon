@@ -319,7 +319,7 @@ def dispatch(args) -> tuple[dict, int]:
         }, 0
     if args.action == "status":
         if args.slug:
-            return status(goal.load(args.slug)), 0
+            return goal.summary(goal.load(args.slug), compact=True), 0
         return {"goals": goal_rows()}, 0
     if args.action == "start":
         if args.coverage and args.review:

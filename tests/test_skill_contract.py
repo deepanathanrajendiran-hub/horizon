@@ -217,6 +217,8 @@ def test_horizon_skills_build_first_and_hand_off_early(folder):
                    "## Large inputs", "Never `cat` a file over 50 KB", "Read the notes before the input",
                    "## Shell", "There is no `timeout` command", "`--timeout` on `start`",
                    "go breadth first", "read the spec's outline and module list, not all of it",
+                   "### Building from a spec", "read only its outline and module list now",
+                   "one line per module or section is enough at first",
                    "every module the spec lists, each as an importable stub",
                    "a directory without one still imports, as a namespace package",
                    "define a name in the same edit that exports it",
@@ -229,3 +231,6 @@ def test_horizon_skills_build_first_and_hand_off_early(folder):
         assert phrase in text, phrase
     if folder == ".claude":
         assert "do not run `doctor` or `status`" in text
+        assert "or the session-start message when it shows the goal's budget" in text
+    else:
+        assert "run `observe` for a current result" in text

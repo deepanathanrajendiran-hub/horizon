@@ -324,9 +324,9 @@ def test_batch_size_halves_after_an_empty_round_and_doubles_after_a_productive_o
 def test_review_scope_takes_reviewer_lines_first_and_lists_them_in_order():
     reqs = {"R1": {"gate"}, "R2": {"gate"}, "R3": {"review"}, "R4": {"gate"}, "R5": {"unverifiable"}}
     assert reviewing.review_scope(reqs, [], None) is None
-    assert reviewing.review_scope(reqs, ["R1"], 2) == ["R3", "R5"]
-    assert reviewing.review_scope(reqs, ["R1"], 3) == ["R2", "R3", "R5"]
-    assert reviewing.review_scope(reqs, [], 3) == ["R1", "R3", "R5"]
+    assert reviewing.review_scope(reqs, ["R1"], 2) == ["R2", "R3"]
+    assert reviewing.review_scope(reqs, ["R1"], 3) is None  # only the [unverifiable] R5 would be left out
+    assert reviewing.review_scope(reqs, [], 3) == ["R1", "R2", "R3"]
     assert reviewing.review_scope(reqs, [], 9) is None
     # Lines left out may not all be [unverifiable]: a pass would then skip them untried.
     only = {"R1": {"review"}, "R2": {"unverifiable"}}

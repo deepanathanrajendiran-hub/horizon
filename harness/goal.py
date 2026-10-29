@@ -539,7 +539,7 @@ def budget_exhausted(state: dict) -> bool:
     return False
 
 
-def observe(slug: str, role: str, timeout: int = gate.DEFAULT_TIMEOUT, next_action: str | None = None) -> dict:
+def observe(slug: str, role: str, timeout: int = gate.DEFAULT_TIMEOUT, next_action: str | None = None, keep_timeout: bool = True) -> dict:
     """Run the command gate now and record what it found, outside any increment.
 
     Charges no turn and never skips: an unchanged tree is exactly when a
@@ -562,6 +562,8 @@ def observe(slug: str, role: str, timeout: int = gate.DEFAULT_TIMEOUT, next_acti
     try:
         result, output, digest = gate.run_gate_at(dict(before, checkpoints=[]), timeout=timeout)
     except gate.GateUnrunnable as exc:
+        if not keep_timeout and str(exc).startswith("gate timed out"):
+            raise  # a run cut short by the caller's own time limit says nothing about the files
         result, output = "fail", str(exc)
         digest = getattr(exc, "tree_hash", gate.UNKNOWN_HASH)
     with filelock.goal_locked(_path(slug)):
@@ -1094,7 +1096,14 @@ def notes_sections(slug: str, limit: int = 600) -> list[str]:
             out.append(heading)
     return out
 
-def summary(state: dict) -> dict:
+def _compact_review(review: dict) -> dict:
+    """A review without its evidence, but with the FAIL and UNVERIFIED lines a resumed session acts on."""
+    row = {k: v for k, v in review.items() if k not in ("evidence", "criterion")}
+    if review.get("result") == "fail":
+        row["fail_lines"] = [_clip(line, 300) for line in reviewing.previous_lines(review.get("evidence") or "")[:12]]
+    return row
+
+def summary(state: dict, compact: bool = False) -> dict:
     last = state["checkpoints"][-1] if state["checkpoints"] else None
     block = state.get("execution")
     active = None
@@ -1111,15 +1120,18 @@ def summary(state: dict) -> dict:
         "deadline": end.isoformat() if end else None,
         "minutes_left": (round(max(0.0, (end - datetime.now(timezone.utc)).total_seconds() / 60), 1)
                          if end else None),
-        # Clipped: a full status (16,000 characters of review evidence, 4,000 of gate output) spilled to a
-        # file in the NL2Repo benchmark, and reading it back cost calls.
-        "last_checkpoint": dict(last, gate_output=(last.get("gate_output") or "")[-600:]) if last else None,
-        "reviews": [{k: v for k, v in r.items() if k not in ("evidence", "criterion")}
-                    for r in state.get("reviews", [])[-1:]],
+        # Compact for `status SLUG`: a full status (16,000 characters of review evidence, 4,000 of gate
+        # output) spilled to a file in the NL2Repo benchmark, and reading it back cost calls. `check` and
+        # the other commands keep the full output the agent acts on.
+        "last_checkpoint": (dict(last, gate_output=(last.get("gate_output") or "")[-600:])
+                            if compact and last else last),
+        "reviews": ([_compact_review(r) for r in state.get("reviews", [])[-1:]] if compact
+                    else state.get("reviews", [])[-1:]),
         # The newest gate run, checkpoint or not: a session cut off before `check` leaves only this.
         "last_observation": (dict(observed, gate_output=observed["gate_output"][-600:])
                              if observed else None),
-        "gate_evidence": (state.get("gate_evidence") or "")[-600:] or None,
+        "gate_evidence": ((state.get("gate_evidence") or "")[-600:] or None) if compact
+                         else state.get("gate_evidence"),
         "notes_file": str(notes_path(state["slug"])),
         "notes_sections": notes_sections(state["slug"]),
         "execution_mode": execution_mode(state),

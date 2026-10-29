@@ -25,7 +25,8 @@ active attempt as described under Optional state mode before reclaiming it.
 ## Resuming
 
 When a goal for this same request is already active, resume from what `status SLUG` shows: run it once, and read its `next_action`,
-`last_observation` and `notes_file`.
+`last_observation` and `notes_file`. If files changed since `last_observation`,
+run `observe` for a current result.
 Skip "Earlier goals" and "Before `start`". Do not re-read request.md,
 requirements.md, the gate or a large input unless the next action needs part of
 it, and then read only that part. Make your first edit within your first few
@@ -91,12 +92,15 @@ create it. Let `GATES` be the `gates` path `doctor` printed, plus `/NAME`, where
 is a short label for this request that no directory there already uses.
 
 1. Save the request verbatim to `$GATES/request.md`. Read the inputs it names, the
-   code it concerns, and that code's existing tests and callers.
+   code it concerns, and that code's existing tests and callers. For a build from
+   a large spec, read only its outline and module list now (see "Building from a
+   spec" below).
 2. Write `$GATES/requirements.md` with one numbered line (R1, R2, ...) for each
    requirement, reported symptom, deliverable and constraint in the request, quoted
    in the request's words. Keep qualifiers such as "exact", "all" and "unchanged",
    and keep stated limits. When the request names a class ("all X", "every Y"),
-   list each member. Tag each line `[gate]`, `[review]` or `[unverifiable]`. If a
+   list each member; for a build from a large spec, one line per module or
+   section is enough at first. Tag each line `[gate]`, `[review]` or `[unverifiable]`. If a
    line admits more than one reasonable reading, also tag it `[judgment]` and
    record the reading you chose. This file states what was asked: leave out your
    diagnosis, method and planned fix. The reviewer tests `[unverifiable]` lines it
@@ -126,6 +130,15 @@ python3 "$HARNESS" --runtime codex --project "$PROJECT" start "Requested outcome
   --max-turns 20 --max-minutes 60
 ```
 
+5. Before your first edit, read the baseline `observation` that `start` printed;
+   do not run `check` for the baseline. Checks of new requirement lines must fail
+   there where the request says behaviour is broken or missing. A check that
+   passes at baseline must be explained (for example, it guards existing
+   behaviour). Carried checks must pass; report a carried check that fails here
+   as a pre-existing regression.
+
+### Building from a spec
+
 For a build from a spec, such as a library or an application described in a
 document, go breadth first. Before `start`, read the spec's outline and module
 list, not all of it; requirements.md may give one line per module or section,
@@ -140,13 +153,6 @@ imports inside the test. It also checks that each package directory has its
 package. Grow the gate by a few checks with each increment. Keep the package
 importable after every write: define a name in the same edit that exports it,
 and never import a module that does not exist yet.
-
-5. Before your first edit, read the baseline `observation` that `start` printed;
-   do not run `check` for the baseline. Checks of new requirement lines must fail
-   there where the request says behaviour is broken or missing. A check that
-   passes at baseline must be explained (for example, it guards existing
-   behaviour). Carried checks must pass; report a carried check that fails here
-   as a pre-existing regression.
 
 Use `--coverage` with the same criterion instead of `--gate` when no command can
 check any line. When you write the gate yourself (`--gate-path`), always pass
