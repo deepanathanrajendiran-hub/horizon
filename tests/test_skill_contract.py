@@ -211,15 +211,14 @@ def test_horizon_skills_build_first_and_hand_off_early(folder):
     # NL2Repo bench1 and bench2: sessions cut off before `check` handed on nothing, review rounds replaced
     # building, re-orienting and re-reading the spec took most of each session, and a package that did not
     # import scored 0 (fun repo: docs/evaluations/nl2repo-bench2/transcript-findings.md).
+    # NL2Repo bench1 and bench2: sessions cut off before `check` handed on nothing, review rounds replaced
+    # building, re-orienting and re-reading the spec took most of each session, and a package that did not
+    # import scored 0 (fun repo: docs/evaluations/nl2repo-bench2/transcript-findings.md).
     text = " ".join(_horizon_skill(folder).split())
     for phrase in ("## Resuming", "never spend a session only reading", "Keep the next action current with `note`",
                    "never a reading plan, and no session numbers", "`observe` takes `--next`",
-                   "## Large inputs", "Never `cat` a file over 50 KB", "Read the notes before the input",
-                   "## Shell", "There is no `timeout` command", "`--timeout` on `start`",
-                   "go breadth first", "read the spec's outline and module list, not all of it",
-                   "### Building from a spec", "read only its outline and module list now",
-                   "one line per module or section is enough at first",
-                   "every module the spec lists, each as an importable stub",
+                   "## Large inputs", "## Shell", "There is no `timeout` command", "`--timeout` on `start`",
+                   "### Building from a spec",
                    "a directory without one still imports, as a namespace package",
                    "define a name in the same edit that exports it",
                    "A passing gate means your checks pass, not that the request is met",
@@ -234,3 +233,26 @@ def test_horizon_skills_build_first_and_hand_off_early(folder):
         assert "or the session-start message when it shows the goal's budget" in text
     else:
         assert "run `observe` for a current result" in text
+
+@pytest.mark.parametrize("folder", [".claude", ".agents"])
+def test_horizon_skills_build_a_spec_as_fast_as_plain(folder):
+    # NL2Repo bench3: reading the spec in small slices with a notes pass cost pyjwt its first two sessions
+    # (plain read it in four calls and scored 196 after session 1); structlog imported every module but missed
+    # spec names and scored 0; notes said "nothing implemented" after the code existed; one session wrote
+    # docs files because the skill said "each file in its tree" (fun repo: nl2repo-bench3/report.md).
+    text = " ".join(_horizon_skill(folder).split())
+    for phrase in ("up to about 800 lines per call", "never read it in small slices",
+                   "Read a spec whole, once, in the first session",
+                   "Never record in notes what is or is not implemented",
+                   "never in a call of their own", "read the whole spec now, in large parts",
+                   "surface --spec", "one test per public name the spec gives",
+                   "Delete a name from it only when the spec says it must not exist",
+                   "never rewrite the probe around it",
+                   "do not write checks for code that already passes them",
+                   "docs, CI and config files only when the request asks for them"):
+        assert phrase in text, phrase
+    for gone in ("Never `cat` a file over 50 KB", "Read the notes before the input", "each file in its tree",
+                 "read only its outline and module list now", "each as an importable stub"):
+        assert gone not in text, gone
+    if folder == ".claude":
+        assert "Do not run `status`, `ls` or `wc` to get these again" in text

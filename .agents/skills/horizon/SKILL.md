@@ -43,12 +43,15 @@ python3 "$HARNESS" --runtime codex --project "$PROJECT" note "$SLUG" --next "Wri
 
 ## Large inputs
 
-Never `cat` a file over 50 KB: the output is cut to a short preview. Read a large
-input by section, once. After reading a part, add it to the goal's notes file
-(`notes_file` in `start` and `status SLUG`): a `## ` heading naming the input,
-its line range, what it covers, the file it maps to and `done` or `todo`, and
-under it the names, signatures, rules and examples you need. Read the notes
-before the input.
+Read a large input in large parts, up to about 800 lines per call. Never `cat`
+it (the output is cut to a short preview), and never read it in small slices:
+a small read costs a call, as a large one does. Read a spec whole, once, in the
+first session, before you write code. The goal's notes file (`notes_file` in
+`start` and `status SLUG`) keeps only what saves a re-read: for each part of the
+input, a `## ` heading with its line range and the file it maps to, and the
+signatures and rules you will need again. Never record in notes what is or is
+not implemented; the files and the gate show that. Write notes in the same Bash
+call as an edit or a `check`, never in a call of their own.
 
 ## Shell
 
@@ -92,9 +95,8 @@ create it. Let `GATES` be the `gates` path `doctor` printed, plus `/NAME`, where
 is a short label for this request that no directory there already uses.
 
 1. Save the request verbatim to `$GATES/request.md`. Read the inputs it names, the
-   code it concerns, and that code's existing tests and callers. For a build from
-   a large spec, read only its outline and module list now (see "Building from a
-   spec" below).
+   code it concerns, and that code's existing tests and callers. For a build from a large spec, read the whole spec now, in large parts (see "Large
+   inputs" and "Building from a spec" below).
 2. Write `$GATES/requirements.md` with one numbered line (R1, R2, ...) for each
    requirement, reported symptom, deliverable and constraint in the request, quoted
    in the request's words. Keep qualifiers such as "exact", "all" and "unchanged",
@@ -140,19 +142,28 @@ python3 "$HARNESS" --runtime codex --project "$PROJECT" start "Requested outcome
 ### Building from a spec
 
 For a build from a spec, such as a library or an application described in a
-document, go breadth first. Before `start`, read the spec's outline and module
-list, not all of it; requirements.md may give one line per module or section,
-and the rest of the spec is read part by part as you build. The first increment
-creates every module the spec
-lists, each as an importable stub, the package `__init__.py` that re-exports the
-names the spec lists, and the packaging files, so the package imports from the
-first session. The first gate has one test per module: it imports the module by
-its exact path and checks the public names the spec lists for it, with the
-imports inside the test. It also checks that each package directory has its
+document, the first session goes: read the whole spec in large parts; then, in
+one Bash call, write request.md and requirements.md (one line per module or
+section is enough at first), write the surface gate and run `start` with it;
+then write the modules.
+
+```bash
+python3 "$HARNESS" --runtime codex --project "$PROJECT" surface --spec "$PROJECT/SPEC.md" --package pkg --out "$GATES/test_surface.py"
+```
+
+The surface gate has one test per public name the spec gives (`pkg.mod.Name`,
+`from pkg.mod import Name`), and fails when a package directory lacks its
 `__init__.py`, because a directory without one still imports, as a namespace
-package. Grow the gate by a few checks with each increment. Keep the package
-importable after every write: define a name in the same edit that exports it,
-and never import a module that does not exist yet.
+package. Delete a name from it only when the spec says it must not exist. Run it
+as the gate (`python -m pytest -q "$GATES"`), with the spec's own examples as
+further checks when you have them. Write each module complete where the spec
+allows, in dependency order, and the package `__init__.py` re-exporting the names
+the spec lists. Keep the package importable after every write: define a name in
+the same edit that exports it, and never import a module that does not exist
+yet. When a probe, example or caller fails on a name or behaviour the spec gives,
+add it to the library; never rewrite the probe around it. Grow the gate only
+with behaviour you are about to write or an example from the spec; do not write
+checks for code that already passes them.
 
 Use `--coverage` with the same criterion instead of `--gate` when no command can
 check any line. When you write the gate yourself (`--gate-path`), always pass
@@ -289,8 +300,9 @@ at the start of a session, with most of the session left, not near its end.
 
 A passing gate means your checks pass, not that the request is met. While budget
 remains, extend the gate to the next part of the request it does not check yet:
-every item the spec enumerates (each file in its tree, each public name, each
-listed table or range as a whole, not only the examples shown) and the
+every item the spec enumerates (each module and public name, each listed table
+or range as a whole, not only the examples shown; docs, CI and config files only
+when the request asks for them, and after the library) and the
 behaviour of each listed method, including closing, releasing and deleting
 objects. Work on the library's behaviour before docs, examples or images. When
 an example or a caller fails against the library, fix the library, not the

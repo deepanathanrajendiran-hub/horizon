@@ -29,6 +29,7 @@ when operating from an otherwise unmarked nested directory.
 | `complete SLUG` | Require all configured checks on current artifacts |
 | `observe SLUG [--role baseline\|resume\|final] [--timeout N] [--next TEXT]` | Run the gate now and record the result; charges no turn |
 | `note SLUG --next TEXT` | Record the next action now; runs nothing and charges no turn |
+| `surface --spec FILE --package NAME --out FILE` | Write a pytest gate with one test per public name a spec gives for a Python package; needs no goal |
 | `close SLUG [--if-ready] [--timeout N]` | Complete when recorded evidence covers the current files, else say what is missing |
 | `approve-test-change SLUG --path P --reason R` | Record who approved a changed baseline test, and why |
 | `step-reclaim SLUG --attempt A --expected-revision N [--session S]` | Close a state-mode attempt whose lease went stale |
@@ -145,9 +146,13 @@ the event JSON on stdin and always exits 0, so a hook never blocks a session.
   current files. All goals share 240 seconds, and the hook's timeout is 300. A
   run cut short by that limit is not recorded; the message says so. It then
   reports the `HARNESS` and `PROJECT` values to use, each goal's budget, deadline,
-  gate directory, next action and gate result (`Gate now:` when it just ran the
-  gate), the notes file and its parts, and the files the last commit changed
-  (relative to the repository root). An install from before this behaviour has a
+  gate directory, next action, gate command and newest gate result, whether
+  from its own run (`Gate now:`), an `observe` or a `check`. When the output
+  lists `FAILED`/`ERROR` lines it gives the failing checks by name, up to 12, and
+  the summary line; otherwise the last 300 characters. Then the notes file and
+  its parts, the files the last commit changed (relative to the repository root),
+  and the project's files outside `.claude/` and `.agents/` with their line
+  counts, up to 40, code files first. An install from before this behaviour has a
   30-second hook: the hook upgrades it for the next session and runs no gate in
   this one. `install-hooks` keeps a longer timeout you set.
 - `PostToolUse` renews the lease of the session's open attempt.
@@ -543,3 +548,15 @@ After upgrading, rerun checks for active goals created by the old implementation
 Old checkpoints lack the current fingerprint/gate-definition contract and cannot
 be used directly to complete. Completed history is left intact. Runtime state is
 never silently migrated between Codex and Claude.
+
+## Public-surface gate
+
+`surface --spec SPEC.md --package NAME --out $GATES/test_surface.py` reads a spec
+and writes one pytest test per public name it gives for the package:
+`NAME.mod.Name` references and `from NAME.mod import a, b` / `import NAME.mod`
+lines. Each test imports the deepest module on the name's path and checks the next
+name on it, no deeper; it fails when a package directory on the path has no
+`__init__.py` (a namespace package). URLs, file names, Python keywords, test
+modules and names within two lines above a mention of `AttributeError` are left
+out. The test finds the package in the working directory or in `src/`. It reads
+only the spec, so it can be written before the code.
