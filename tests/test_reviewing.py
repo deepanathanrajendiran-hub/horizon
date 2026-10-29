@@ -355,3 +355,14 @@ def test_decided_counts_skip_not_reviewed_and_carried_lines(tmp_path):
     for path, at in ((first, 100), (second, 200), (other, 300)):
         os.utime(path, (at, at))
     assert reviewing.decided_counts("s", str(tmp_path / "horizon-review-s-x-9.md")) == [2, 1, 1]
+
+
+def test_a_line_passed_once_and_never_failed_is_carried(tmp_path):
+    # pyjwt/DBUtils benchmark builds: a line passed, then a later round could not verify it, so it stayed open
+    # forever and every brief led with it. A FAIL anywhere still keeps a line open.
+    _round(tmp_path, 1, f"Reviewed checkpoint: {DIGEST}\nR1: PASS\nR2: PASS\nR3: FAIL - real bug\n")
+    _round(tmp_path, 2, f"Reviewed checkpoint: {DIGEST}\nR1: UNVERIFIED - could not run\nR2: NOT REVIEWED\n"
+                        "R3: PASS\n")
+    ids, _ = reviewing.carried("s", DIGEST, {"R1": set(), "R2": set(), "R3": set()},
+                               str(tmp_path / "horizon-review-s-x-3.md"))
+    assert ids == ["R1", "R2"]

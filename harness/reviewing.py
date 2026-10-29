@@ -298,8 +298,9 @@ _DECIDED = re.compile(
 
 
 def carried(slug: str, digest: str, requirements: dict, review_file: str) -> tuple[list, list]:
-    """Requirement lines that every earlier round's file for this checkpoint
-    passed and none failed, with those files. Only files that name the
+    """Requirement lines that an earlier round's file for this checkpoint
+    passed and none failed, with those files. A later UNVERIFIED or NOT
+    REVIEWED does not reopen a passed line. Only files that name the
     checkpoint count, and lines quoted with `>` are ignored."""
     directory = os.path.dirname(review_file)
     name = re.compile(re.escape(f"horizon-review-{slug}-{str(digest)[:HASH_ECHO]}-") + r"(\d+)\.md")
@@ -324,7 +325,8 @@ def carried(slug: str, digest: str, requirements: dict, review_file: str) -> tup
             match = None if line.lstrip().startswith(">") else _DECIDED.match(line)
             if match:
                 verdicts.setdefault(_rid(match.group(1)), set()).add(_kind(match.group(2)))
-    ids = sorted((rid for rid, kinds in verdicts.items() if kinds == {"PASS"} and rid in requirements),
+    ids = sorted((rid for rid, kinds in verdicts.items()
+                  if "PASS" in kinds and "FAIL" not in kinds and rid in requirements),
                  key=_order)
     return ids, files
 
