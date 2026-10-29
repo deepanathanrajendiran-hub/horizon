@@ -22,6 +22,23 @@ Run `doctor` first and use the `state` and `gates` paths it prints for the whole
 session. Codex has no hooks, so at session start run `status`, and handle any
 active attempt as described under Optional state mode before reclaiming it.
 
+## Resuming
+
+When a goal for this same request is already active (the session-start message
+or `status` names it), resume fast. Run `status SLUG` once and continue from its
+`next_action` and `last_observation`. Skip "Earlier goals" and "Before `start`",
+and do not re-read request.md, requirements.md, the gate or large inputs unless
+the next action needs them: make your first edit within a few tool calls.
+
+A session can end without warning, before `check`. As soon as you pick the next
+target, record it with `note`, and again before any long read or run, so the next
+session starts from it. `observe` takes `--next` too. Use the CLI's `--timeout`
+for slow commands; there is no `timeout` command on macOS.
+
+```bash
+python3 "$HARNESS" --runtime codex --project "$PROJECT" note "$SLUG" --next "Write windowed() in more.py; gate R12 fails"
+```
+
 ## Earlier goals
 
 Read the goal listing that `status` prints. Run `status SLUG` for every active goal
@@ -83,6 +100,13 @@ is a short label for this request that no directory there already uses.
    tends to check the answer's form. Write `request.md`, `requirements.md` and the
    gate in the same Bash call that runs `start`. `start` runs the gate once as the
    baseline observation and charges no turn.
+
+For a large build, such as a library or an application from a spec, keep the
+first gate small so code starts in the same session: check that the package
+imports and that the entry points the request names exist, then grow the gate by
+a few checks with each increment. Import the code under test inside each test,
+not at the top of the gate file, so a missing module fails its own checks and
+not the whole run.
 
 ```bash
 python3 "$HARNESS" --runtime codex --project "$PROJECT" start "Requested outcome" \
@@ -216,6 +240,15 @@ whose files are unchanged since the baseline. An explicit `close` can; it then
 reports `"unchanged_since_baseline": true`, which the final report must state.
 
 ## Independent review
+
+Build first, review last. Dispatch a reviewer only when you believe every part
+of the request is built and your gate checks it. While parts of the request are
+unbuilt or unchecked, spend the session extending the gate and building, even if
+`close` prints a brief. If `close` prints `review_failed_lines`, an earlier
+reviewer of these same files found those lines FAIL: fix them, or add a gate
+check that shows the line holds, then run `check`; do not dispatch a reviewer.
+If it prints `review_paused`, these files have had four review rounds: go back
+to building, as it says.
 
 When `close` (or `check`) reports that a review is required, it prints
 `review_brief` and `review_file`. Dispatch a **fresh independent reviewer** with the

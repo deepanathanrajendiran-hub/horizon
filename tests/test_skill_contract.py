@@ -204,3 +204,15 @@ def test_horizon_skills_carry_the_close_protocol(folder):
     assert "`complete` at once" not in text and "run `review` and then `complete`" not in text
     if folder == ".claude":
         assert "next session" in text and '"hooks": "installed"' in text
+
+
+@pytest.mark.parametrize("folder", [".claude", ".agents"])
+def test_horizon_skills_build_first_and_hand_off_early(folder):
+    # NL2Repo benchmark: sessions cut off before `check` handed on nothing, review rounds replaced building,
+    # and a gate that imported everything at the top failed as one block.
+    text = " ".join(_horizon_skill(folder).split())
+    for phrase in ("## Resuming", "`status SLUG` once", "record it with `note`", "`observe` takes `--next`",
+                   "there is no `timeout` command", "keep the first gate small",
+                   "Import the code under test inside each test", "Build first, review last",
+                   "`review_failed_lines`", "`review_paused`"):
+        assert phrase in text, phrase

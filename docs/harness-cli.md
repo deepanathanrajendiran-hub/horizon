@@ -27,7 +27,8 @@ when operating from an otherwise unmarked nested directory.
 | `check SLUG --did TEXT --next TEXT` | Run one check and checkpoint completed work; prints `review_brief` and `review_file` when a review is due |
 | `review SLUG --result pass\|fail --judge HANDLE --hash HASH --evidence-file PATH` | Record the actual review of the checkpoint's snapshot |
 | `complete SLUG` | Require all configured checks on current artifacts |
-| `observe SLUG [--role baseline\|resume\|final] [--timeout N]` | Run the gate now and record the result; charges no turn |
+| `observe SLUG [--role baseline\|resume\|final] [--timeout N] [--next TEXT]` | Run the gate now and record the result; charges no turn |
+| `note SLUG --next TEXT` | Record the next action now; runs nothing and charges no turn |
 | `close SLUG [--if-ready] [--timeout N]` | Complete when recorded evidence covers the current files, else say what is missing |
 | `approve-test-change SLUG --path P --reason R` | Record who approved a changed baseline test, and why |
 | `step-reclaim SLUG --attempt A --expected-revision N [--session S]` | Close a state-mode attempt whose lease went stale |
@@ -38,7 +39,7 @@ when operating from an otherwise unmarked nested directory.
 `status` without a slug returns `{"goals": [...]}` with one short row per goal:
 slug, status, goal, gate, review criterion, gate path, next action, abandon
 reason, start and completion times, turns used, and the last gate and review
-results. Long text is clipped and ends in `…`. A goal file that cannot be read
+results, and `last_observed` (the newest gate run's result, role and time). Long text is clipped and ends in `…`. A goal file that cannot be read
 appears as `{"slug": ..., "error": ...}` instead of stopping the listing. `start` returns the same rows for
 the project's other goals as `other_goals`.
 
@@ -56,10 +57,17 @@ they are missing (see Hooks below) and reports `"hooks": "installed"`, or
 `"hooks_error"` if it could not; the goal is created either way. After
 `uninstall-hooks`, `start` leaves the hooks alone until `install-hooks`.
 
-`observe SLUG [--role baseline|resume|final] [--timeout N]` runs the gate now and
+`observe SLUG [--role baseline|resume|final] [--timeout N] [--next TEXT]` runs the gate now and
 appends the result to the goal's `observations` list. `--role` defaults to
 `resume`. It never skips an unchanged tree and charges no turn. The report has
-`observation`. Only command gates can be observed. Exit 0 if the gate passed,
+`observation`. With `--next`, the observation also records the next action.
+
+`note SLUG --next TEXT` records the next action at once, with no turn and no gate
+run, so a session that ends before `check` still hands it on. A goal's
+`next_action` is the newest of the last checkpoint's, note's and observation's.
+`status SLUG` also reports `last_observation` (the newest gate run, with the last
+600 characters of its output), and the Claude Code session-start message adds
+`Last gate run:` when that run is newer than the last checkpoint. Only command gates can be observed. Exit 0 if the gate passed,
 1 if it did not, 2 on error.
 
 `close SLUG [--if-ready] [--timeout N]` completes the goal when a passing gate
@@ -210,7 +218,14 @@ batch of the open lines, listed in `review_scope` (`null` means all of them):
 twice as many as the last round decided, or 4, 2 and then 1 after one, two or
 three rounds in a row that decided none. The other open lines read
 `NOT REVIEWED`, and the brief ends with a note naming the batch. Lines left out
-of a batch are never only `[unverifiable]` ones.
+of a batch are never only `[unverifiable]` ones. A line counts as carried once
+some round passed it and no round failed it.
+
+Two cases get no brief. If any earlier round of these same files wrote a FAIL
+line, `check` and `close` report `review_failed_lines` (the lines as written) and
+add them to `missing`: fix them, then check. And after four rounds on unchanged
+files, they report `review_paused` (also in `missing`), which sends the agent back
+to building. Changed files are a new checkpoint and start with fresh rounds.
 
 `review` stores the reviewer's reply whole up to 16,000 characters. Beyond that it
 keeps the reply's head and tail. A pass must contain the first 12 characters of
