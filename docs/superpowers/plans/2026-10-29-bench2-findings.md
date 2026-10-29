@@ -60,3 +60,8 @@
 
 ## Then
 A fresh reviewer checks the whole branch; its findings are fixed. Then: bundle, pre-register bench3 (structlog, pyjwt, unidecode, both arms, the same rule over three tasks), smoke check, and the user's go.
+
+## Review findings deferred (minor)
+- A goal created before this branch has a baseline hash in the old format, so `_unchanged_since_baseline` cannot match it. A goal with no work could then be auto-completed by the Stop hook after the hook's own `resume` pass. This affects only goals that cross the upgrade.
+- `HARNESS` in the session-start message is the copy that installed the hooks, which may differ from the SKILL.md copy that is loaded.
+- With narrow watch paths, git-visible files inside them are hashed twice.
