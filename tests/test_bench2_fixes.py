@@ -100,3 +100,47 @@ def test_review_scope_starts_with_the_lines_that_need_a_reviewer():
         'R1 [gate] "a"\nR2 [gate] "b"\nR3 [gate] "c"\nR4 [gate] "d"\nR5 [review] "e"\nR6 [judgment] "f"\n')
     assert reviewing.review_scope(requirements, [], 2) == ["R5", "R6"]
     assert reviewing.review_scope(requirements, ["R5", "R6"], 2) == ["R1", "R2"]
+
+
+def _session_start(p, session="s2"):
+    done = subprocess.run([sys.executable, ENTRY, "--runtime", "claude", "--project", str(p), "hook", "SessionStart"],
+                          input=json.dumps({"session_id": session}), capture_output=True, text=True, timeout=120)
+    return json.loads(done.stdout)["hookSpecificOutput"]["additionalContext"]
+
+
+def test_session_start_runs_the_gate_on_changed_files_and_hands_over_everything(project):
+    # All five bench2 tasks: sessions ended before `check`, so the hook showed the session-1 gate result for
+    # ten sessions, and each session spent 3-6 of its 15 calls on doctor, status and re-reading.
+    p, cli = project
+    _git(p, "init", "-q")
+    (p / "gate.sh").write_text('test -f pkg/__init__.py || { echo "MISSING pkg/__init__.py"; exit 1; }\necho ALL-OK\n')
+    _, started = cli("start", "Build the package", "--gate", "sh gate.sh")
+    slug = started["slug"]
+    cli("note", slug, "--next", "write pkg/testing.py from SPEC lines 1599-1741")
+    (p / "pkg").mkdir()
+    (p / "pkg" / "__init__.py").write_text("")
+    _git(p, "add", "-A")
+    _git(p, "commit", "-q", "-m", "session 1 (auto-commit)")
+    context = _session_start(p)
+    assert f"HARNESS={ENTRY}" in context and f"PROJECT={p}" in context
+    assert "Next: write pkg/testing.py from SPEC lines 1599-1741" in context
+    assert "Gate now: pass" in context and "ALL-OK" in context
+    assert "notes/" in context and "pkg/__init__.py" in context  # notes file, and the last commit's files
+    before = len(goal_observations(p, slug))
+    _session_start(p, "s3")  # nothing changed since: the gate is not run again
+    assert len(goal_observations(p, slug)) == before
+
+
+def goal_observations(p, slug):
+    return json.loads((p / ".claude" / "harness" / "goals" / f"{slug}.json").read_text()).get("observations", [])
+
+
+def test_the_session_start_hook_gets_time_to_run_the_gate(tmp_path):
+    import hooks
+    project = tmp_path / "p"
+    (project / ".claude").mkdir(parents=True)
+    hooks.install(project, ENTRY)
+    settings = json.loads((project / ".claude" / "settings.json").read_text())
+    start = [h for g in settings["hooks"]["SessionStart"] for h in g["hooks"] if hooks.MARK in h["command"]]
+    assert start[0]["timeout"] >= 300
+    assert hooks.install(project, ENTRY) is False

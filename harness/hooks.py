@@ -10,14 +10,20 @@ import json
 import os
 from pathlib import Path
 
+import subprocess
+
 import goal
 import leases
 import paths
 import steps
 import sys
+import tree_hash
 
 MARK = "horizon-hook"
 _EVENTS = {"SessionStart": None, "PostToolUse": "*", "Stop": None}
+# SessionStart runs each active goal's gate on changed files (SESSION_GATE_S at most), so it needs longer.
+_TIMEOUTS = {"SessionStart": 300}
+SESSION_GATE_S = 240
 
 
 class HookInstallError(Exception):
@@ -74,8 +80,8 @@ def install(project: Path, entrypoint: str) -> bool:
         groups = table.setdefault(event, [])
         if not isinstance(groups, list):
             raise HookInstallError(f"{path} has a non-list hooks.{event}; Horizon left it untouched")
-        wanted = _command(entrypoint, event)
-        current = [h.get("command") for g in groups if _ours(g) for h in g["hooks"]
+        wanted = {"type": "command", "command": _command(entrypoint, event), "timeout": _TIMEOUTS.get(event, 30)}
+        current = [h for g in groups if _ours(g) for h in g["hooks"]
                    if isinstance(h, dict) and MARK in str(h.get("command", ""))]
         if current == [wanted]:
             continue
@@ -87,7 +93,7 @@ def install(project: Path, entrypoint: str) -> bool:
                 groups.remove(group)
                 if inner:
                     groups.append({**group, "hooks": inner})
-        group = {"hooks": [{"type": "command", "command": wanted, "timeout": 30}]}
+        group = {"hooks": [wanted]}
         if matcher:
             group["matcher"] = matcher
         groups.append(group)
@@ -157,16 +163,59 @@ def _active_goals() -> list[dict]:
     return out
 
 
-def _goal_line(state: dict) -> str:
+def _goal_line(state: dict, fresh: bool = False) -> str:
     row = goal.row(state)
     line = (f"Horizon goal {row['slug']} ({row['status']}, {row['turns_used']} turns used): "
             f"{row['goal']} Next: {row['next_action'] or 'not set'}.")
     observed = goal.latest_observation(state)
     last = state["checkpoints"][-1] if state["checkpoints"] else None
-    if observed and (last is None or observed["at"] > (last.get("at") or "")):
+    if observed and (fresh or last is None or observed["at"] > (last.get("at") or "")):
         tail = " ".join(observed["gate_output"].split())[-300:]
-        line += f" Last gate run: {observed['gate']} ({observed['role']}, {observed['at'][:16]}): {tail}"
+        label = "Gate now" if fresh else "Last gate run"
+        line += f" {label}: {observed['gate']} ({observed['role']}, {observed['at'][:16]}): {tail}"
     return line
+
+
+def _fresh_gate(state: dict) -> bool:
+    """Run a conversation-mode goal's command gate when no observation covers the current files.
+
+    A session cut off before `check` (the NL2Repo benchmark's call cap) left the next session with a
+    gate result from session 1; running it here costs wall time, not model calls."""
+    if state.get("execution") or state["gate"]["kind"] != "command":
+        return False
+    try:
+        current = tree_hash.compute(state["cwd"], state.get("watch_paths"))
+    except Exception:
+        return False
+    observed = goal.latest_observation(state)
+    if observed and observed.get("tree_hash") == current:
+        return False
+    goal.observe(state["slug"], "resume", timeout=SESSION_GATE_S)
+    return True
+
+
+def _notes_line(slug: str) -> str:
+    path = goal.notes_path(slug)
+    if not path.exists():
+        return ""
+    sections = goal.notes_sections(slug)
+    return f" Notes: {path}" + (f" (parts: {'; '.join(sections)})." if sections else " (no parts yet).")
+
+
+def _paths_line() -> str:
+    entry = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0].endswith(".py") else None
+    return (f"Horizon: HARNESS={entry} PROJECT={paths.project_root()} (the values `doctor` prints)."
+            if entry else f"Horizon: PROJECT={paths.project_root()}.")
+
+
+def _last_commit_files(limit: int = 12) -> list[str]:
+    try:
+        out = subprocess.run(["git", "-C", str(paths.project_root()), "show", "--name-only", "--format=", "HEAD"],
+                             capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    names = [n for n in out.stdout.splitlines() if n.strip()] if out.returncode == 0 else []
+    return names[:limit] + (["…"] if len(names) > limit else [])
 
 
 def _session_start(session: str | None) -> dict | None:
@@ -190,12 +239,18 @@ def _session_start(session: str | None) -> dict | None:
                         note = f" Attempt {attempt} could not be reclaimed: {exc}."
                 else:
                     note = f" Attempt {attempt} is still owned by a live session."
-            line = _goal_line(goal.load(state["slug"]))
-            lines.append(f"{line}{note} Run `close {state['slug']}` when you think it is done.")
+            ran = _fresh_gate(state)
+            line = _goal_line(goal.load(state["slug"]), fresh=ran)
+            lines.append(f"{line}{note}{_notes_line(state['slug'])} Run `close {state['slug']}` "
+                         "when you think it is done.")
         except Exception:
             continue
     if not lines:
         return None
+    lines.insert(0, _paths_line())
+    changed = _last_commit_files()
+    if changed:
+        lines.append("The last commit changed: " + ", ".join(changed) + ".")
     return {"hookSpecificOutput": {"hookEventName": "SessionStart",
                                    "additionalContext": "\n".join(lines)}}
 
