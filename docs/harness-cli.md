@@ -29,6 +29,7 @@ when operating from an otherwise unmarked nested directory.
 | `complete SLUG` | Require all configured checks on current artifacts |
 | `observe SLUG [--role baseline\|resume\|final] [--timeout N] [--next TEXT]` | Run the gate now and record the result; charges no turn |
 | `note SLUG --next TEXT` | Record the next action now; runs nothing and charges no turn |
+| `start ... --gate-path DIR --surface-spec FILE --package NAME` | Write `DIR/test_surface.py` (as `surface`) before the baseline gate run |
 | `surface --spec FILE --package NAME --out FILE` | Write a pytest gate with one test per public name a spec gives for a Python package; needs no goal |
 | `close SLUG [--if-ready] [--timeout N]` | Complete when recorded evidence covers the current files, else say what is missing |
 | `approve-test-change SLUG --path P --reason R` | Record who approved a changed baseline test, and why |
@@ -145,7 +146,8 @@ the event JSON on stdin and always exits 0, so a hook never blocks a session.
   `resume` observation unless an observation or checkpoint already covers the
   current files. All goals share 240 seconds, and the hook's timeout is 300. A
   run cut short by that limit is not recorded; the message says so. It then
-  reports the `HARNESS` and `PROJECT` values to use, each goal's budget, deadline,
+  reports the `HARNESS`, `PROJECT` and `GATES_ROOT` values to use (also when no goal is
+  active, with `No active Horizon goal.` and the files line), each goal's budget, deadline,
   gate directory, next action, gate command and newest gate result, whether
   from its own run (`Gate now:`), an `observe` or a `check`. When the output
   lists `FAILED`/`ERROR` lines it gives the failing checks by name, up to 12, and

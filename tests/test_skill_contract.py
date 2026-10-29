@@ -244,10 +244,15 @@ def test_horizon_skills_build_a_spec_as_fast_as_plain(folder):
     # (plain read it in four calls and scored 196 after session 1); structlog imported every module but missed
     # spec names and scored 0; notes said "nothing implemented" after the code existed; one session wrote
     # docs files because the skill said "each file in its tree" (fun repo: nl2repo-bench3/report.md).
+    # NL2Repo bench3: reading the spec in small slices with a notes pass cost pyjwt its first two sessions
+    # (plain read it in four calls and scored 196 after session 1); structlog imported every module but missed
+    # spec names and scored 0; notes said "nothing implemented" after the code existed; one session wrote
+    # docs files because the skill said "each file in its tree" (fun repo: nl2repo-bench3/report.md).
+    # bench4 pilot: session 1 spent calls on `doctor`/`status` and split setup over three calls.
     text = " ".join(_horizon_skill(folder).split())
     for phrase in ("never read it in small slices", "Never record in notes what is or is not implemented",
                    "never in a call of their own",
-                   "surface --spec", "one test per public name the spec gives",
+                   "--surface-spec", "one test per public name the spec gives",
                    "Delete a name from it only when the spec says it must not exist, or when it is a file name",
                    "never rewrite the probe around it",
                    "right after the first part of the spec, which holds its outline and module list",
@@ -263,5 +268,7 @@ def test_horizon_skills_build_a_spec_as_fast_as_plain(folder):
     if folder == ".claude":
         assert "up to about 800 lines per call" in text and "Read a spec whole, once, in the first session" in text
         assert "Do not run `status` to get these again, nor `ls` or `wc` for the files it lists" in text
+        assert "If it says there is no active Horizon goal, skip \"Earlier goals\" and do not run `status`" in text
+        assert "`GATES_ROOT`" in text
     else:
         assert "up to about 250 lines per command" in text

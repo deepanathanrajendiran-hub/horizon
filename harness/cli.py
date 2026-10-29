@@ -42,6 +42,8 @@ def parser() -> argparse.ArgumentParser:
     start.add_argument("--execution", choices=("conversation", "state"), default="conversation")
     start.add_argument("--gate-path", help="Directory holding request.md, requirements.md and the gate; watched automatically")
     start.add_argument("--timeout", type=int, default=gate.DEFAULT_TIMEOUT, help="Seconds for the baseline gate run")
+    start.add_argument("--surface-spec", type=Path, help="Also write $GATE_PATH/test_surface.py from this spec first (see `surface`)")
+    start.add_argument("--package", help="With --surface-spec: the package's import name, such as jwt")
     surface_cmd = commands.add_parser("surface", help="Write a pytest gate of the public names a spec gives for a Python package")
     surface_cmd.add_argument("--spec", type=Path, required=True)
     surface_cmd.add_argument("--package", required=True, help="Top-level import name, such as jwt")
@@ -401,6 +403,14 @@ def dispatch(args) -> tuple[dict, int]:
     raise ValueError(f"Unknown action: {args.action}")
 
 
+def _start_surface(args) -> None:
+    """`start --surface-spec`: write the surface gate into the gate directory before the baseline runs."""
+    if args.action != "start" or args.surface_spec is None:
+        return
+    if not args.gate_path or not args.package:
+        raise ValueError("--surface-spec needs --gate-path and --package")
+    surface.write_gate(args.surface_spec, args.package, Path(args.gate_path) / "test_surface.py")
+
 def main(argv=None) -> int:
     args = parser().parse_args(argv)
     os.environ["CONTINUAL_HARNESS_RUNTIME"] = args.runtime
@@ -421,6 +431,7 @@ def main(argv=None) -> int:
     try:
         if args.project:
             os.chdir(args.project.expanduser().resolve())
+        _start_surface(args)
         result, code = dispatch(args)
     except Exception as exc:
         print(json.dumps({"error": type(exc).__name__, "message": str(exc)}, ensure_ascii=False),

@@ -248,3 +248,44 @@ def test_the_files_line_skips_environments_and_does_not_read_big_files(tmp_path)
     line = hooks._files_line(tmp_path)
     assert ".venv" not in line and "egg-info" not in line
     assert "a.py 2" in line and "big.bin (3 MB)" in line
+
+def test_with_no_goal_the_session_start_message_still_gives_the_paths_and_files(project):
+    # bench4 pilot: session 1 had no goal, so the hook said nothing and the agent spent calls on `doctor`,
+    # `status`, `ls` and `wc -l` before its first edit.
+    # bench4 pilot: session 1 had no goal, so the hook said nothing and the agent spent calls on `doctor`,
+    # `status`, `ls` and `wc -l` before its first edit.
+    p, _ = project
+    _git(p, "init", "-q")
+    (p / "SPEC.md").write_text("line\n" * 5)
+    context = _session_start(p, "s1")
+    assert f"HARNESS={ENTRY}" in context and f"PROJECT={p}" in context
+    assert f"GATES_ROOT={p / '.claude' / 'harness' / 'gates'}" in context
+    assert "No active Horizon goal" in context and "SPEC.md 5" in context
+
+
+def test_start_writes_the_surface_gate_before_its_baseline(project):
+    # bench4 pilot: setup took three calls (files, `surface`, `start`); `start --surface-spec` makes it one.
+    # bench4 pilot: setup took three calls (files, `surface`, `start`); `start --surface-spec` makes it one.
+    import shlex
+    p, cli = project
+    (p / "SPEC.md").write_text("Use pkg.PrintLoggerFactory.\n")
+    gates = p / "g"
+    gates.mkdir()
+    (gates / "request.md").write_text("Build pkg from SPEC.md\n")
+    (gates / "requirements.md").write_text('R1 [gate] "pkg"\n')
+    code, started = cli("start", "Build pkg", "--gate-path", str(gates), "--review", "R1 holds",
+                        "--gate", f"{shlex.quote(sys.executable)} -m pytest -q -p no:cacheprovider {shlex.quote(str(gates))}",
+                        "--surface-spec", str(p / "SPEC.md"), "--package", "pkg")
+    assert code == 0 or started["observation"]["gate"] == "fail", started
+    assert (gates / "test_surface.py").is_file()
+    assert started["observation"]["gate"] == "fail" and "PrintLoggerFactory" in started["observation"]["gate_output"]
+
+
+def test_start_refuses_a_surface_spec_without_a_gate_path_or_package(project):
+    p, cli = project
+    (p / "SPEC.md").write_text("Use pkg.x.\n")
+    code, _ = cli("start", "Build pkg", "--gate", "true", "--surface-spec", str(p / "SPEC.md"), "--package", "pkg")
+    assert code != 0
+    code, _ = cli("start", "Build pkg", "--gate", "true", "--gate-path", str(p / "g"), "--surface-spec",
+                  str(p / "SPEC.md"))
+    assert code != 0

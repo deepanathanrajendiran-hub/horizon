@@ -18,10 +18,12 @@ python3 "$HARNESS" --runtime claude --project "$PROJECT" doctor
 python3 "$HARNESS" --runtime claude --project "$PROJECT" status
 ```
 
-If the session-start message gives `HARNESS` and `PROJECT` and names an active
-goal for this request, use those values and go straight to Resuming: do not run
-`doctor` or `status`. Otherwise run `doctor` first and use the `state` and
-`gates` paths it prints for the whole session.
+If the session-start message gives `HARNESS`, `PROJECT` and `GATES_ROOT`, use
+those values for the whole session; `GATES_ROOT` is the `gates` path. If it names
+an active goal for this request, go straight to Resuming: do not run `doctor` or
+`status`. If it says there is no active Horizon goal, skip "Earlier goals" and do
+not run `status`. Otherwise run `doctor` first and use the `state` and `gates`
+paths it prints for the whole session.
 
 ## Resuming
 
@@ -93,7 +95,8 @@ Create a goal when the user requests bounded continuation or invokes `/horizon`.
 Do these steps before changing any deliverable; scratch experiments elsewhere are
 fine. Note the time when you first read the request: a time limit the user states
 counts from their message, so give the goal the minutes that remain when you
-create it. Let `GATES` be the `gates` path `doctor` printed, plus `/NAME`, where NAME
+create it. Let `GATES` be the `gates` path `doctor` printed (`GATES_ROOT` in the
+session-start message), plus `/NAME`, where NAME
 is a short label for this request that no directory there already uses.
 
 1. Save the request verbatim to `$GATES/request.md`. Read the inputs it names, the
@@ -149,12 +152,15 @@ python3 "$HARNESS" --runtime claude --project "$PROJECT" start "Requested outcom
 For a build from a spec, such as a library or an application described in a
 document, the first session goes: right after the first part of the spec, which holds its
 outline and module list, write request.md and requirements.md (one line per
-module or section is enough at first), write the surface gate and run `start`
-with it, all in one Bash call, so that a session cut off early still leaves a
-goal; then read the rest of the spec in large parts, and write the modules.
+module or section is enough at first) and run `start` with `--surface-spec`,
+which writes the surface gate into `$GATES` before the baseline, all in one Bash
+call, so that a session cut off early still leaves a goal; then read the rest of the spec in large parts, and write the modules.
 
 ```bash
-python3 "$HARNESS" --runtime claude --project "$PROJECT" surface --spec "$PROJECT/SPEC.md" --package pkg --out "$GATES/test_surface.py"
+python3 "$HARNESS" --runtime claude --project "$PROJECT" start "Build pkg as SPEC.md describes" \
+  --gate-path "$GATES" --surface-spec "$PROJECT/SPEC.md" --package pkg \
+  --gate "python -m pytest -q $GATES" \
+  --review "Every line of $GATES/requirements.md holds, judged against $GATES/request.md"
 ```
 
 The surface gate has one test per public name the spec gives (`pkg.mod.Name`,

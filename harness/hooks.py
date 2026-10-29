@@ -326,8 +326,9 @@ def _notes_line(slug: str) -> str:
 
 def _paths_line() -> str:
     entry = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0].endswith(".py") else None
-    return (f"Horizon: HARNESS={entry} PROJECT={paths.project_root()} (use these; no need to run `doctor`)."
-            if entry else f"Horizon: PROJECT={paths.project_root()}.")
+    gates = paths.harness_root() / "gates"
+    return (f"Horizon: HARNESS={entry} PROJECT={paths.project_root()} GATES_ROOT={gates} (use these; no need to "
+            "run `doctor`)." if entry else f"Horizon: PROJECT={paths.project_root()} GATES_ROOT={gates}.")
 
 
 def _last_commit_files(limit: int = 12) -> list[str]:
@@ -376,7 +377,8 @@ def _session_start(session: str | None, source: str | None = None) -> dict | Non
         except Exception:
             continue
     if not lines:
-        return None
+        # Session 1 of a goal still needs the paths and the files (bench4 pilot: `doctor`, `status`, `ls`).
+        lines.append("No active Horizon goal.")
     lines.insert(0, _paths_line())
     changed = _last_commit_files()
     if changed:

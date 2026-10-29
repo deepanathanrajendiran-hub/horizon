@@ -146,12 +146,15 @@ python3 "$HARNESS" --runtime codex --project "$PROJECT" start "Requested outcome
 For a build from a spec, such as a library or an application described in a
 document, the first session goes: right after the first part of the spec, which holds its
 outline and module list, write request.md and requirements.md (one line per
-module or section is enough at first), write the surface gate and run `start`
-with it, all in one Bash call, so that a session cut off early still leaves a
-goal; then read the rest of the spec in large parts, and write the modules.
+module or section is enough at first) and run `start` with `--surface-spec`,
+which writes the surface gate into `$GATES` before the baseline, all in one Bash
+call, so that a session cut off early still leaves a goal; then read the rest of the spec in large parts, and write the modules.
 
 ```bash
-python3 "$HARNESS" --runtime codex --project "$PROJECT" surface --spec "$PROJECT/SPEC.md" --package pkg --out "$GATES/test_surface.py"
+python3 "$HARNESS" --runtime codex --project "$PROJECT" start "Build pkg as SPEC.md describes" \
+  --gate-path "$GATES" --surface-spec "$PROJECT/SPEC.md" --package pkg \
+  --gate "python -m pytest -q $GATES" \
+  --review "Every line of $GATES/requirements.md holds, judged against $GATES/request.md"
 ```
 
 The surface gate has one test per public name the spec gives (`pkg.mod.Name`,
