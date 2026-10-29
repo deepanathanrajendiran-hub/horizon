@@ -214,5 +214,7 @@ def test_horizon_skills_build_first_and_hand_off_early(folder):
     for phrase in ("## Resuming", "`status SLUG` once", "record it with `note`", "`observe` takes `--next`",
                    "there is no `timeout` command", "keep the first gate small",
                    "Import the code under test inside each test", "Build first, review last",
-                   "`review_failed_lines`", "`review_paused`"):
+                   "`review_failed_lines`", "`review_paused`", "`review_failed_files` with `review --result fail`",
+                   "listing the lines no reviewer passed as unverified",
+                   "If it prints a `review_brief` and every part of the request is built"):
         assert phrase in text, phrase

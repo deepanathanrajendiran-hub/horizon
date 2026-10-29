@@ -148,30 +148,35 @@ def _review_handoff(report: dict, state: dict, digest: str) -> None:
         requirements = goal._requirements(state) or {}
     except Exception:
         requirements = {}
-    # A FAIL that a cut-off reviewer wrote only to its file: fix it before anyone reviews these files again.
-    failed = reviewing.failed_in_rounds(state["slug"], digest, requirements, review_file)
-    if failed:
-        report["review_failed_lines"] = failed
-        report.setdefault("missing", []).append(
-            "A reviewer of these files found FAIL lines; fix them, then check: " + "; ".join(failed))
-        return
-    rounds = reviewing.round_count(state["slug"], digest, review_file)
-    if rounds >= reviewing.REVIEW_ROUNDS_PER_CHECKPOINT:
-        report["review_paused"] = (
-            f"Review paused: these files have had {rounds} review rounds without completing. Go back to "
-            "building: extend the gate toward what the request still lacks, fix what it finds, then check. "
-            "Changed files start review again.")
-        report.setdefault("missing", []).append(report["review_paused"])
-        return
-    report["review_file"] = review_file
-    # Lines an earlier reviewer of this same checkpoint passed before it was cut off.
-    report["review_carried"], report["review_carried_from"] = reviewing.carried(
-        state["slug"], digest, requirements, report["review_file"])
-    # After a cut-off round, a smaller batch of the open lines; smaller again after a round that decided none.
     try:
         since = datetime.fromisoformat(state["used"]["started"]).timestamp()
     except (KeyError, TypeError, ValueError):
         since = 0.0
+    # A FAIL that a cut-off reviewer wrote only to its file: record it, then fix it, before anyone
+    # reviews these files again.
+    failed = reviewing.failed_rounds(state["slug"], digest, requirements, review_file, since)
+    if failed:
+        report["review_failed_lines"] = [line for line, _ in failed]
+        report["review_failed_files"] = list(dict.fromkeys(path for _, path in failed))
+        report.setdefault("missing", []).append(
+            "A reviewer of these files found FAIL lines: " + "; ".join(report["review_failed_lines"])
+            + ". Record each file in review_failed_files with `review --result fail` (as the evidence file), "
+            "then fix those lines and run check.")
+        return
+    # Lines an earlier reviewer of this same checkpoint passed before it was cut off.
+    carried, carried_from = reviewing.carried(state["slug"], digest, requirements, review_file)
+    rounds = reviewing.round_count(state["slug"], digest, review_file, since)
+    if rounds >= reviewing.REVIEW_ROUNDS_PER_CHECKPOINT and not set(requirements) <= set(carried):
+        report["review_paused"] = (
+            f"Review paused: these files have had {rounds} review rounds without completing. Go back to "
+            "building: extend the gate toward what the request still lacks, fix what it finds, then check. "
+            "Changed files start review again. If every part of the request is already built and checked, "
+            "stop and give the final report, listing the lines no reviewer passed as unverified.")
+        report.setdefault("missing", []).append(report["review_paused"])
+        return
+    report["review_file"] = review_file
+    report["review_carried"], report["review_carried_from"] = carried, carried_from
+    # After a cut-off round, a smaller batch of the open lines; smaller again after a round that decided none.
     report["review_scope"] = reviewing.review_scope(
         requirements, report["review_carried"],
         reviewing.batch_size(reviewing.decided_counts(state["slug"], report["review_file"], since)))

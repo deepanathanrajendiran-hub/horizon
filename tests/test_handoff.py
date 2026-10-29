@@ -90,3 +90,17 @@ def test_session_start_names_the_next_action_and_the_last_gate_run(tmp_path):
     context = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
     assert "Next: fix windowed step handling" in context
     assert "Last gate run: fail" in context and "4 failed" in context
+
+
+def test_the_session_start_line_leaves_out_a_gate_run_older_than_the_last_checkpoint():
+    slug = _make()["slug"]
+    goal.observe(slug, "resume")
+    state = goal.checkpoint(slug, "did", "next", "h", "pass")
+    assert "Last gate run" not in hooks._goal_line(state)
+    assert "Last gate run: pass" in hooks._goal_line(goal.observe(slug, "resume"))
+
+
+def test_note_refuses_a_state_mode_goal(make_state_goal):
+    slug = make_state_goal()["slug"]
+    with pytest.raises(goal.GoalStateError):
+        goal.note(slug, "state goals carry their next action in the task packet")

@@ -30,17 +30,18 @@
 - The SessionStart line adds `Last gate run: <gate> (<role>, <at>): <last 300 chars, one line>` whenever there is an observation newer than the last checkpoint.
 - **Tests:** in `test_goal.py` and `test_hooks.py`.
 
-### 3. The newest verdict decides a line
-- `reviewing.carried`: rounds are read in order, and within a file the last decided line wins. A line is carried when its newest verdict is PASS.
-- **Tests:** PASS, then FAIL, then PASS is carried; PASS, then FAIL is not.
+### 3. A line passed once and never failed is carried
+- **Ruling, made during execution:** "newest verdict wins" would have hidden the real DBUtils bug, because a later round passed the line after an earlier one had failed it. A line is carried when some round passed it and no round failed it.
+- **Tests:** PASS, then UNVERIFIED is carried; FAIL, then PASS is not.
 
 ### 4. A FAIL in a round file stops the brief
 - `reviewing.failed_in_rounds(slug, digest, requirements, review_file)` returns the newest-FAIL lines with their text, from this checkpoint's round files.
-- When it is non-empty, `_review_handoff` sets `review_failed_lines` and `next_action_hint` ("Fix these lines, then check"), and issues no `review_brief`.
-- **Tests:** a FAIL in an old round blocks the brief; the same line passed later does not.
+- When it is non-empty, `_review_handoff` sets `review_failed_lines` and `review_failed_files`, issues no `review_brief`, and says in `missing` to record each file with `review --result fail` and then fix. Recording the file means later briefs quote it under `Previous:`.
+- Any FAIL on these files blocks, even one that a later round passed.
+- Only files written since the goal started count.
 
-### 5. At most three rounds per checkpoint
-- `REVIEW_ROUNDS_PER_CHECKPOINT = 3`. When this checkpoint already has that many round files and the goal is not complete, `_review_handoff` sets `review_paused` and issues no brief. The message tells the agent to build: extend the gate toward what the request still lacks, fix what it finds, then `check`.
+### 5. At most four rounds per checkpoint
+- `REVIEW_ROUNDS_PER_CHECKPOINT = 4`. When this checkpoint already has that many round files and the carried lines do not cover every requirement line (final review finding C1), `_review_handoff` sets `review_paused` and issues no brief. The message tells the agent to build: extend the gate toward what the request still lacks, fix what it finds, then `check`.
 - Changed files give a new checkpoint, which starts with fresh rounds.
 - **Tests:** in `test_horizon_cli.py`, the 4th close on the same files has no brief and has `review_paused`; a changed file gets a brief again.
 

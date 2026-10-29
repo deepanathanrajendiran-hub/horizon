@@ -589,6 +589,8 @@ def note(slug: str, next_action: str) -> dict:
         raise ValueError("A note needs a next action")
     with filelock.goal_locked(_path(slug)):
         state = load(slug)
+        if execution_mode(state) == "state":
+            raise GoalStateError("state-mode goals carry their next action in the task packet; note is unavailable")
         if state["status"] != "active":
             raise GoalClosed(f"cannot note: goal status is {state['status']!r}")
         state.setdefault("notes", []).append({"at": _now(), "next": _bounded(text)})

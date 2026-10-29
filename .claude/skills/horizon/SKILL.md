@@ -84,7 +84,7 @@ is a short label for this request that no directory there already uses.
    can and answers the rest `NOT REVIEWED`; the final report lists those lines
    first.
 3. Write the gate in `$GATES` as checks of the `[gate]` lines, each check naming its
-   line. Exercise the entry points the request names, called the way existing
+   line (a large build may start with a small gate; see below the `start` example). Exercise the entry points the request names, called the way existing
    callers and tests call them. If your change will add an interface or change a
    consumer, also check the old interface's observable behaviour. When the request
    says existing behaviour must stay the same, capture the current outputs now and
@@ -102,19 +102,19 @@ is a short label for this request that no directory there already uses.
    Horizon's hooks when they are missing and reports `"hooks": "installed"`; after
    `uninstall-hooks` it leaves them out.
 
-For a large build, such as a library or an application from a spec, keep the
-first gate small so code starts in the same session: check that the package
-imports and that the entry points the request names exist, then grow the gate by
-a few checks with each increment. Import the code under test inside each test,
-not at the top of the gate file, so a missing module fails its own checks and
-not the whole run.
-
 ```bash
 python3 "$HARNESS" --runtime claude --project "$PROJECT" start "Requested outcome" \
   --gate-path "$GATES" --gate "actual verification command" \
   --review "Every line of $GATES/requirements.md holds, judged against $GATES/request.md" \
   --max-turns 20 --max-minutes 60
 ```
+
+For a large build, such as a library or an application from a spec, keep the
+first gate small so code starts in the same session: check that the package
+imports and that the entry points the request names exist, then grow the gate by
+a few checks with each increment. Import the code under test inside each test,
+not at the top of the gate file, so a missing module fails its own checks and
+not the whole run.
 
 5. Before your first edit, read the baseline `observation` that `start` printed;
    do not run `check` for the baseline. Checks of new requirement lines must fail
@@ -226,9 +226,10 @@ verdict with `review`, then run `close`.
 python3 "$HARNESS" --runtime claude --project "$PROJECT" close "$SLUG"
 ```
 
-- If it says a review is required, dispatch the fresh reviewer with the
-  `review_brief` it printed, record the verdict with `review`, then run `close`
-  again.
+- If it prints a `review_brief` and every part of the request is built, dispatch
+  the fresh reviewer with it, record the verdict with `review`, then run `close`
+  again. If it prints `review_failed_lines` or `review_paused` instead, follow
+  Independent review.
 - If it says a baseline test file changed, stop and ask the user (or a fresh
   reviewer) whether the change is legitimate. Only then run
   `approve-test-change`, naming who approved it and why. Never approve a
@@ -253,13 +254,17 @@ Build first, review last. Dispatch a reviewer only when you believe every part
 of the request is built and your gate checks it. While parts of the request are
 unbuilt or unchecked, spend the session extending the gate and building, even if
 `close` prints a brief. If `close` prints `review_failed_lines`, an earlier
-reviewer of these same files found those lines FAIL: fix them, or add a gate
-check that shows the line holds, then run `check`; do not dispatch a reviewer.
-If it prints `review_paused`, these files have had four review rounds: go back
-to building, as it says.
+reviewer of these same files found those lines FAIL and nobody recorded it:
+record each file in `review_failed_files` with `review --result fail` (it is the
+evidence file), then fix the lines, or add a gate check that shows a line holds,
+and run `check`; do not dispatch a reviewer. If it prints `review_paused`, these
+files have had four review rounds: go back to building, as it says. If every
+part of the request is already built and checked, stop and give the final
+report, listing the lines no reviewer passed as unverified.
 
 When `close` (or `check`) reports that a review is required, it prints
-`review_brief` and `review_file`. Dispatch a **fresh independent reviewer** with
+`review_brief` and `review_file`, unless it prints `review_failed_lines` or
+`review_paused` instead (above). Dispatch a **fresh independent reviewer** with
 Claude Code's `Agent` tool: a fresh `subagent_type: "general-purpose"` invocation in the
 foreground (`run_in_background: false`), and wait for its result in the same
 turn. Send it the `review_brief` unchanged, except that you replace

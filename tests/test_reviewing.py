@@ -385,3 +385,14 @@ def test_round_count_counts_this_checkpoints_files(tmp_path):
         _round(tmp_path, n, "cut off before the echo")
     _round(tmp_path, 1, "x", digest="d" * 64)
     assert reviewing.round_count("s", DIGEST, str(tmp_path / "horizon-review-s-x-4.md")) == 3
+
+
+def test_rounds_older_than_the_goal_are_ignored(tmp_path):
+    # Round files stay in the shared temp directory; a new goal with the same slug and files must not inherit them.
+    import os
+    old = _round(tmp_path, 1, f"Reviewed checkpoint: {DIGEST}\nR1: FAIL - from an earlier goal\n")
+    os.utime(old, (1000, 1000))
+    review_file = str(tmp_path / "horizon-review-s-x-2.md")
+    assert reviewing.failed_in_rounds("s", DIGEST, {"R1": set()}, review_file, since=2000) == []
+    assert reviewing.round_count("s", DIGEST, review_file, since=2000) == 0
+    assert reviewing.round_count("s", DIGEST, review_file) == 1

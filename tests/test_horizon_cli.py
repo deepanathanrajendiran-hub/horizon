@@ -309,11 +309,17 @@ def test_a_fail_in_a_round_file_stops_the_brief_until_the_files_change(client):
     Path(first["review_file"]).write_text(f"Reviewed checkpoint: {digest}\nR1: PASS\nR2: FAIL - wobbles\n")
     _, second = run("close", slug)
     assert second["review_failed_lines"] == ["R2: FAIL - wobbles"]
+    assert second["review_failed_files"] == [first["review_file"]]
     assert not second.get("review_brief")
-    assert any("R2: FAIL - wobbles" in m for m in second["missing"])
+    assert any("R2: FAIL - wobbles" in m and "review --result fail" in m for m in second["missing"])
+    # recorded, the FAIL outlives the edit that follows: the next brief quotes it under Previous:
+    code, _ = run("review", slug, "--result", "fail", "--judge", "cut-off reviewer", "--hash", digest,
+                  "--evidence-file", first["review_file"])
+    assert code == 1
     (project / "ready.txt").write_text("ready, steady")
     _, third = run("close", slug)
     assert third["review_brief"] and not third.get("review_failed_lines")
+    assert "> R2: FAIL - wobbles" in third["review_brief"].split("Previous:", 1)[1]
 
 
 def test_review_pauses_after_four_rounds_on_the_same_files(client):
@@ -336,6 +342,25 @@ def test_review_pauses_after_four_rounds_on_the_same_files(client):
     (project / "ready.txt").write_text("ready, more")
     _, fresh = run("close", slug)
     assert fresh["review_brief"] and not fresh.get("review_paused")
+
+def test_a_review_finished_across_four_rounds_is_not_paused(client):
+    # Reviewer of fix/bench-findings: rounds that together passed every line still hit the pause, and the
+    # carried lines that would let the goal complete were never printed.
+    project, runtime, run = client
+    gates = _gate_dir(run, project, runtime)
+    (gates / "requirements.md").write_text(
+        "".join(f'R{n} [review] "ready.txt says ready, part {n}"\n' for n in range(1, 8)))
+    (project / "ready.txt").write_text("ready")
+    slug = start(run, "--gate", "true", "--gate-path", str(gates), "--review", "Every line holds")
+    _, report = check(run, slug)
+    digest = report["last_checkpoint"]["tree_hash"]
+    for lines in (("R1", "R2"), ("R3", "R4"), ("R5", "R6"), ("R7",)):
+        Path(report["review_file"]).write_text(
+            f"Reviewed checkpoint: {digest}\n" + "".join(f"{r}: PASS - cat - ready\n" for r in lines))
+        _, report = run("close", slug)
+    assert not report.get("review_paused")
+    assert report["review_carried"] == [f"R{n}" for n in range(1, 8)] and report["review_carried_from"]
+
 
 def test_start_survives_an_unreadable_sibling_goal(client):
     project, runtime, run = client

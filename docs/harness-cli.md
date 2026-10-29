@@ -61,14 +61,15 @@ they are missing (see Hooks below) and reports `"hooks": "installed"`, or
 appends the result to the goal's `observations` list. `--role` defaults to
 `resume`. It never skips an unchanged tree and charges no turn. The report has
 `observation`. With `--next`, the observation also records the next action.
+Only command gates can be observed. Exit 0 if the gate passed, 1 if it did not,
+2 on error.
 
 `note SLUG --next TEXT` records the next action at once, with no turn and no gate
 run, so a session that ends before `check` still hands it on. A goal's
 `next_action` is the newest of the last checkpoint's, note's and observation's.
 `status SLUG` also reports `last_observation` (the newest gate run, with the last
 600 characters of its output), and the Claude Code session-start message adds
-`Last gate run:` when that run is newer than the last checkpoint. Only command gates can be observed. Exit 0 if the gate passed,
-1 if it did not, 2 on error.
+`Last gate run:` when that run is newer than the last checkpoint.
 
 `close SLUG [--if-ready] [--timeout N]` completes the goal when a passing gate
 result (a checkpoint or an observation, from this session or an earlier one) covers
@@ -221,11 +222,15 @@ three rounds in a row that decided none. The other open lines read
 of a batch are never only `[unverifiable]` ones. A line counts as carried once
 some round passed it and no round failed it.
 
-Two cases get no brief. If any earlier round of these same files wrote a FAIL
-line, `check` and `close` report `review_failed_lines` (the lines as written) and
-add them to `missing`: fix them, then check. And after four rounds on unchanged
-files, they report `review_paused` (also in `missing`), which sends the agent back
-to building. Changed files are a new checkpoint and start with fresh rounds.
+Two cases get no brief. If any earlier round of these same files, written since
+the goal started, has a FAIL line, `check` and `close` report `review_failed_lines`
+(the lines as written) and `review_failed_files`, and add them to `missing`: record
+each file with `review --result fail`, so later briefs quote it under `Previous:`,
+then fix the lines and check. And after four rounds on unchanged files, unless the
+carried lines already cover every requirement line, they report `review_paused`
+(also in `missing`), which sends the agent back to building. In both cases
+`review_required` stays true and there is no `review_brief` or `review_file`.
+Changed files are a new checkpoint and start with fresh rounds.
 
 `review` stores the reviewer's reply whole up to 16,000 characters. Beyond that it
 keeps the reply's head and tail. A pass must contain the first 12 characters of
