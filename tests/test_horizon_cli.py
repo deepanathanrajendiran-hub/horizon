@@ -296,6 +296,47 @@ def test_a_round_that_decides_nothing_shrinks_the_next_brief(client):
     assert fourth["review_carried"] == ["R1", "R2"]
     assert fourth["review_scope"] == ["R3", "R4", "R5", "R6"]
 
+def test_a_fail_in_a_round_file_stops_the_brief_until_the_files_change(client):
+    # DBUtils benchmark build: "R5: FAIL" sat in a cut-off reviewer's file while eight more rounds
+    # reviewed the same files and no code changed.
+    project, runtime, run = client
+    gates = _gate_dir(run, project, runtime)
+    (gates / "requirements.md").write_text('R1 [gate] "ready"\nR2 [review] "steady"\n')
+    (project / "ready.txt").write_text("ready")
+    slug = start(run, "--gate", "true", "--gate-path", str(gates), "--review", "Every line holds")
+    _, first = check(run, slug)
+    digest = first["last_checkpoint"]["tree_hash"]
+    Path(first["review_file"]).write_text(f"Reviewed checkpoint: {digest}\nR1: PASS\nR2: FAIL - wobbles\n")
+    _, second = run("close", slug)
+    assert second["review_failed_lines"] == ["R2: FAIL - wobbles"]
+    assert not second.get("review_brief")
+    assert any("R2: FAIL - wobbles" in m for m in second["missing"])
+    (project / "ready.txt").write_text("ready, steady")
+    _, third = run("close", slug)
+    assert third["review_brief"] and not third.get("review_failed_lines")
+
+
+def test_review_pauses_after_four_rounds_on_the_same_files(client):
+    # pyjwt and DBUtils benchmark builds: nine review rounds on one checkpoint, no code change after session 2.
+    project, runtime, run = client
+    gates = _gate_dir(run, project, runtime)
+    (gates / "requirements.md").write_text(
+        "".join(f'R{n} [gate] "ready.txt says ready, part {n}"\n' for n in range(1, 8)))
+    (project / "ready.txt").write_text("ready")
+    slug = start(run, "--gate", "true", "--gate-path", str(gates), "--review", "Every line holds")
+    _, report = check(run, slug)
+    digest = report["last_checkpoint"]["tree_hash"]
+    for _ in range(4):
+        assert report["review_brief"] and not report.get("review_paused")
+        Path(report["review_file"]).write_text(f"Reviewed checkpoint: {digest}\nR1: PASS\n")
+        _, report = run("close", slug)
+    assert not report.get("review_brief")
+    assert "build" in report["review_paused"]
+    assert any("review_paused" in m or "Review paused" in m for m in report["missing"])
+    (project / "ready.txt").write_text("ready, more")
+    _, fresh = run("close", slug)
+    assert fresh["review_brief"] and not fresh.get("review_paused")
+
 def test_start_survives_an_unreadable_sibling_goal(client):
     project, runtime, run = client
     first = start(run, "--gate", "true")

@@ -297,23 +297,24 @@ _DECIDED = re.compile(
     r"(PASS|FAIL(?:ED|S)?|UNVERIFIED|NOT[ \t]+REVIEWED)(?!\w)", re.I)
 
 
-def carried(slug: str, digest: str, requirements: dict, review_file: str) -> tuple[list, list]:
-    """Requirement lines that an earlier round's file for this checkpoint
-    passed and none failed, with those files. A later UNVERIFIED or NOT
-    REVIEWED does not reopen a passed line. Only files that name the
-    checkpoint count, and lines quoted with `>` are ignored."""
+def _round_files(slug: str, digest: str, review_file: str) -> list[str]:
+    """This checkpoint's earlier round files, oldest first, `review_file` itself left out."""
     directory = os.path.dirname(review_file)
     name = re.compile(re.escape(f"horizon-review-{slug}-{str(digest)[:HASH_ECHO]}-") + r"(\d+)\.md")
     try:
         entries = os.listdir(directory)
     except OSError:
-        return [], []
+        return []
     rounds = sorted((int(m.group(1)), entry) for entry in entries
                     if (m := name.fullmatch(entry)) and os.path.join(directory, entry) != review_file)
-    verdicts: dict[str, set[str]] = {}
-    files = []
-    for _, entry in rounds:
-        path = os.path.join(directory, entry)
+    return [os.path.join(directory, entry) for _, entry in rounds]
+
+
+def _round_verdicts(slug: str, digest: str, review_file: str):
+    """Each decided line of this checkpoint's earlier rounds as (rid, kind, line), with the files read.
+    Only files that name the checkpoint count, and lines quoted with `>` are ignored."""
+    decided, files = [], []
+    for path in _round_files(slug, digest, review_file):
         try:
             text = Path(path).read_text()
         except (OSError, UnicodeError):
@@ -324,13 +325,45 @@ def carried(slug: str, digest: str, requirements: dict, review_file: str) -> tup
         for line in text.splitlines():
             match = None if line.lstrip().startswith(">") else _DECIDED.match(line)
             if match:
-                verdicts.setdefault(_rid(match.group(1)), set()).add(_kind(match.group(2)))
+                decided.append((_rid(match.group(1)), _kind(match.group(2)), line.strip()))
+    return decided, files
+
+
+def carried(slug: str, digest: str, requirements: dict, review_file: str) -> tuple[list, list]:
+    """Requirement lines that an earlier round's file for this checkpoint
+    passed and none failed, with those files. A later UNVERIFIED or NOT
+    REVIEWED does not reopen a passed line. Only files that name the
+    checkpoint count, and lines quoted with `>` are ignored."""
+    decided, files = _round_verdicts(slug, digest, review_file)
+    verdicts: dict[str, set[str]] = {}
+    for rid, kind, _ in decided:
+        verdicts.setdefault(rid, set()).add(kind)
     ids = sorted((rid for rid, kinds in verdicts.items()
                   if "PASS" in kinds and "FAIL" not in kinds and rid in requirements),
                  key=_order)
     return ids, files
 
+
+def failed_in_rounds(slug: str, digest: str, requirements: dict, review_file: str) -> list[str]:
+    """Every FAIL line an earlier round wrote for this checkpoint, as written.
+    A reviewer cut off before its reply was recorded leaves these only in its file."""
+    decided, _ = _round_verdicts(slug, digest, review_file)
+    seen, out = set(), []
+    for rid, kind, line in decided:
+        if kind == "FAIL" and rid in requirements and line not in seen:
+            seen.add(line)
+            out.append(line)
+    return out
+
+
+def round_count(slug: str, digest: str, review_file: str) -> int:
+    """How many review rounds this checkpoint has had, finished or cut off."""
+    return len(_round_files(slug, digest, review_file))
+
 REVIEW_BATCH = 8
+# After this many rounds on unchanged files, Horizon stops briefing reviewers and sends the agent back
+# to building (NL2Repo benchmark: nine rounds on one checkpoint, no code change for eight sessions).
+REVIEW_ROUNDS_PER_CHECKPOINT = 4
 
 
 def decided_counts(slug: str, review_file: str, since: float = 0.0) -> list[int]:

@@ -141,13 +141,29 @@ def goal_rows(exclude: str | None = None) -> list[dict]:
 
 
 def _review_handoff(report: dict, state: dict, digest: str) -> None:
-    report["review_file"] = reviewing.next_review_file(
+    review_file = reviewing.next_review_file(
         state["slug"], digest, len(state.get("reviews") or []) + 1,
         watch_paths=state.get("watch_paths") or [state["cwd"]])
     try:
         requirements = goal._requirements(state) or {}
     except Exception:
         requirements = {}
+    # A FAIL that a cut-off reviewer wrote only to its file: fix it before anyone reviews these files again.
+    failed = reviewing.failed_in_rounds(state["slug"], digest, requirements, review_file)
+    if failed:
+        report["review_failed_lines"] = failed
+        report.setdefault("missing", []).append(
+            "A reviewer of these files found FAIL lines; fix them, then check: " + "; ".join(failed))
+        return
+    rounds = reviewing.round_count(state["slug"], digest, review_file)
+    if rounds >= reviewing.REVIEW_ROUNDS_PER_CHECKPOINT:
+        report["review_paused"] = (
+            f"Review paused: these files have had {rounds} review rounds without completing. Go back to "
+            "building: extend the gate toward what the request still lacks, fix what it finds, then check. "
+            "Changed files start review again.")
+        report.setdefault("missing", []).append(report["review_paused"])
+        return
+    report["review_file"] = review_file
     # Lines an earlier reviewer of this same checkpoint passed before it was cut off.
     report["review_carried"], report["review_carried_from"] = reviewing.carried(
         state["slug"], digest, requirements, report["review_file"])

@@ -366,3 +366,22 @@ def test_a_line_passed_once_and_never_failed_is_carried(tmp_path):
     ids, _ = reviewing.carried("s", DIGEST, {"R1": set(), "R2": set(), "R3": set()},
                                str(tmp_path / "horizon-review-s-x-3.md"))
     assert ids == ["R1", "R2"]
+
+
+def test_failed_in_rounds_quotes_every_fail_of_this_checkpoint(tmp_path):
+    # DBUtils benchmark build: a reviewer cut off by the cap wrote "R5: FAIL" to its file; nobody read it,
+    # and a later round passed the line. A FAIL on these files stays until the files change.
+    _round(tmp_path, 1, f"Reviewed checkpoint: {DIGEST}\nR1: PASS\nR2: FAIL - pool keeps 3 idle, cap is 1\n")
+    _round(tmp_path, 2, f"Reviewed checkpoint: {DIGEST}\nR2: PASS\n> R1: FAIL - quoted\n")
+    _round(tmp_path, 3, "no echo\nR1: FAIL\n")
+    failed = reviewing.failed_in_rounds("s", DIGEST, {"R1": set(), "R2": set()},
+                                        str(tmp_path / "horizon-review-s-x-4.md"))
+    assert failed == ["R2: FAIL - pool keeps 3 idle, cap is 1"]
+    assert reviewing.failed_in_rounds("s", DIGEST, {"R1": set()}, str(tmp_path / "r.md")) == []
+
+
+def test_round_count_counts_this_checkpoints_files(tmp_path):
+    for n in (1, 2, 3):
+        _round(tmp_path, n, "cut off before the echo")
+    _round(tmp_path, 1, "x", digest="d" * 64)
+    assert reviewing.round_count("s", DIGEST, str(tmp_path / "horizon-review-s-x-4.md")) == 3
