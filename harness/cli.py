@@ -58,6 +58,10 @@ def parser() -> argparse.ArgumentParser:
     observe.add_argument("slug")
     observe.add_argument("--role", choices=("baseline", "resume", "final"), default="resume")
     observe.add_argument("--timeout", type=int, default=gate.DEFAULT_TIMEOUT)
+    observe.add_argument("--next", dest="next_action", help="Also record the next action")
+    note = commands.add_parser("note", help="Record the next action now; runs nothing and charges no turn")
+    note.add_argument("slug")
+    note.add_argument("--next", required=True, dest="next_action")
     close = commands.add_parser("close", help="Complete when evidence allows, else report what is missing")
     close.add_argument("slug")
     close.add_argument("--if-ready", action="store_true", help="Never run the gate; complete or finalize only")
@@ -332,10 +336,12 @@ def dispatch(args) -> tuple[dict, int]:
                                    args.judge, args.digest)
         return status(state), 0 if args.result == "pass" else 1
     if args.action == "observe":
-        state = goal.observe(args.slug, args.role, timeout=args.timeout)
+        state = goal.observe(args.slug, args.role, timeout=args.timeout, next_action=args.next_action)
         report = status(state)
         report["observation"] = goal.latest_observation(state)
         return report, 0 if report["observation"]["gate"] == "pass" else 1
+    if args.action == "note":
+        return status(goal.note(args.slug, args.next_action)), 0
     if args.action == "close":
         result = goal.close(args.slug, run_gate=not args.if_ready, timeout=args.timeout)
         if not result["complete"]:

@@ -1147,7 +1147,7 @@ def test_row_is_short_and_carries_what_a_new_session_needs():
     row = goal.row(state)
     assert set(row) == {"slug", "status", "goal", "gate", "review_criterion", "gate_path",
                         "next_action", "abandoned_reason", "started", "completed_at",
-                        "turns_used", "last_gate", "last_review"}
+                        "turns_used", "last_gate", "last_observed", "last_review"}
     assert len(row["goal"]) == 200 and row["goal"].endswith("…")
     assert len(row["review_criterion"]) == 300 and len(row["next_action"]) == 300
     assert row["abandoned_reason"].startswith("open lines R2, R3")

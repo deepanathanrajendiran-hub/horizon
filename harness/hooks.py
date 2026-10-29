@@ -159,8 +159,14 @@ def _active_goals() -> list[dict]:
 
 def _goal_line(state: dict) -> str:
     row = goal.row(state)
-    return (f"Horizon goal {row['slug']} ({row['status']}, {row['turns_used']} turns used): "
+    line = (f"Horizon goal {row['slug']} ({row['status']}, {row['turns_used']} turns used): "
             f"{row['goal']} Next: {row['next_action'] or 'not set'}.")
+    observed = goal.latest_observation(state)
+    last = state["checkpoints"][-1] if state["checkpoints"] else None
+    if observed and (last is None or observed["at"] > (last.get("at") or "")):
+        tail = " ".join(observed["gate_output"].split())[-300:]
+        line += f" Last gate run: {observed['gate']} ({observed['role']}, {observed['at'][:16]}): {tail}"
+    return line
 
 
 def _session_start(session: str | None) -> dict | None:

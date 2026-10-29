@@ -539,7 +539,7 @@ def budget_exhausted(state: dict) -> bool:
     return False
 
 
-def observe(slug: str, role: str, timeout: int = gate.DEFAULT_TIMEOUT) -> dict:
+def observe(slug: str, role: str, timeout: int = gate.DEFAULT_TIMEOUT, next_action: str | None = None) -> dict:
     """Run the command gate now and record what it found, outside any increment.
 
     Charges no turn and never skips: an unchanged tree is exactly when a
@@ -572,10 +572,27 @@ def observe(slug: str, role: str, timeout: int = gate.DEFAULT_TIMEOUT) -> dict:
         state.setdefault("observations", []).append({
             "kind": "observation", "role": role, "at": _now(), "tree_hash": digest,
             "gate": result, "gate_output": _bounded(output), "gate_spec": dict(state["gate"]),
+            **({"next": next_action.strip()} if next_action and next_action.strip() else {}),
         })
         if manifest is not None:
             state.setdefault("test_manifest", manifest)
         return _persist_mutation_locked(state)
+
+def note(slug: str, next_action: str) -> dict:
+    """Record the next action now, with no turn and no gate run.
+
+    `check --next` comes at the end of an increment; a session cut off before
+    it (the NL2Repo benchmark's call cap) left the next session "Next: not set".
+    """
+    text = (next_action or "").strip()
+    if not text:
+        raise ValueError("A note needs a next action")
+    with filelock.goal_locked(_path(slug)):
+        state = load(slug)
+        if state["status"] != "active":
+            raise GoalClosed(f"cannot note: goal status is {state['status']!r}")
+        state.setdefault("notes", []).append({"at": _now(), "next": _bounded(text)})
+        return _save(state)
 
 def latest_observation(state: dict) -> dict | None:
     """The most recent recorded gate run, trimmed to what an agent needs to act on."""
@@ -990,8 +1007,11 @@ def _next_action(state: dict) -> str:
     block = state.get("execution")
     if block:
         return block["task"]["next_action"]
-    last = state["checkpoints"][-1] if state["checkpoints"] else None
-    return last.get("next", "") if last else ""
+    # The newest of the last checkpoint, note and observation that names one.
+    records = [state["checkpoints"][-1]] if state["checkpoints"] else []
+    records += [r for r in (state.get("notes") or [])[-1:] + (state.get("observations") or []) if r.get("next")]
+    latest = max(records, key=lambda r: r.get("at") or "", default=None)
+    return latest.get("next", "") if latest else ""
 
 
 def row(state: dict) -> dict:
@@ -1003,6 +1023,7 @@ def row(state: dict) -> dict:
     """
     last = state["checkpoints"][-1] if state["checkpoints"] else None
     reviews = state.get("reviews") or []
+    observed = latest_observation(state)
     return {
         "slug": state["slug"], "status": state["status"],
         "goal": _clip(state["goal"], 200),
@@ -1015,6 +1036,7 @@ def row(state: dict) -> dict:
         "completed_at": state.get("completed_at"),
         "turns_used": state["used"]["turns"],
         "last_gate": last["gate"] if last else None,
+        "last_observed": {k: observed[k] for k in ("gate", "role", "at")} if observed else None,
         "last_review": reviews[-1]["result"] if reviews else None,
     }
 
@@ -1039,6 +1061,7 @@ def summary(state: dict) -> dict:
         item = next(a for a in block["attempts"] if a["id"] == block["active_attempt"])
         active = {key: item[key] for key in ("id", "status", "worker", "packet")}
     end = deadline(state)
+    observed = latest_observation(state)
     return {
         "slug": state["slug"], "goal": state["goal"], "status": state["status"],
         "runtime": paths.runtime(), "gate": state["gate"], "gate_path": state.get("gate_path"),
@@ -1048,6 +1071,9 @@ def summary(state: dict) -> dict:
         "minutes_left": (round(max(0.0, (end - datetime.now(timezone.utc)).total_seconds() / 60), 1)
                          if end else None),
         "last_checkpoint": last, "reviews": state.get("reviews", [])[-1:],
+        # The newest gate run, checkpoint or not: a session cut off before `check` leaves only this.
+        "last_observation": (dict(observed, gate_output=observed["gate_output"][-600:])
+                             if observed else None),
         "gate_evidence": state.get("gate_evidence"),
         "execution_mode": execution_mode(state),
         "turn_unit": "worker_attempt" if block else "checkpoint",
