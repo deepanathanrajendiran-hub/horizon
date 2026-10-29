@@ -98,8 +98,6 @@ def _init_all(lines: list[str], package: str) -> set[str]:
     return found
 
 def refs(text: str, package: str) -> list[str]:
-    """Every `package.x[.Y]` the spec names, sorted. A name on a line at most two lines above a mention
-    of AttributeError is an example of a name that must not exist, so it is left out."""
     pkg = re.escape(package)
     text = _URL.sub(" ", text)
     # Prose in backticks, doctest prompts and comments hold imports too.
@@ -112,6 +110,13 @@ def refs(text: str, package: str) -> list[str]:
         kept |= _line_refs(line, package, pkg)
     kept |= _from_imports(lines, package, pkg)
     kept |= _init_all(lines, package)
+    # A private module's public names are reached through the package (NL2Repo structlog: the spec gave
+    # `from structlog._config import reset_defaults`, and callers used `structlog.reset_defaults`).
+    for ref in list(kept):
+        parts = ref.split(".")
+        if (len(parts) == 3 and parts[1].startswith("_") and not parts[1].startswith("__")
+                and not parts[2].startswith("_")):
+            kept.add(f"{package}.{parts[2]}")
     return sorted(kept)
 
 

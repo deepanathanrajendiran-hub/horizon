@@ -289,3 +289,15 @@ def test_start_refuses_a_surface_spec_without_a_gate_path_or_package(project):
     code, _ = cli("start", "Build pkg", "--gate", "true", "--gate-path", str(p / "g"), "--surface-spec",
                   str(p / "SPEC.md"))
     assert code != 0
+
+def test_surface_checks_that_a_private_modules_public_names_are_reexported_by_the_package():
+    # bench4 structlog: the spec gave `from structlog._config import reset_defaults, is_configured`; the build had
+    # them in _config but not at the top level, and all 731 official tests errored in setup. A copy with the
+    # two re-exports passed 451 of 828. Python packages reach a private module's public names through the package.
+    refs = surface.refs("from pkg._config import reset_defaults, _helper\nUse pkg._native.Make and pkg.dev.Thing.\n"
+                        "Also pkg.sub._inner.deep.\n", "pkg")
+    assert "pkg._config.reset_defaults" in refs and "pkg.reset_defaults" in refs
+    assert "pkg._native.Make" in refs and "pkg.Make" in refs
+    assert "pkg._config._helper" in refs and "pkg._helper" not in refs  # private names stay private
+    assert "pkg.Thing" not in refs  # a public module's names are not re-exported by this rule
+    assert "pkg.deep" not in refs and "pkg.inner" not in refs

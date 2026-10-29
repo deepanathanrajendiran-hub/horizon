@@ -564,7 +564,8 @@ it fails when a package directory on the path has no `__init__.py` (a namespace
 package), and a missing dependency is an error, not a missing name. URLs, file
 names and domains (`NAME.dev.py`, `NAME.readthedocs.io`), Python keywords, test
 modules and names within two lines above a mention of `AttributeError` are left
-out. The test finds the package (a directory or `NAME.py`) from the working
+out. A public name the spec gives in a private module (`NAME._mod.name`) is also
+checked as `NAME.name`: a package re-exports its private modules' public names. The test finds the package (a directory or `NAME.py`) from the working
 directory or the test file's own directories, and their `src/`. It reads only the
 spec, so it can be written before the code. A spec that gives no names for the
 package is an error (check `--package`: the import name, such as `jwt` for PyJWT).
