@@ -111,7 +111,9 @@ is a short label for this request that no directory there already uses.
    can and answers the rest `NOT REVIEWED`; the final report lists those lines
    first.
 3. Write the gate in `$GATES` as checks of the `[gate]` lines, each check naming its
-   line (a large build may start with a small gate; see below the `start` example). Exercise the entry points the request names, called the way existing
+   line (a large build may start with a small gate; see below the `start` example; for
+   a build from a spec, the first gate is the surface gate alone, as "Building from a
+   spec" says). Exercise the entry points the request names, called the way existing
    callers and tests call them. If your change will add an interface or change a
    consumer, also check the old interface's observable behaviour. When the request
    says existing behaviour must stay the same, capture the current outputs now and
@@ -144,34 +146,45 @@ python3 "$HARNESS" --runtime codex --project "$PROJECT" start "Requested outcome
 ### Building from a spec
 
 For a build from a spec, such as a library or an application described in a
-document, the first session goes: right after the first part of the spec, which holds its
-outline and module list, write request.md and requirements.md (one line per
-module or section is enough at first) and run `start` with `--surface-spec`,
-which writes the surface gate into `$GATES` before the baseline, all in one Bash
-call, so that a session cut off early still leaves a goal; then read the rest of the spec in large parts, and write the modules.
+document, the first session goes: right after the first part of the spec, which
+holds its outline and module list, set the goal up in one Bash call, so that a session
+cut off early still leaves a goal; then read the rest of the spec in large parts,
+and write the modules. Copy this block and fill in the placeholders; nothing else
+is needed for setup. `GATES_ROOT` is the `gates` path `doctor` printed, `pkg` is the package's import
+name, and `PY` is the Python that has pytest.
 
 ```bash
+GATES="$GATES_ROOT/pkg-build"; mkdir -p "$GATES"
+cat > "$GATES/request.md" <<'EOF'
+<the request, verbatim>
+EOF
+cat > "$GATES/requirements.md" <<'EOF'
+R1 [gate] "<the first module or section the spec lists, in its words>"
+R2 [review] "<the next one>"
+EOF
 python3 "$HARNESS" --runtime codex --project "$PROJECT" start "Build pkg as SPEC.md describes" \
   --gate-path "$GATES" --surface-spec "$PROJECT/SPEC.md" --package pkg \
-  --gate "python -m pytest -q $GATES" \
+  --gate "$PY -m pytest -q -p no:cacheprovider $GATES" \
   --review "Every line of $GATES/requirements.md holds, judged against $GATES/request.md"
 ```
 
-The surface gate has one test per public name the spec gives (`pkg.mod.Name`,
-`from pkg.mod import Name`), and fails when a package directory lacks its
-`__init__.py`, because a directory without one still imports, as a namespace
-package. Delete a name from it only when the spec says it must not exist, or when it is a
-file name, a URL or a local variable in an example. Run it
-as the gate (`python -m pytest -q "$GATES"`), with the spec's own examples as
-further checks when you have them. Write each module complete where the spec
-allows, in dependency order, and the package `__init__.py` re-exporting the names
-the spec lists. Keep the package importable after every write: define a name in
-the same edit that exports it, and never import a module that does not exist
-yet. When a probe, example or caller fails on a name or behaviour the spec gives,
-add it to the library; never rewrite the probe around it. Grow the gate with the
-code: add checks for the part you are about to write, and the spec's own examples
-for parts already built. A check you invent for code that is already built
-usually passes and buys nothing.
+`--surface-spec` writes `$GATES/test_surface.py` before the baseline: one test per
+public name the spec gives (`pkg.mod.Name`, `from pkg.mod import Name`), failing
+when a package directory lacks its `__init__.py`, because a directory without one
+still imports, as a namespace package. The surface gate is the whole first gate:
+write no other checks before the first modules exist. Delete a name from it only
+when the spec says it must not exist, or when it is a file name, a URL or a local
+variable in an example.
+
+Write each module complete where the spec allows, in dependency order, and the
+package `__init__.py` re-exporting the names the spec lists. Keep the package
+importable after every write: define a name in the same edit that exports it,
+and never import a module that does not exist yet. When a probe, example or
+caller fails on a name or behaviour the spec gives, add it to the library; never
+rewrite the probe around it. Grow the gate with the code: add checks with the
+code, from the spec's own examples, for the part you just wrote, and the spec's
+own examples for parts already built. A check you invent for code that is already
+built usually passes and buys nothing.
 
 Use `--coverage` with the same criterion instead of `--gate` when no command can
 check any line. When you write the gate yourself (`--gate-path`), always pass

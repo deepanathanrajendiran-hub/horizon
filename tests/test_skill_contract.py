@@ -272,3 +272,19 @@ def test_horizon_skills_build_a_spec_as_fast_as_plain(folder):
         assert "`GATES_ROOT`" in text
     else:
         assert "up to about 250 lines per command" in text
+
+@pytest.mark.parametrize("folder", [".claude", ".agents"])
+def test_a_spec_build_sets_up_in_one_copied_call_with_only_the_surface_gate(folder):
+    # bench4 pilot 2: unidecode wrote its own spec-example gate (8 calls) before any code, first edit at call 20;
+    # pyjwt searched references/commands.md for how to use --surface-spec, first edit at call 15.
+    raw = _horizon_skill(folder)
+    text = " ".join(raw.split())
+    for phrase in ("The surface gate is the whole first gate",
+                   "write no other checks before the first modules exist",
+                   "add checks with the code, from the spec's own examples",
+                   "Copy this block and fill in the placeholders; nothing else is needed for setup"):
+        assert phrase in text, phrase
+    block = raw.split("Copy this block and fill in the placeholders", 1)[1].split("```bash\n", 1)[1].split("```", 1)[0]
+    for part in ('mkdir -p "$GATES"', 'cat > "$GATES/request.md"', 'cat > "$GATES/requirements.md"',
+                 "--surface-spec", "--package", "--gate-path", "--review"):
+        assert part in block, part
