@@ -21,11 +21,14 @@ import paths
 import steps
 import sys
 import tree_hash
+import re
 
 MARK = "horizon-hook"
 _EVENTS = {"SessionStart": None, "PostToolUse": "*", "Stop": None}
 # SessionStart runs each active goal's gate on changed files (SESSION_GATE_S at most), so it needs longer.
 _TIMEOUTS = {"SessionStart": 300}
+
+_CODE = (".py", ".pyi", ".js", ".ts", ".go", ".rs", ".java", ".rb", ".c", ".h", ".cpp", ".toml", ".cfg")
 SESSION_GATE_S = 240  # all goals together; HORIZON_SESSION_GATE_S overrides (tests)
 
 
@@ -169,6 +172,52 @@ def _active_goals() -> list[dict]:
     return out
 
 
+_FAILED = re.compile(r"^(?:FAILED|ERROR)\s+(\S+)", re.M)
+_SUMMARY = re.compile(r"^=*\s*(\d+ (?:failed|passed|errors?)\b[^\n=]*?)\s*=*\s*$", re.M)
+
+
+def _gate_digest(output: str) -> str:
+    """The failing checks by name when the output lists them, else the output's tail."""
+    output = output or ""
+    ids = []
+    for found in _FAILED.findall(output):
+        name = found.split("::")[-1] if "::" in found else found
+        if name not in ids:
+            ids.append(name)
+    if ids:
+        summary = _SUMMARY.findall(output)
+        more = f" and {len(ids) - 12} more" if len(ids) > 12 else ""
+        return f". Failing: {', '.join(ids[:12])}{more}" + (f" ({summary[-1]})." if summary else ".")
+    tail = " ".join(output.split())[-300:]
+    return f": {tail}" if tail else "."
+
+
+def _files_line(root: Path, limit: int = 40) -> str:
+    """The project's files with their line counts, so a session need not list them."""
+    try:
+        out = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+                             capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if out.returncode:
+        return ""
+    names = sorted({n for n in out.stdout.decode(errors="replace").split("\0")
+                    if n and not n.startswith((".claude/", ".agents/")) and "__pycache__" not in n})
+    extra = ""
+    if len(names) > limit:
+        code = [n for n in names if n.endswith(_CODE)]
+        extra = f" (and {len(names) - limit} more)"
+        names = (code + [n for n in names if n not in code])[:limit]
+    newline = b"\n"
+    shown = []
+    for name in names:
+        try:
+            count = (root / name).read_bytes().count(newline)
+        except OSError:
+            continue
+        shown.append(f"{name} {count}")
+    return ("Files (lines): " + ", ".join(shown) + extra + ".") if shown else ""
+
 def _goal_line(state: dict, fresh: bool = False) -> str:
     row = goal.row(state)
     info = goal.summary(state)
@@ -179,12 +228,20 @@ def _goal_line(state: dict, fresh: bool = False) -> str:
         budget += ", budget exhausted"
     line = (f"Horizon goal {row['slug']} ({row['status']}; {budget}; gate dir {row['gate_path'] or 'none'}): "
             f"{row['goal']} Next: {row['next_action'] or 'not set'}.")
+    if state["gate"]["kind"] == "command":
+        line += f" Gate command: {state['gate']['value']}."
     observed = goal.latest_observation(state)
     last = state["checkpoints"][-1] if state["checkpoints"] else None
+    # The newest gate result, whether the hook's own run, an `observe` or a `check`.
+    record = None
     if observed and (fresh or last is None or observed["at"] > (last.get("at") or "")):
-        tail = " ".join(observed["gate_output"].split())[-300:]
+        record = (observed["gate"], observed["role"], observed["at"], observed["gate_output"])
+    elif last and last.get("gate") is not None:
+        record = (last["gate"], "check", last.get("at") or "", last.get("gate_output") or "")
+    if record:
+        result, role, at, output = record
         label = "Gate now" if fresh else "Last gate run"
-        line += f" {label}: {observed['gate']} ({observed['role']}, {observed['at'][:16]}): {tail}"
+        line += f" {label}: {result} ({role}, {at[:16]}){_gate_digest(output)}"
     return line
 
 
@@ -309,6 +366,9 @@ def _session_start(session: str | None, source: str | None = None) -> dict | Non
     changed = _last_commit_files()
     if changed:
         lines.append("The last commit changed: " + ", ".join(changed) + ".")
+    files = _files_line(paths.project_root())
+    if files:
+        lines.append(files)
     return {"hookSpecificOutput": {"hookEventName": "SessionStart",
                                    "additionalContext": "\n".join(lines)}}
 

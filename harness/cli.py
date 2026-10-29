@@ -19,6 +19,7 @@ import reviewing
 import evidence
 import hooks
 from datetime import datetime
+import surface
 
 
 def parser() -> argparse.ArgumentParser:
@@ -41,6 +42,10 @@ def parser() -> argparse.ArgumentParser:
     start.add_argument("--execution", choices=("conversation", "state"), default="conversation")
     start.add_argument("--gate-path", help="Directory holding request.md, requirements.md and the gate; watched automatically")
     start.add_argument("--timeout", type=int, default=gate.DEFAULT_TIMEOUT, help="Seconds for the baseline gate run")
+    surface_cmd = commands.add_parser("surface", help="Write a pytest gate of the public names a spec gives for a Python package")
+    surface_cmd.add_argument("--spec", type=Path, required=True)
+    surface_cmd.add_argument("--package", required=True, help="Top-level import name, such as jwt")
+    surface_cmd.add_argument("--out", type=Path, required=True, help="Test file to write, usually $GATES/test_surface.py")
     check = commands.add_parser("check", help="Run verification and checkpoint one completed increment")
     check.add_argument("slug")
     check.add_argument("--did", required=True)
@@ -307,6 +312,10 @@ def _auto_install_hooks(entrypoint: str) -> dict:
 
 
 def dispatch(args) -> tuple[dict, int]:
+    if args.action == "surface":
+        names = surface.write_gate(args.spec, args.package, args.out)
+        return {"names": names, "out": str(args.out),
+                "next": "Run it with your gate; a failure means the library lacks that name"}, 0
     if args.action == "doctor":
         return {
             "runtime": paths.runtime(),

@@ -95,9 +95,11 @@ def test_session_start_names_the_next_action_and_the_last_gate_run(tmp_path):
 def test_the_session_start_line_leaves_out_a_gate_run_older_than_the_last_checkpoint():
     slug = _make()["slug"]
     goal.observe(slug, "resume")
-    state = goal.checkpoint(slug, "did", "next", "h", "pass")
-    assert "Last gate run" not in hooks._goal_line(state)
-    assert "Last gate run: pass" in hooks._goal_line(goal.observe(slug, "resume"))
+    state = goal.checkpoint(slug, "did", "next", "h", "pass", "checkpoint output")
+    line = hooks._goal_line(state)
+    # The checkpoint is newer than the observation, so the line shows the checkpoint's result (bench3 pyjwt s7).
+    assert "Last gate run: pass (check," in line and "checkpoint output" in line
+    assert "Last gate run: pass (resume," in hooks._goal_line(goal.observe(slug, "resume"))
 
 
 def test_note_refuses_a_state_mode_goal(make_state_goal):
