@@ -454,15 +454,18 @@ def batch_size(counts: list[int]) -> int | None:
 
 
 def review_scope(requirements: dict, carried, batch: int | None) -> list[str] | None:
-    """The open requirement lines this round reviews, in order, or None for all.
-    Lines left out are never only [unverifiable] ones: a pass would skip them untried."""
+    """The open requirement lines this round reviews, in requirement order, or None for all.
+    Lines only a reviewer can check are chosen before [gate] lines: a reviewer cut off by a short
+    session should have spent its calls on them (NL2Repo bench2 unidecode). Lines left out are
+    never only [unverifiable] ones: a pass would skip them untried."""
     open_ids = [rid for rid in requirements if rid not in carried]
+    ranked = sorted(open_ids, key=lambda rid: set(requirements[rid] or ()) <= {"gate"})
     if batch is None or batch >= len(open_ids):
         return None
-    scope, rest = open_ids[:batch], open_ids[batch:]
+    chosen, rest = ranked[:batch], ranked[batch:]
     if all("unverifiable" in requirements[rid] for rid in rest):
         return None
-    return scope
+    return [rid for rid in open_ids if rid in chosen]
 
 
 def brief(*, digest: str, request: str, requirements: str, verdicts: str, harness_dir: str,

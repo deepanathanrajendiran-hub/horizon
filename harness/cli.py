@@ -40,6 +40,7 @@ def parser() -> argparse.ArgumentParser:
     start.add_argument("--watch", action="append", help="Artifact path relative to the project; repeatable")
     start.add_argument("--execution", choices=("conversation", "state"), default="conversation")
     start.add_argument("--gate-path", help="Directory holding request.md, requirements.md and the gate; watched automatically")
+    start.add_argument("--timeout", type=int, default=gate.DEFAULT_TIMEOUT, help="Seconds for the baseline gate run")
     check = commands.add_parser("check", help="Run verification and checkpoint one completed increment")
     check.add_argument("slug")
     check.add_argument("--did", required=True)
@@ -333,8 +334,9 @@ def dispatch(args) -> tuple[dict, int]:
         # Hooks first: writing .claude/settings.json after the baseline would
         # leave the baseline describing files that no longer exist.
         installed = _auto_install_hooks(args.entrypoint) if paths.runtime() == "claude" else {}
+        goal.ensure_notes(state["slug"])
         if state["gate"]["kind"] == "command":
-            state = goal.observe(state["slug"], "baseline")
+            state = goal.observe(state["slug"], "baseline", timeout=args.timeout)
         report = status(state)
         report["observation"] = goal.latest_observation(state)
         report["other_goals"] = goal_rows(exclude=state["slug"])

@@ -1055,6 +1055,45 @@ def deadline(state: dict) -> datetime | None:
     return datetime.fromisoformat(state["used"]["started"]) + timedelta(minutes=max_minutes)
 
 
+def notes_path(slug: str):
+    """The goal's notes file: what the agent learned from large inputs, part by part. Bookkeeping, so
+    writing it never changes the checkpoint (tree_hash.BOOKKEEPING)."""
+    return paths.harness_root() / "notes" / f"{slug}.md"
+
+
+NOTES_HEADER = (
+    "# Notes for {slug}\n\n"
+    "What you learned from large inputs, part by part, so later sessions read this instead of the input.\n"
+    "Give each part a level-2 heading: the input and its line range, what it covers, the file it maps to,\n"
+    "and done or todo. Under it, keep the names, signatures, rules and examples you need.\n"
+)
+
+
+def ensure_notes(slug: str):
+    path = notes_path(slug)
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(NOTES_HEADER.format(slug=slug))
+    return path
+
+
+def notes_sections(slug: str, limit: int = 600) -> list[str]:
+    """The notes file's level-2 headings, up to `limit` characters in all."""
+    try:
+        lines = notes_path(slug).read_text().splitlines()
+    except (OSError, UnicodeError):
+        return []
+    out, used = [], 0
+    for line in lines:
+        if line.startswith("## "):
+            heading = line[3:].strip()
+            used += len(heading)
+            if used > limit:
+                out.append("…")
+                break
+            out.append(heading)
+    return out
+
 def summary(state: dict) -> dict:
     last = state["checkpoints"][-1] if state["checkpoints"] else None
     block = state.get("execution")
@@ -1072,11 +1111,17 @@ def summary(state: dict) -> dict:
         "deadline": end.isoformat() if end else None,
         "minutes_left": (round(max(0.0, (end - datetime.now(timezone.utc)).total_seconds() / 60), 1)
                          if end else None),
-        "last_checkpoint": last, "reviews": state.get("reviews", [])[-1:],
+        # Clipped: a full status (16,000 characters of review evidence, 4,000 of gate output) spilled to a
+        # file in the NL2Repo benchmark, and reading it back cost calls.
+        "last_checkpoint": dict(last, gate_output=(last.get("gate_output") or "")[-600:]) if last else None,
+        "reviews": [{k: v for k, v in r.items() if k not in ("evidence", "criterion")}
+                    for r in state.get("reviews", [])[-1:]],
         # The newest gate run, checkpoint or not: a session cut off before `check` leaves only this.
         "last_observation": (dict(observed, gate_output=observed["gate_output"][-600:])
                              if observed else None),
-        "gate_evidence": state.get("gate_evidence"),
+        "gate_evidence": (state.get("gate_evidence") or "")[-600:] or None,
+        "notes_file": str(notes_path(state["slug"])),
+        "notes_sections": notes_sections(state["slug"]),
         "execution_mode": execution_mode(state),
         "turn_unit": "worker_attempt" if block else "checkpoint",
         "execution_revision": block["revision"] if block else None,

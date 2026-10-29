@@ -1,13 +1,13 @@
 """Deterministic change detection for horizon gates (spec §5.2.1).
 
-Combines three inputs:
-  1. git HEAD          — catches commits
-  2. git porcelain     — catches tracked edits and untracked files
-  3. mtime+size walk   — catches everything git cannot see
+Hashes the content and mode of every file git can see (tracked or
+untracked, not ignored) and of every watched file (a walk that also sees
+writes inside .gitignore'd directories, which git does not list).
 
-Input 3 is not redundant. `git status --porcelain=v1` does not report
-writes inside .gitignore'd directories, so a goal whose only output lands
-in out/ or dist/ would otherwise have its gate wrongly skipped.
+Git state is deliberately left out: a commit that changes no file is not
+task work. With HEAD and `git status` in the hash, the auto-commit after a
+session made every checkpoint stale, and gate passes and carried review
+lines were lost (NL2Repo bench2, unidecode s8 -> s9).
 
 Skip asymmetry: a false skip is a correctness bug, a false run costs
 seconds. Every failure path in this module reports "changed".
@@ -26,7 +26,7 @@ EXCLUDED_DIRS = {
 
 # Harness records under <runtime>/harness that change without any task work: goal
 # state, undo data, the changelog, and what the hooks write at every session start.
-BOOKKEEPING = ("goals", "undo", "CHANGELOG.md", "session", "hooks-optout")
+BOOKKEEPING = ("goals", "undo", "CHANGELOG.md", "session", "hooks-optout", "notes")
 
 
 def _git(cwd, *args) -> str | None:
@@ -93,19 +93,29 @@ def _walk_entries(root: Path) -> list[str]:
 
 
 def compute(cwd, watch_paths: list[str] | None = None) -> str:
-    """Hash task content and Git state; writing a checkpoint is not task work."""
+    """Hash task content; writing a checkpoint or committing is not task work."""
     cwd = Path(cwd).resolve()
     h = hashlib.sha256()
-    h.update(b'HEAD\x00' + (_git(cwd, 'rev-parse', 'HEAD') or 'NONE').encode() + b'\x00')
+    # Every file git can see (tracked or untracked, not ignored), by content, so an edit outside narrow
+    # watch paths still counts. The set and the contents are the same before and after a commit.
     exclusions = [f':(glob,exclude)**/{runtime}/harness/{part}{suffix}'
                   for runtime in ('.claude', '.codex')
                   for part in BOOKKEEPING
                   for suffix in ('', '/**')]
-    # The walk skips cache directories; git must too, or the caches a gate or
-    # a reviewer's own checks write make the checkpoint stale.
     exclusions += [f':(glob,exclude)**/{name}/**' for name in sorted(EXCLUDED_DIRS - {'.git'})]
-    status = _git(cwd, 'status', '--porcelain=v1', '--untracked-files=all', '--', *exclusions)
-    h.update(b'STATUS\x00' + (status or 'NONE').encode() + b'\x00')
+    listed = _git(cwd, 'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', *exclusions)
+    if listed is None:
+        h.update(b'GIT\x00NONE\x00')
+    else:
+        for rel in sorted(set(filter(None, listed.split('\0')))):
+            path = cwd / rel
+            if _bookkeeping(path):
+                continue
+            try:
+                entry = _file_entry(path) if not path.is_symlink() else f'{path}\x00LINK\x00{os.readlink(path)}'
+            except FileNotFoundError:
+                entry = f'{path}\x00MISSING'
+            h.update(b'GIT\x00' + entry.encode() + b'\x00')
     for wp in sorted(str(p) for p in (watch_paths or [cwd])):
         root = Path(wp)
         if not root.is_absolute():
