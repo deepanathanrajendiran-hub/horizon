@@ -21,8 +21,8 @@ when operating from an otherwise unmarked nested directory.
 
 | Command | Purpose |
 | --- | --- |
-| `status [SLUG]` | List short goal rows, or inspect one goal in full (budget, deadline, latest checkpoint) |
-| `start OBJECTIVE --gate COMMAND [--review CRITERION] [--gate-path DIR]` | Command verification with optional independent review |
+| `status [SLUG]` | List short goal rows, or inspect one goal (budget, deadline, latest checkpoint, notes file) |
+| `start OBJECTIVE --gate COMMAND [--review CRITERION] [--gate-path DIR] [--timeout N]` | Command verification with optional independent review |
 | `start OBJECTIVE --coverage CRITERION [--gate-path DIR]` | Independent artifact review without a command |
 | `check SLUG --did TEXT --next TEXT` | Run one check and checkpoint completed work; prints `review_brief` and `review_file` when a review is due |
 | `review SLUG --result pass\|fail --judge HANDLE --hash HASH --evidence-file PATH` | Record the actual review of the checkpoint's snapshot |
@@ -69,7 +69,15 @@ run, so a session that ends before `check` still hands it on. A goal's
 `next_action` is the newest of the last checkpoint's, note's and observation's.
 `status SLUG` also reports `last_observation` (the newest gate run, with the last
 600 characters of its output), and the Claude Code session-start message adds
-`Last gate run:` when that run is newer than the last checkpoint.
+`Last gate run:` when that run is newer than the last checkpoint. `status SLUG`
+stays small: the latest review is listed without its evidence, and gate outputs
+are clipped to their last 600 characters.
+
+`start` creates the goal's notes file, `<state>/notes/SLUG.md`, for what the agent
+learns from large inputs, part by part. `start` and `status SLUG` report it as
+`notes_file`, and `status SLUG` lists its `## ` headings as `notes_sections`. The
+notes file is bookkeeping: writing it never changes the checkpoint. `start
+--timeout N` sets the baseline gate run's timeout.
 
 `close SLUG [--if-ready] [--timeout N]` completes the goal when a passing gate
 result (a checkpoint or an observation, from this session or an earlier one) covers
@@ -128,8 +136,13 @@ Horizon's `SessionStart`, `PostToolUse` and `Stop` hooks to the project's
 those and writes the opt-out marker `hooks-optout` in the state directory, so a
 later `start` does not reinstall them. `hook EVENT` reads
 the event JSON on stdin and always exits 0, so a hook never blocks a session.
-- `SessionStart` records the session id, reports each active goal in one line and
-  reclaims a stale attempt automatically.
+- `SessionStart` records the session id and reclaims a stale attempt
+  automatically. For each active conversation-mode goal with a command gate, it
+  runs the gate as a `resume` observation unless one already covers the current
+  files (at most 240 seconds; the hook's timeout is 300). It then reports the
+  `HARNESS` and `PROJECT` values to use, each goal's next action and gate result
+  (`Gate now:` when it just ran the gate), the notes file and its parts, and the
+  files the last commit changed.
 - `PostToolUse` renews the lease of the session's open attempt.
 - `Stop` completes or finalizes goals whose recorded evidence already allows it
   (the `close --if-ready` rules, so never on files unchanged since the
@@ -219,8 +232,10 @@ batch of the open lines, listed in `review_scope` (`null` means all of them):
 twice as many as the last round decided, or 4, 2 and then 1 after one, two or
 three rounds in a row that decided none. The other open lines read
 `NOT REVIEWED`, and the brief ends with a note naming the batch. Lines left out
-of a batch are never only `[unverifiable]` ones. A line counts as carried once
-some round passed it and no round failed it.
+of a batch are never only `[unverifiable]` ones. A batch takes lines tagged
+`[review]`, `[judgment]` or `[unverifiable]` before `[gate]` lines, and lists them
+in requirement order. A line counts as carried once some round passed it and no
+round failed it.
 
 Two cases get no brief. If any earlier round of these same files, written since
 the goal started, has a FAIL line, `check` and `close` report `review_failed_lines`
@@ -486,9 +501,12 @@ sandbox.
 
 Repeat `--watch PATH` on `start` to select the complete set of relevant inputs.
 Paths are relative to the discovered project; the default is the whole project.
-The fingerprint includes file content, file mode, and Git state. It excludes
-common dependency/cache directories and mutable `.claude/harness` and
-`.codex/harness` goals, undo records, and changelogs. Harness source remains an
+The fingerprint covers the content and mode of every watched file and of every
+file Git can see (tracked or untracked, not ignored), even outside the watch
+paths. It leaves out Git's own state, so a commit that changes no file keeps the
+checkpoint. It excludes common dependency/cache directories and mutable
+`.claude/harness` and `.codex/harness` goals, notes, undo records, and
+changelogs. Harness source remains an
 input. Directory symlinks are not traversed; watch their resolved targets
 explicitly when they are relevant. Use the directory the session started in as the
 project. If a deliverable lies outside the project, watch the project and that

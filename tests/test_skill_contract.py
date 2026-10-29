@@ -208,13 +208,24 @@ def test_horizon_skills_carry_the_close_protocol(folder):
 
 @pytest.mark.parametrize("folder", [".claude", ".agents"])
 def test_horizon_skills_build_first_and_hand_off_early(folder):
-    # NL2Repo benchmark: sessions cut off before `check` handed on nothing, review rounds replaced building,
-    # and a gate that imported everything at the top failed as one block.
+    # NL2Repo bench1 and bench2: sessions cut off before `check` handed on nothing, review rounds replaced
+    # building, re-orienting and re-reading the spec took most of each session, and a package that did not
+    # import scored 0 (fun repo: docs/evaluations/nl2repo-bench2/transcript-findings.md).
     text = " ".join(_horizon_skill(folder).split())
-    for phrase in ("## Resuming", "`status SLUG` once", "record it with `note`", "`observe` takes `--next`",
-                   "there is no `timeout` command", "keep the first gate small",
-                   "Import the code under test inside each test", "Build first, review last",
-                   "`review_failed_lines`", "`review_paused`", "`review_failed_files` with `review --result fail`",
+    for phrase in ("## Resuming", "never spend a session only reading", "Keep the next action current with `note`",
+                   "never a reading plan, and no session numbers", "`observe` takes `--next`",
+                   "## Large inputs", "Never `cat` a file over 50 KB", "Read the notes before the input",
+                   "## Shell", "There is no `timeout` command", "`--timeout` on `start`",
+                   "go breadth first", "read the spec's outline and module list, not all of it",
+                   "every module the spec lists, each as an importable stub",
+                   "a directory without one still imports, as a namespace package",
+                   "define a name in the same edit that exports it",
+                   "A passing gate means your checks pass, not that the request is met",
+                   "fix the library, not the caller", "Dispatch a reviewer at the start of a session",
+                   "Build first, review last", "`review_failed_lines`", "`review_paused`",
+                   "`review_failed_files` with `review --result fail`",
                    "listing the lines no reviewer passed as unverified",
                    "If it prints a `review_brief` and every part of the request is built"):
         assert phrase in text, phrase
+    if folder == ".claude":
+        assert "do not run `doctor` or `status`" in text

@@ -24,20 +24,38 @@ active attempt as described under Optional state mode before reclaiming it.
 
 ## Resuming
 
-When a goal for this same request is already active (the session-start message
-or `status` names it), resume fast. Run `status SLUG` once and continue from its
-`next_action` and `last_observation`. Skip "Earlier goals" and "Before `start`",
-and do not re-read request.md, requirements.md, the gate or large inputs unless
-the next action needs them: make your first edit within a few tool calls.
+When a goal for this same request is already active, resume from what `status SLUG` shows: run it once, and read its `next_action`,
+`last_observation` and `notes_file`.
+Skip "Earlier goals" and "Before `start`". Do not re-read request.md,
+requirements.md, the gate or a large input unless the next action needs part of
+it, and then read only that part. Make your first edit within your first few
+tool calls; never spend a session only reading.
 
-A session can end without warning, before `check`. As soon as you pick the next
-target, record it with `note`, and again before any long read or run, so the next
-session starts from it. `observe` takes `--next` too. Use the CLI's `--timeout`
-for slow commands; there is no `timeout` command on macOS.
+A session can end without warning, before `check`. Keep the next action current
+with `note`: one concrete edit, naming the file and the input lines it needs,
+never a reading plan, and no session numbers. Update it after each write.
+`observe` takes `--next` too.
 
 ```bash
-python3 "$HARNESS" --runtime codex --project "$PROJECT" note "$SLUG" --next "Write windowed() in more.py; gate R12 fails"
+python3 "$HARNESS" --runtime codex --project "$PROJECT" note "$SLUG" --next "Write pkg/testing.py from SPEC.md lines 1599-1741"
 ```
+
+## Large inputs
+
+Never `cat` a file over 50 KB: the output is cut to a short preview. Read a large
+input by section, once. After reading a part, add it to the goal's notes file
+(`notes_file` in `start` and `status SLUG`): a `## ` heading naming the input,
+its line range, what it covers, the file it maps to and `done` or `todo`, and
+under it the names, signatures, rules and examples you need. Read the notes
+before the input.
+
+## Shell
+
+The shell may be zsh on macOS. There is no `timeout` command: use the CLI's
+`--timeout` on `start`, `check`, `observe` and `close`. `sed -i` needs `''`.
+Quote a line of `=` signs, and do not keep a command in a variable. Never take a
+test run's exit status through a pipe. Run Python from the project root, and add
+`__pycache__/` to `.gitignore`.
 
 ## Earlier goals
 
@@ -108,12 +126,20 @@ python3 "$HARNESS" --runtime codex --project "$PROJECT" start "Requested outcome
   --max-turns 20 --max-minutes 60
 ```
 
-For a large build, such as a library or an application from a spec, keep the
-first gate small so code starts in the same session: check that the package
-imports and that the entry points the request names exist, then grow the gate by
-a few checks with each increment. Import the code under test inside each test,
-not at the top of the gate file, so a missing module fails its own checks and
-not the whole run.
+For a build from a spec, such as a library or an application described in a
+document, go breadth first. Before `start`, read the spec's outline and module
+list, not all of it; requirements.md may give one line per module or section,
+and the rest of the spec is read part by part as you build. The first increment
+creates every module the spec
+lists, each as an importable stub, the package `__init__.py` that re-exports the
+names the spec lists, and the packaging files, so the package imports from the
+first session. The first gate has one test per module: it imports the module by
+its exact path and checks the public names the spec lists for it, with the
+imports inside the test. It also checks that each package directory has its
+`__init__.py`, because a directory without one still imports, as a namespace
+package. Grow the gate by a few checks with each increment. Keep the package
+importable after every write: define a name in the same edit that exports it,
+and never import a module that does not exist yet.
 
 5. Before your first edit, read the baseline `observation` that `start` printed;
    do not run `check` for the baseline. Checks of new requirement lines must fail
@@ -252,7 +278,17 @@ evidence file), then fix the lines, or add a gate check that shows a line holds,
 and run `check`; do not dispatch a reviewer. If it prints `review_paused`, these
 files have had four review rounds: go back to building, as it says. If every
 part of the request is already built and checked, stop and give the final
-report, listing the lines no reviewer passed as unverified.
+report, listing the lines no reviewer passed as unverified. Dispatch a reviewer
+at the start of a session, with most of the session left, not near its end.
+
+A passing gate means your checks pass, not that the request is met. While budget
+remains, extend the gate to the next part of the request it does not check yet:
+every item the spec enumerates (each file in its tree, each public name, each
+listed table or range as a whole, not only the examples shown) and the
+behaviour of each listed method, including closing, releasing and deleting
+objects. Work on the library's behaviour before docs, examples or images. When
+an example or a caller fails against the library, fix the library, not the
+caller.
 
 When `close` (or `check`) reports that a review is required, it prints
 `review_brief` and `review_file`, unless it prints `review_failed_lines` or
