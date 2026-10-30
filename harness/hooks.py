@@ -409,12 +409,31 @@ def _post_tool_use(session: str | None) -> None:
             continue
 
 
-def _stop() -> None:
+def _stop(again: bool = False) -> dict | None:
     for state in _active_goals():
         try:
             goal.close(state["slug"], run_gate=False)
         except Exception:
             continue
+    if again:
+        # The second stop in a row always goes through, so a person can still be answered.
+        return None
+    # NL2Repo bench6: Haiku ended capped sessions itself to hand off, and an unattended run reads that as done.
+    open_goals = []
+    for state in _active_goals():
+        try:
+            if goal.execution_mode(state) == "conversation" and not goal.budget_exhausted(state):
+                open_goals.append(f"{state['slug']} (next: {goal.row(state)['next_action'] or 'not set'})")
+        except Exception:
+            continue
+    if not open_goals:
+        return None
+    return {"decision": "block",
+            "reason": ("Horizon goal still active with budget left: " + "; ".join(open_goals) + ". A session's "
+                       "length is not the goal's deadline, and your work is committed whenever the session is "
+                       "cut off, so keep building: do the next action now and keep `note --next` current. "
+                       "Stop only if the goal is done (run `close`), or someone is here and you need them; "
+                       "then stop again.")}
 
 
 def run(event: str, payload: dict) -> dict | None:
@@ -427,5 +446,5 @@ def run(event: str, payload: dict) -> dict | None:
     if event == "PostToolUse":
         _post_tool_use(session)
     elif event == "Stop":
-        _stop()
+        return _stop(isinstance(payload, dict) and payload.get("stop_hook_active") is True)
     return None

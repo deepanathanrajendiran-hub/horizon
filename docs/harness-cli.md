@@ -161,7 +161,10 @@ the event JSON on stdin and always exits 0, so a hook never blocks a session.
 - `PostToolUse` renews the lease of the session's open attempt.
 - `Stop` completes or finalizes goals whose recorded evidence already allows it
   (the `close --if-ready` rules, so never on files unchanged since the
-  baseline); it never runs the gate.
+  baseline); it never runs the gate. If a conversation-mode goal is then still
+  active with budget left, it blocks the stop once and names each such goal's
+  next action: a session's length is not the goal's deadline. The next stop in a
+  row (`stop_hook_active`) always goes through, so a person can still be answered.
 
 Claude Code loads hooks when a session starts, so hooks installed by `start` take
 effect from the next session.

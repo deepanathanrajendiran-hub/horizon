@@ -254,8 +254,14 @@ the worker. State mode itself creates no native goal, task, schedule, or API cli
 1. Read `status SLUG` before work. Continue only when status is active and
    `budget_exhausted` is false. Inspect the recorded next action. Start an
    increment or a review only if it, `check`, the review and the final report can
-   all finish before the `deadline` that `status` prints. Near the deadline, leave
-   the work buildable, run `check`, and give the final report.
+   all finish before the `deadline` that `status` prints. Only when that deadline
+   is minutes away, leave the work buildable, run `check`, and give the final
+   report. A session's length is not the goal's deadline: when a session is
+   limited, keep building until the session is cut off, because your commits and
+   `note` carry over. Never end a session to hand off while the goal is active
+   and budget remains. When no one is there to answer, do not stop to ask a scope
+   question: record your ruling and why in the notes file and in `note --next`,
+   and build on it.
 2. Do one useful increment. Never weaken the gate, a reviewer's test, or the
    requirement list to fit your output: do not delete a failing case, widen a
    tolerance, add an exception, or change an expected value to match the code.
