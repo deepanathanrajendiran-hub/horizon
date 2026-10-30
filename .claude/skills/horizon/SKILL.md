@@ -39,7 +39,14 @@ tool calls; never spend a session only reading.
 A session can end without warning, before `check`. Keep the next action current
 with `note`: one concrete edit, naming the file and the input lines it needs,
 never a reading plan, and no session numbers. Update it after each write.
-`observe` takes `--next` too.
+`observe` takes `--next` too. When you find a bug you will not fix in the
+same call, record it at once with `note SLUG --finding "..."`: findings are
+shown at every session start until `note SLUG --clear-findings`. Record an
+environment problem that is not a code bug (a broken system library, a
+sandbox limit) once with `--fact`, and do not diagnose it again. When the
+session-start message says the next action may already be done, check that
+file once and go on to the next unbuilt part; it also lists the files changed
+since the next action was recorded and the placeholders still to build.
 
 ```bash
 python3 "$HARNESS" --runtime claude --project "$PROJECT" note "$SLUG" --next "Write pkg/testing.py from SPEC.md lines 1599-1741"
@@ -61,7 +68,9 @@ call as an edit or a `check`, never in a call of their own.
 
 The shell may be zsh on macOS. There is no `timeout` command: use the CLI's
 `--timeout` on `start`, `check`, `observe` and `close`. `sed -i` needs `''`.
-Quote a line of `=` signs, and do not keep a command in a variable. Never take a
+Quote a line of `=` signs, and do not keep a command in a variable. Shell
+variables set in one command are gone in the next: paste literal paths (the
+session-start message gives the full Horizon command), never `$HARNESS`. Never take a
 test run's exit status through a pipe. Run Python from the project root, and add
 `__pycache__/` to `.gitignore`.
 
@@ -182,15 +191,28 @@ write no other checks before the first modules exist. Delete a name from it only
 when the spec says it must not exist, or when it is a file name, a URL or a local
 variable in an example.
 
-Write each module complete where the spec allows, in dependency order, and the
-package `__init__.py` re-exporting the names the spec lists. Keep the package
-importable after every write: define a name in the same edit that exports it,
-and never import a module that does not exist yet. When a probe, example or
-caller fails on a name or behaviour the spec gives, add it to the library; never
-rewrite the probe around it. Grow the gate with the code: add checks with the
-code, from the spec's own examples, for the part you just wrote, and the spec's
-own examples for parts already built. A check you invent for code that is already
-built usually passes and buys nothing.
+Breadth first. In the first session, make the whole package exist: every
+module the spec's directory tree lists, each with its classes and functions
+(complete where the spec allows, the simplest real code otherwise), the package
+`__init__.py` re-exporting the names the spec lists, the spec's main entry
+point (what its first usage example calls) and the packaging files the tree
+lists, with every file they name, such as the README. A test suite loses every
+test in a file whose imports fail, so a missing module costs more than a thin
+one. Keep the package importable after every write: define a name in the same
+edit that exports it, and never import a module that does not exist yet. Then
+deepen the least-built part first: the next action is the largest part of the
+spec still unbuilt or a placeholder, not the next section in spec order, and no
+module gets more than about a session while others are placeholders. When a
+probe, example or caller fails on a name or behaviour the spec gives, add it to
+the library; never rewrite the probe around it.
+
+Build before you verify. While any part of the spec is unbuilt or a
+placeholder, the next action is building it, not new checks or a review. Grow
+the gate with the code: add checks with the code, from the spec's own examples,
+for the part you just wrote, and the spec's own examples for parts already
+built. A check that passes the first time it runs is not progress. A check from
+a spec example asserts the example's literal output: when your code disagrees
+with it, change the code, not the check.
 
 Claude Code loads hooks when a session starts, so hooks installed by `start` take
 effect from the next session. Until then, run `close` yourself at the end, and
@@ -339,6 +361,10 @@ files have had four review rounds: go back to building, as it says. If every
 part of the request is already built and checked, stop and give the final
 report, listing the lines no reviewer passed as unverified. Dispatch a reviewer
 at the start of a session, with most of the session left, not near its end.
+A reviewer's calls count against a session that is limited in length: when a
+round ends without verdicts, go back to building rather than dispatching
+another. A requirement that asks for no library behaviour (docs, benchmarks,
+examples) never comes before an unbuilt part of the library.
 
 A passing gate means your checks pass, not that the request is met. While budget
 remains, extend the gate to the next part of the request it does not check yet,
@@ -447,7 +473,9 @@ and stop on completion or exhaustion.
 
 ## Final report
 
-End in the same turn with one complete report:
+Give the final report only when the goal is complete, its budget is spent, or a
+person ends the work; a session that is merely ending is none of these. End that
+turn with one complete report:
 1. Each requirement line and its status: verified by gate, verified by reviewer,
    judgment call (name the reading you chose), unverified, or not met, each with
    evidence. Put unverified and not-met lines first.
@@ -455,7 +483,7 @@ End in the same turn with one complete report:
    requirements.
 3. The goal's slug and status. `complete` means your gate and reviewer passed.
    Never present it, or a reviewer's PASS, as proof that the task is done.
-Never promise to report something later. If you stop without completing, make the
-ledger say why: with budget left, run a last `check` whose `--next` lists the open
-lines; with the budget spent, or when the open lines cannot be verified here,
+Never promise to report something later. If a person stops the work before it is
+complete, make the ledger say why: with budget left, run a last `check` whose
+`--next` lists the open lines; with the budget spent, or when the open lines cannot be verified here,
 `abandon` with a reason that lists them.

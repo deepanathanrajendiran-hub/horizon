@@ -100,9 +100,11 @@ def _init_all(lines: list[str], package: str) -> set[str]:
 # A directory-tree line: `│   ├── core.py   # comment`; the branch's column gives the depth.
 _TREE_LINE = re.compile(r"^(?P<lead>[│|\s]*)(?:[├└]──|\|--|`--)\s*(?P<name>[^#\s][^#]*?)\s*(?:#.*)?$")
 _NOT_PACKAGE_DIRS = {"tests", "test", "docs", "doc", "examples", "example", "benchmarks", "scripts"}
-# Top-level files a project's own packaging reads (setup.py's long_description, pyproject's readme and license).
-_PACKAGING_FILE = re.compile(r"^(?:README|LICEN[CS]E|COPYING|NOTICE|AUTHORS|CHANGELOG|CHANGES|HISTORY)(?:\.\w+)?$",
-                             re.I)
+# Top-level files a project's own packaging commonly reads (setup.py's long_description, pyproject's readme and
+# license), and the packaging files; any other file they name is checked by test_packaging_references.
+_PACKAGING_FILE = re.compile(r"^(?:(?:README|LICEN[CS]E|CHANGELOG|CHANGES|HISTORY)(?:\.\w+)?"
+                             r"|pyproject\.toml|setup\.py|setup\.cfg)$", re.I)
+_BUILD_FILES = ("pyproject.toml", "setup.py", "setup.cfg")
 
 
 def _tree_paths(text: str) -> list[tuple[int, str]]:
@@ -179,7 +181,9 @@ _TEMPLATE = '''"""Public names {spec} gives for `{package}` (written by Horizon 
 A failure means the library lacks the name: add it to the library. Delete a name only when the spec says it
 must not exist, or when it is a file name, a URL or a local variable in an example, not a library name."""
 import importlib
+import re
 import sys
+import traceback
 from pathlib import Path
 
 import pytest
@@ -200,6 +204,33 @@ def _find_package():
 _ROOT = _find_package()
 if _ROOT is not None and str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
+_PROJECT = _ROOT.parent if _ROOT is not None and _ROOT.name == "src" else (_ROOT or Path.cwd())
+
+
+def _package_error():
+    """The package's own import error with the project file and line that raised it, or None. Every name
+    check reports it, so one broken import shows as its cause, not as N missing names."""
+    try:
+        importlib.import_module(PACKAGE)
+    except ModuleNotFoundError as exc:
+        if exc.name == PACKAGE:
+            return None  # no package yet: each name says so
+        error = exc
+    except Exception as exc:
+        error = exc
+    else:
+        return None
+    where = ""
+    for frame in reversed(traceback.extract_tb(error.__traceback__)):
+        try:
+            where = f" ({{Path(frame.filename).resolve().relative_to(_ROOT).as_posix()}}:{{frame.lineno}})"
+            break
+        except (TypeError, ValueError):
+            continue
+    return f"{{type(error).__name__}}: {{error}}{{where}}"
+
+
+_PACKAGE_ERROR = _package_error()
 
 
 def _deepest_module(parts):
@@ -216,6 +247,8 @@ def _deepest_module(parts):
 
 @pytest.mark.parametrize("name", NAMES, ids=NAMES)
 def test_spec_name_exists(name):
+    if _PACKAGE_ERROR:
+        pytest.fail(f"{{PACKAGE}} does not import: {{_PACKAGE_ERROR}}")
     parts = name.split(".")
     module, depth = _deepest_module(parts)
     for i in range(1, depth + 1):
@@ -229,13 +262,46 @@ def test_spec_name_exists(name):
 _FILES_TEMPLATE = '''
 
 FILES = {files}
-_PROJECT = _ROOT.parent if _ROOT is not None and _ROOT.name == "src" else (_ROOT or Path.cwd())
 
 
 @pytest.mark.parametrize("path", FILES, ids=FILES)
 def test_spec_file_exists(path):
     # The project's own packaging can read these (setup.py opening README.rst); without them it does not install.
     assert (_PROJECT / path).is_file(), f"{{path}} is in the spec's directory tree: create it at {{_PROJECT}}"
+'''
+
+_PACKAGING_TEMPLATE = '''
+
+def _packaging_problems():
+    """Files and modules the project's own packaging names but that do not exist."""
+    problems = []
+    pyproject, setup_py, setup_cfg = (_PROJECT / n for n in ("pyproject.toml", "setup.py", "setup.cfg"))
+    refs = []
+    if pyproject.is_file():
+        text = pyproject.read_text(errors="replace")
+        refs += [("pyproject.toml", r) for r in re.findall(r'^\\s*(?:readme|license-files)\\s*=\\s*"([^"]+)"', text, re.M)]
+        refs += [("pyproject.toml", r) for r in re.findall(r'\\bfile\\s*=\\s*"([^"]+)"', text)]
+        scripts = re.search(r"^\\[project\\.(?:scripts|gui-scripts)\\]\\s*$(.*?)(?=^\\[|\\Z)", text, re.M | re.S)
+        for name, target in re.findall(r'^\\s*"?([\\w.-]+)"?\\s*=\\s*"([^"]+)"', scripts.group(1) if scripts else "", re.M):
+            module = target.split(":")[0].strip()
+            base = (_ROOT or _PROJECT) / module.replace(".", "/")
+            if not (base.with_suffix(".py").is_file() or (base / "__init__.py").is_file()):
+                problems.append(f"script {name} points at {module}, which does not exist")
+    if setup_py.is_file():
+        text = setup_py.read_text(errors="replace")
+        refs += [("setup.py", r) for r in re.findall(r"""(?:open|Path)\\(\\s*['"]([^'"]+)['"]""", text)]
+    if setup_cfg.is_file():
+        refs += [("setup.cfg", r) for r in re.findall(r"file:\\s*([^\\s,;]+)", setup_cfg.read_text(errors="replace"))]
+    for where, ref in refs:
+        if not any(_PROJECT.glob(ref)):
+            problems.append(f"{where} names {ref}, which does not exist")
+    return problems
+
+
+def test_packaging_references():
+    # The project's own packaging must install: a setup.py that opens a missing README.rst fails pip install.
+    problems = _packaging_problems()
+    assert not problems, "; ".join(problems)
 '''
 
 def write_gate(spec: Path, package: str, out: Path) -> int:
@@ -249,6 +315,8 @@ def write_gate(spec: Path, package: str, out: Path) -> int:
     files = spec_files(text)
     if files:
         gate += _FILES_TEMPLATE.format(files=repr(files))
+    if any(f in _BUILD_FILES for f in files):
+        gate += _PACKAGING_TEMPLATE
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(gate)

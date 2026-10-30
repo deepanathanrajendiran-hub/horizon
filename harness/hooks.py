@@ -176,26 +176,62 @@ def _active_goals() -> list[dict]:
 
 _FAILED = re.compile(r"^(?:FAILED|ERROR)\s+(\S+::\S+)", re.M)
 
+_FAILED_BODY = re.compile(r"^E\s+Failed: (.+)$", re.M)
+_FAILED_LINE = re.compile(r"^(?:FAILED|ERROR)\s+(\S+::\S+)(?:\s+-\s+(.*))?$", re.M)
+
 _SUMMARY = re.compile(r"^=*\s*(\d+ (?:failed|passed|errors?)\b[^\n=]*?)\s*=*\s*$", re.M)
 
 
 def _gate_digest(output: str) -> str:
-    """The failing checks by name when the output lists them, else the output's tail."""
+    """The failing checks by name when the output lists them, else the output's tail.
+
+    NL2Repo bench6: one ImportError failed all 241 surface names and the message listed names alphabetically,
+    never the error; ydata's missing `utils` package hid in a truncated list of private helpers. So a message
+    shared by three or more failures leads as the root cause, and surface names are counted by module."""
     output = output or ""
     # pytest's own list; captured log lines such as `ERROR    lib:x.py:4 boom` come before it
     summary_at = output.rfind("short test summary info")
     listed = output[summary_at:] if summary_at >= 0 else output
-    ids = []
-    for found in _FAILED.findall(listed):
+    ids, messages = [], {}
+    for found, message in _FAILED_LINE.findall(listed):
         name = found.split("::")[-1]
         if name not in ids:
             ids.append(name)
-    if ids:
-        summary = _SUMMARY.findall(output)
-        more = f" and {len(ids) - 12} more" if len(ids) > 12 else ""
-        return f". Failing: {', '.join(ids[:12])}{more}" + (f" ({summary[-1]})." if summary else ".")
-    tail = " ".join(output.split())[-300:]
-    return f": {tail}" if tail else "."
+            if message:
+                text = re.sub(r"^Failed:\s*", "", message.strip())
+                messages[text] = messages.get(text, 0) + 1
+    if not ids:
+        tail = " ".join(output.split())[-300:]
+        return f": {tail}" if tail else "."
+    parts = []
+    # pytest cuts each summary line to the terminal width at a different point; the failure bodies keep the
+    # whole message (`E   Failed: ...`)
+    body = {}
+    for text in _FAILED_BODY.findall(output):
+        body[text.strip()] = body.get(text.strip(), 0) + 1
+    shared = max([*messages.items(), *body.items()], key=lambda kv: kv[1], default=(None, 0))
+    if shared[1] >= 3:
+        parts.append(f'Root cause: {shared[1]} checks fail with "{shared[0]}"; fix that first.')
+    names = [i[len("test_spec_name_exists["):-1] for i in ids
+             if i.startswith("test_spec_name_exists[") and i.endswith("]")]
+    if names:
+        groups = {}
+        for name in names:
+            module = name.rsplit(".", 1)[0] if "." in name else name
+            groups[module] = groups.get(module, 0) + 1
+        ranked = sorted(groups.items(), key=lambda kv: -kv[1])  # stable: first seen first among equals
+        more = f" and {len(ranked) - 10} more modules" if len(ranked) > 10 else ""
+        parts.append("Missing names by module: " + ", ".join(f"{m} {n}" for m, n in ranked[:10]) + more + ".")
+    others = [i for i in ids if not i.startswith("test_spec_name_exists[")]
+    summary = _SUMMARY.findall(output)
+    tail = f" ({summary[-1]})." if summary else "."
+    if others or not names:
+        shown = others or ids
+        more = f" and {len(shown) - 12} more" if len(shown) > 12 else ""
+        parts.append(f"Failing: {', '.join(shown[:12])}{more}{tail}")
+    elif summary:
+        parts.append(f"({summary[-1]}).")
+    return ". " + " ".join(parts)
 
 
 def _files_line(root: Path, limit: int = 40) -> str:
@@ -233,6 +269,77 @@ def _files_line(root: Path, limit: int = 40) -> str:
     except Exception:
         return ""
 
+_PATHLIKE = re.compile(r"[\w./-]+\.[A-Za-z]\w*")
+
+
+def _resume_line(state: dict) -> str:
+    """What changed since the next action was recorded, open findings and known facts (NL2Repo bench6: a
+    stale next action in 14 of 16 builds; bugs and environment facts lost at the call cap)."""
+    out = ""
+    changed = goal.changed_since_next(state)
+    if changed:
+        more = f" (and {len(changed) - 15} more)" if len(changed) > 15 else ""
+        out += f" Changed since the next action was recorded: {', '.join(changed[:15])}{more}."
+        named = _PATHLIKE.findall(goal.row(state)["next_action"] or "")
+        done = [c for c in changed if any(c == n or c.endswith("/" + n) or n.endswith("/" + c) for n in named)]
+        if done:
+            out += (f" The next action may already be done: {', '.join(done)} changed after it was recorded; "
+                    "check before redoing it.")
+    findings = [f["text"] for f in state.get("findings") or []]
+    if findings:
+        out += " Open findings: " + "; ".join(f"{i}) {t}" for i, t in enumerate(findings, 1)) + "."
+    facts = [f["text"] for f in state.get("facts") or []]
+    if facts:
+        out += " Known facts: " + "; ".join(facts) + "."
+    return out
+
+
+def _placeholders(root: Path, limit: int = 10) -> str:
+    """Source files whose functions only raise NotImplementedError (abstract methods aside) or that call
+    themselves placeholders (NL2Repo bench6 deepdiff: a green gate over five placeholder modules)."""
+    import ast
+    try:
+        out = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+                             capture_output=True, timeout=10)
+        if out.returncode:
+            return ""
+        names = [n for n in out.stdout.decode(errors="replace").split("\0") if n.endswith(".py")]
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    found = []
+    for name in dict.fromkeys(names):
+        parts = name.split("/")
+        if (any(p.startswith(".") or p in _NOT_SOURCE or p in ("tests", "test") for p in parts[:-1])
+                or parts[-1].startswith("test_") or parts[-1] == "conftest.py"):
+            continue
+        try:
+            tree = ast.parse((root / name).read_text(errors="replace"))
+        except (OSError, SyntaxError, ValueError):
+            continue
+        hits = []
+        stack = [(node, "") for node in tree.body]
+        while stack:
+            node, prefix = stack.pop(0)
+            if isinstance(node, ast.ClassDef):
+                stack += [(child, f"{prefix}{node.name}.") for child in node.body]
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                abstract = any((getattr(d, "attr", None) or getattr(d, "id", None)) == "abstractmethod"
+                               for d in node.decorator_list)
+                raises = any(isinstance(s, ast.Raise) and "NotImplementedError" in ast.unparse(s.exc or s)
+                             for s in node.body)
+                doc = (ast.get_docstring(node) or "").lower()
+                if (raises and not abstract) or "placeholder" in doc:
+                    hits.append(prefix + node.name)
+        if "placeholder" in (ast.get_docstring(tree) or "").lower():
+            hits.append("module marked placeholder")
+        if hits:
+            shown = ", ".join(hits[:4]) + (f" and {len(hits) - 4} more" if len(hits) > 4 else "")
+            found.append(f"{name} ({shown})")
+    if not found:
+        return ""
+    more = f"; and {len(found) - limit} more files" if len(found) > limit else ""
+    return "Placeholders still to build: " + "; ".join(found[:limit]) + more + "."
+
 def _goal_line(state: dict, fresh: bool = False) -> str:
     row = goal.row(state)
     info = goal.summary(state)
@@ -257,7 +364,7 @@ def _goal_line(state: dict, fresh: bool = False) -> str:
         result, role, at, output = record
         label = "Gate now" if fresh else "Last gate run"
         line += f" {label}: {result} ({role}, {at[:16]}){_gate_digest(output)}"
-    return line
+    return line + _resume_line(state)
 
 
 def _configured_timeout() -> int | None:
@@ -327,8 +434,15 @@ def _notes_line(slug: str) -> str:
 def _paths_line() -> str:
     entry = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0].endswith(".py") else None
     gates = paths.harness_root() / "gates"
+    if not entry:
+        return f"Horizon: PROJECT={paths.project_root()} GATES_ROOT={gates}."
+    # NL2Repo bench6: `$HARNESS` and `$PROJECT` set in one shell call were gone in the next, so 2-4 harness
+    # calls per build failed; an old system python3 failed too. The hook's own interpreter runs the harness.
+    runtime = paths.runtime()
     return (f"Horizon: HARNESS={entry} PROJECT={paths.project_root()} GATES_ROOT={gates} (use these; no need to "
-            "run `doctor`)." if entry else f"Horizon: PROJECT={paths.project_root()} GATES_ROOT={gates}.")
+            f"run `doctor`). Run Horizon as: \"{sys.executable}\" \"{entry}\" --runtime {runtime} --project "
+            f"\"{paths.project_root()}\" <command>; shell variables do not carry over between commands, so "
+            "paste the paths, not $HARNESS.")
 
 
 def _last_commit_files(limit: int = 12) -> list[str]:
@@ -386,6 +500,9 @@ def _session_start(session: str | None, source: str | None = None) -> dict | Non
     files = _files_line(paths.project_root())
     if files:
         lines.append(files)
+    stubs = _placeholders(paths.project_root())
+    if stubs:
+        lines.append(stubs)
     return {"hookSpecificOutput": {"hookEventName": "SessionStart",
                                    "additionalContext": "\n".join(lines)}}
 

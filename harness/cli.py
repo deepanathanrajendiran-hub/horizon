@@ -67,9 +67,13 @@ def parser() -> argparse.ArgumentParser:
     observe.add_argument("--role", choices=("baseline", "resume", "final"), default="resume")
     observe.add_argument("--timeout", type=int, default=gate.DEFAULT_TIMEOUT)
     observe.add_argument("--next", dest="next_action", help="Also record the next action")
-    note = commands.add_parser("note", help="Record the next action now; runs nothing and charges no turn")
+    note = commands.add_parser("note", help="Record the next action, a finding or a fact now; runs nothing and "
+                               "charges no turn")
     note.add_argument("slug")
-    note.add_argument("--next", required=True, dest="next_action")
+    note.add_argument("--next", dest="next_action")
+    note.add_argument("--finding", help="A bug seen but not fixed yet; shown at every session start until cleared")
+    note.add_argument("--fact", help="An environment fact that is not a code bug; shown at every session start")
+    note.add_argument("--clear-findings", action="store_true", help="Drop the open findings once they are fixed")
     close = commands.add_parser("close", help="Complete when evidence allows, else report what is missing")
     close.add_argument("slug")
     close.add_argument("--if-ready", action="store_true", help="Never run the gate; complete or finalize only")
@@ -375,7 +379,8 @@ def dispatch(args) -> tuple[dict, int]:
         report["observation"] = goal.latest_observation(state)
         return report, 0 if report["observation"]["gate"] == "pass" else 1
     if args.action == "note":
-        return status(goal.note(args.slug, args.next_action)), 0
+        return status(goal.note(args.slug, args.next_action, finding=args.finding, fact=args.fact,
+                                clear_findings=args.clear_findings)), 0
     if args.action == "close":
         result = goal.close(args.slug, run_gate=not args.if_ready, timeout=args.timeout)
         if not result["complete"]:

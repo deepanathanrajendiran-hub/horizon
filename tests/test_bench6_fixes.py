@@ -97,3 +97,26 @@ def test_stop_reason_names_every_active_goal(state_client):
     run("start", "Ship the parser", "--gate", "true")
     reason = _stop(project)["reason"]
     assert re.search(r"keep-the-build-green", reason) and re.search(r"ship-the-parser", reason)
+
+@pytest.mark.parametrize("folder", [".claude", ".agents"])
+def test_skills_build_breadth_first_and_before_verifying(folder):
+    # bench6 transcript review: entry points built last or never (pdfplumber.open, jinja Environment, ydata
+    # ProfileReport); 4-7 sessions of checks and reviews with the spec unbuilt (bleach, fastapi-users, Cachier,
+    # Verifiers); bugs lost at the cap; `$HARNESS` gone in the next shell; a final report while budget remained.
+    text = _skill(folder)
+    for phrase in ("Breadth first. In the first session, make the whole package exist",
+                   "the spec's main entry point",
+                   "the packaging files the tree lists, with every file they name, such as the README",
+                   "deepen the least-built part first", "not the next section in spec order",
+                   "Build before you verify", "A check that passes the first time it runs is not progress",
+                   "change the code, not the check",
+                   "`note SLUG --finding", "`--fact`", "may already be done",
+                   "never `$HARNESS`",
+                   "go back to building rather than dispatching another",
+                   "never comes before an unbuilt part of the library",
+                   "Give the final report only when the goal is complete, its budget is spent, or a person "
+                   "ends the work"):
+        assert phrase in text, phrase
+    for gone in ("End in the same turn with one complete report", "If you stop without completing",
+                 "in dependency order, and the package"):
+        assert gone not in text, gone

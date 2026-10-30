@@ -28,7 +28,7 @@ when operating from an otherwise unmarked nested directory.
 | `review SLUG --result pass\|fail --judge HANDLE --hash HASH --evidence-file PATH` | Record the actual review of the checkpoint's snapshot |
 | `complete SLUG` | Require all configured checks on current artifacts |
 | `observe SLUG [--role baseline\|resume\|final] [--timeout N] [--next TEXT]` | Run the gate now and record the result; charges no turn |
-| `note SLUG --next TEXT` | Record the next action now; runs nothing and charges no turn |
+| `note SLUG [--next TEXT] [--finding TEXT] [--fact TEXT] [--clear-findings]` | Record the next action, an open finding or an environment fact now; runs nothing and charges no turn |
 | `start ... --gate-path DIR --surface-spec FILE --package NAME` | Write `DIR/test_surface.py` (as `surface`) before the baseline gate run |
 | `surface --spec FILE --package NAME --out FILE` | Write a pytest gate with one test per public name a spec gives for a Python package; needs no goal |
 | `close SLUG [--if-ready] [--timeout N]` | Complete when recorded evidence covers the current files, else say what is missing |
@@ -67,7 +67,12 @@ Only command gates can be observed. Exit 0 if the gate passed, 1 if it did not,
 2 on error.
 
 `note SLUG --next TEXT` records the next action at once, with no turn and no gate
-run, so a session that ends before `check` still hands it on. A goal's
+run, so a session that ends before `check` still hands it on. `--finding TEXT`
+keeps a bug seen but not yet fixed, and `--fact TEXT` an environment problem that
+is not a code bug; the session-start message shows both until `--clear-findings`
+(facts stay). Each next action records the project's Git HEAD, so the session-start
+message can list the files changed since it was recorded and say when a file it
+names changed afterwards ("may already be done"). A goal's
 `next_action` is the newest of the last checkpoint's, note's and observation's.
 `status SLUG` also reports `last_observation` (the newest gate run, with the last
 600 characters of its output), and the Claude Code session-start message adds
@@ -151,11 +156,20 @@ the event JSON on stdin and always exits 0, so a hook never blocks a session.
   gate directory, next action, gate command and newest gate result, whether
   from its own run (`Gate now:`), an `observe` or a `check`. When the output
   lists `FAILED`/`ERROR` lines it gives the failing checks by name, up to 12, and
-  the summary line; otherwise the last 300 characters. Then the notes file and
+  the summary line; otherwise the last 300 characters. A message shared by three
+  or more failures leads as `Root cause:`, and surface-gate names are counted by
+  module (`Missing names by module:`) instead of listed. Then the files changed
+  since the next action was recorded (with `may already be done` when the next
+  action names one of them), open findings and known facts, the literal command
+  that runs Horizon (`Run Horizon as:`, with the hook's own interpreter), the
+  notes file and
   its parts, the files the last commit changed (relative to the repository root),
   and the project's files with their line counts, up to 40, tracked files and
   code files first; files in dot-directories, environments, `build`, `dist` and
-  `*.egg-info` are left out, and a file over 1 MB shows its size instead. An install from before this behaviour has a
+  `*.egg-info` are left out, and a file over 1 MB shows its size instead. Last,
+  `Placeholders still to build:` lists source files with functions that only
+  raise `NotImplementedError` (abstract methods aside) or that call themselves
+  placeholders. An install from before this behaviour has a
   30-second hook: the hook upgrades it for the next session and runs no gate in
   this one. `install-hooks` keeps a longer timeout you set.
 - `PostToolUse` renews the lease of the session's open attempt.
@@ -577,6 +591,12 @@ Every module inside the package that the spec's directory tree (`├──`/`└
 or a file path in its text names (`src/NAME/utils/cache.py`) is checked too, except
 `__main__` and tests; when the tree shows the package as a single `NAME.py`, paths
 in the text are left out (`NAME/` there is the repository folder). When the tree
-lists top-level files that packaging reads (README, LICENSE, NOTICE, AUTHORS and
+lists top-level files that packaging commonly reads (README, LICENSE and
 change logs), `test_spec_file_exists` checks each exists at the project root: a
-`setup.py` that opens a missing `README.rst` fails to install.
+`setup.py` that opens a missing `README.rst` fails to install. The packaging
+files themselves (`pyproject.toml`, `setup.py`, `setup.cfg`) count when the tree
+lists them, and then `test_packaging_references` checks every file they name
+(`readme`, `license` files, `open(...)` in setup.py, `file:` in setup.cfg) and
+that each `[project.scripts]` target module exists. When the package itself
+fails to import, every name check fails with that one error and the file and
+line that raised it (`pkg does not import: ...`).

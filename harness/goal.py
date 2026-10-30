@@ -22,6 +22,7 @@ from pathlib import Path
 import evidence
 import gate
 import evidence as evidence_rules  # _apply_review has a parameter named evidence
+import subprocess
 
 MAX_GATE_OUTPUT = 4000
 
@@ -518,7 +519,7 @@ def _checkpoint_locked(slug, did, next_action, tree_hash_value,
             "Turn budget exhausted; stop work and request an explicit extension.")
     state["checkpoints"].append({
         "turn": state["used"]["turns"] + 1, "at": _now(),
-        "did": did, "next": next_action, "tree_hash": tree_hash_value,
+        "did": did, "next": next_action, "head": _git_head(), "tree_hash": tree_hash_value,
         "gate": gate_result, "gate_output": _bounded(gate_output),
         "gate_spec": dict(state["gate"]),
     })
@@ -574,28 +575,77 @@ def observe(slug: str, role: str, timeout: int = gate.DEFAULT_TIMEOUT, next_acti
         state.setdefault("observations", []).append({
             "kind": "observation", "role": role, "at": _now(), "tree_hash": digest,
             "gate": result, "gate_output": _bounded(output), "gate_spec": dict(state["gate"]),
-            **({"next": next_action.strip()} if next_action and next_action.strip() else {}),
+            **({"next": next_action.strip(), "head": _git_head()} if next_action and next_action.strip() else {}),
         })
         if manifest is not None:
             state.setdefault("test_manifest", manifest)
         return _persist_mutation_locked(state)
 
-def note(slug: str, next_action: str) -> dict:
-    """Record the next action now, with no turn and no gate run.
+def _git_head() -> str | None:
+    """The project's HEAD commit when it is a Git repository, so a later session can see what changed."""
+    try:
+        out = subprocess.run(["git", "-C", str(paths.project_root()), "rev-parse", "HEAD"],
+                             capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    head = out.stdout.strip()
+    return head if out.returncode == 0 and re.fullmatch(r"[0-9a-f]{40,64}", head) else None
+
+
+def changed_since_next(state: dict) -> list[str] | None:
+    """Project files changed since the current next action was recorded, or None when that cannot be told.
+
+    NL2Repo bench6: a session cut off by the call cap after writing a file but before `check` left the next
+    session told to write the same file again (14 of 16 builds)."""
+    if state.get("execution"):
+        return None
+    records = [state["checkpoints"][-1]] if state["checkpoints"] else []
+    records += [r for r in (state.get("notes") or [])[-1:] + (state.get("observations") or []) if r.get("next")]
+    latest = max(records, key=lambda r: r.get("at") or "", default=None)
+    head = (latest or {}).get("head")
+    if not head:
+        return None
+    root = str(paths.project_root())
+    try:
+        diff = subprocess.run(["git", "-C", root, "diff", "--name-only", head], capture_output=True, text=True,
+                              timeout=10)
+        new = subprocess.run(["git", "-C", root, "ls-files", "--others", "--exclude-standard"],
+                             capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if diff.returncode:
+        return None
+    names = diff.stdout.splitlines() + (new.stdout.splitlines() if new.returncode == 0 else [])
+    return sorted({n for n in names if n.strip() and not n.startswith((".claude/", ".agents/"))
+                   and "__pycache__" not in n})
+
+def note(slug: str, next_action: str | None = None, finding: str | None = None, fact: str | None = None,
+         clear_findings: bool = False) -> dict:
+    """Record the next action, an open finding or an environment fact now, with no turn and no gate run.
 
     `check --next` comes at the end of an increment; a session cut off before
     it (the NL2Repo benchmark's call cap) left the next session "Next: not set".
+    A finding (a bug seen but not fixed yet) and a fact (an environment problem that is not a code bug) are
+    shown at every session start: bench6 lost bugs found just before the cap and re-diagnosed the same
+    broken scipy in six sessions.
     """
-    text = (next_action or "").strip()
-    if not text:
-        raise ValueError("A note needs a next action")
+    text, finding, fact = ((v or "").strip() for v in (next_action, finding, fact))
+    if not (text or finding or fact or clear_findings):
+        raise ValueError("A note needs --next, --finding, --fact or --clear-findings")
     with filelock.goal_locked(_path(slug)):
         state = load(slug)
         if execution_mode(state) == "state":
             raise GoalStateError("state-mode goals carry their next action in the task packet; note is unavailable")
         if state["status"] != "active":
             raise GoalClosed(f"cannot note: goal status is {state['status']!r}")
-        state.setdefault("notes", []).append({"at": _now(), "next": _bounded(text)})
+        if text:
+            state.setdefault("notes", []).append({"at": _now(), "next": _bounded(text), "head": _git_head()})
+        if clear_findings:
+            state["findings"] = []
+        if finding:
+            state.setdefault("findings", []).append({"at": _now(), "text": _clip(finding, 400)})
+        if fact and fact not in [f["text"] for f in state.get("facts", [])]:
+            state.setdefault("facts", []).append({"at": _now(), "text": _clip(fact, 400)})
         return _save(state)
 
 def latest_observation(state: dict) -> dict | None:
