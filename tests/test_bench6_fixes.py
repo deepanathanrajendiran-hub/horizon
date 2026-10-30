@@ -120,3 +120,11 @@ def test_skills_build_breadth_first_and_before_verifying(folder):
     for gone in ("End in the same turn with one complete report", "If you stop without completing",
                  "in dependency order, and the package"):
         assert gone not in text, gone
+
+@pytest.mark.parametrize("folder", [".claude", ".agents"])
+def test_skills_write_into_the_real_file_not_scratch_parts(folder):
+    # Sonnet pilot 2, Autopep8: session 1 wrote the library as _parts/p1.py ... p5.py to join at the end; the
+    # call cap came first, so nothing importable existed and session 1 scored 0 (plain: 545).
+    text = _skill(folder)
+    assert "Write straight into the real files" in text
+    assert "never into scratch parts to join later" in text

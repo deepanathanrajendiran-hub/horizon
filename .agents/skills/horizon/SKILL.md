@@ -192,8 +192,11 @@ module the spec's directory tree lists, each with its classes and functions
 point (what its first usage example calls) and the packaging files the tree
 lists, with every file they name, such as the README. A test suite loses every
 test in a file whose imports fail, so a missing module costs more than a thin
-one. Keep the package importable after every write: define a name in the same
-edit that exports it, and never import a module that does not exist yet. Then
+one. Write straight into the real files, never into scratch parts to join later:
+a session can end at any call, and parts not yet joined are lost. A long module
+goes in as several appends to the module itself. Keep the package importable
+after every write: define a name in the same edit that exports it, and never
+import a module that does not exist yet. Then
 deepen the least-built part first: the next action is the largest part of the
 spec still unbuilt or a placeholder, not the next section in spec order, and no
 module gets more than about a session while others are placeholders. When a
