@@ -572,3 +572,11 @@ checked as `NAME.name`: a package re-exports its private modules' public names. 
 directory or the test file's own directories, and their `src/`. It reads only the
 spec, so it can be written before the code. A spec that gives no names for the
 package is an error (check `--package`: the import name, such as `jwt` for PyJWT).
+
+Every module inside the package that the spec's directory tree (`├──`/`└──` lines)
+or a file path in its text names (`src/NAME/utils/cache.py`) is checked too, except
+`__main__` and tests; when the tree shows the package as a single `NAME.py`, paths
+in the text are left out (`NAME/` there is the repository folder). When the tree
+lists top-level files that packaging reads (README, LICENSE, NOTICE, AUTHORS and
+change logs), `test_spec_file_exists` checks each exists at the project root: a
+`setup.py` that opens a missing `README.rst` fails to install.

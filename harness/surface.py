@@ -97,12 +97,64 @@ def _init_all(lines: list[str], package: str) -> set[str]:
                 found.add(f"{package}.{name}")
     return found
 
+# A directory-tree line: `│   ├── core.py   # comment`; the branch's column gives the depth.
+_TREE_LINE = re.compile(r"^(?P<lead>[│|\s]*)(?:[├└]──|\|--|`--)\s*(?P<name>[^#\s][^#]*?)\s*(?:#.*)?$")
+_NOT_PACKAGE_DIRS = {"tests", "test", "docs", "doc", "examples", "example", "benchmarks", "scripts"}
+# Top-level files a project's own packaging reads (setup.py's long_description, pyproject's readme and license).
+_PACKAGING_FILE = re.compile(r"^(?:README|LICEN[CS]E|COPYING|NOTICE|AUTHORS|CHANGELOG|CHANGES|HISTORY)(?:\.\w+)?$",
+                             re.I)
+
+
+def _tree_paths(text: str) -> list[tuple[int, str]]:
+    """(depth, path) for each entry of the spec's directory trees; depth 0 is directly under the root."""
+    out, stack = [], []
+    for line in text.splitlines():
+        found = _TREE_LINE.match(line)
+        if not found:
+            continue
+        depth = len(found.group("lead")) // 4
+        name = found.group("name").strip().rstrip("/")
+        stack = stack[:depth] + [name]
+        out.append((depth, "/".join(stack)))
+    return out
+
+
+def _module_of(path: str, package: str) -> str | None:
+    """`src/pkg/utils/cache.py` -> `pkg.utils.cache`; None for tests, docs, `__main__` and non-modules."""
+    if not path.endswith(".py"):
+        return None
+    parts = path[:-3].split("/")
+    if package not in parts[:-1] or any(p in _NOT_PACKAGE_DIRS for p in parts):
+        return None
+    mods = parts[parts.index(package):]
+    if mods[-1] == "__init__":
+        mods = mods[:-1]
+    if (len(mods) < 2 or "__main__" in mods or any(_is_test(m) or m == "conftest" for m in mods)
+            or not all(m.isidentifier() for m in mods)):
+        return None
+    return ".".join(mods)
+
+
+def _module_refs(text: str, package: str) -> set[str]:
+    paths = [p for _, p in _tree_paths(text)]
+    # A single-module package (autopep8.py): `autopep8/...` in prose is the repo folder, not the package.
+    if not any(p.split("/")[-1] == f"{package}.py" for p in paths):
+        paths += re.findall(rf"(?<![\w/.-])(?:[\w.-]+/)*{re.escape(package)}/(?:\w+/)*\w+\.py\b", text)
+    return {m for m in (_module_of(p, package) for p in paths) if m}
+
+
+def spec_files(text: str) -> list[str]:
+    """Top-level files in the spec's directory tree that packaging reads (NL2Repo bench6: boto3's setup.py opens
+    README.rst, and a build without it failed to install)."""
+    return sorted({p for depth, p in _tree_paths(text) if depth == 0 and _PACKAGING_FILE.match(p)})
+
 def refs(text: str, package: str) -> list[str]:
     pkg = re.escape(package)
+    modules = _module_refs(text, package)
     text = _URL.sub(" ", text)
     # Prose in backticks, doctest prompts and comments hold imports too.
     lines = [re.sub(r"^\s*(?:>>>|\.\.\.|#)\s?", "", line).replace("`", " ") for line in text.splitlines()]
-    kept = set()
+    kept = set(modules)
     for i, line in enumerate(lines):
         # `try: x = pkg.missing` / `except AttributeError:` shows a name that must not exist.
         if any("AttributeError" in near for near in lines[i:i + 3]):
@@ -174,13 +226,30 @@ def test_spec_name_exists(name):
         assert hasattr(module, parts[depth]), f"{{'.'.join(parts[:depth])}} has no attribute {{parts[depth]}}"
 '''
 
+_FILES_TEMPLATE = '''
+
+FILES = {files}
+_PROJECT = _ROOT.parent if _ROOT is not None and _ROOT.name == "src" else (_ROOT or Path.cwd())
+
+
+@pytest.mark.parametrize("path", FILES, ids=FILES)
+def test_spec_file_exists(path):
+    # The project's own packaging can read these (setup.py opening README.rst); without them it does not install.
+    assert (_PROJECT / path).is_file(), f"{{path}} is in the spec's directory tree: create it at {{_PROJECT}}"
+'''
+
 def write_gate(spec: Path, package: str, out: Path) -> int:
-    names = refs(Path(spec).read_text(errors="replace"), package)
+    text = Path(spec).read_text(errors="replace")
+    names = refs(text, package)
     if not names:
         raise ValueError(f"no names for package {package!r} in {spec}: check --package (the import name, "
                          "such as jwt for PyJWT)")
     body = "[\n" + "".join(f"    {n!r},\n" for n in names) + "]"
+    gate = _TEMPLATE.format(spec=Path(spec).name, package=package, names=body)
+    files = spec_files(text)
+    if files:
+        gate += _FILES_TEMPLATE.format(files=repr(files))
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(_TEMPLATE.format(spec=Path(spec).name, package=package, names=body))
+    out.write_text(gate)
     return len(names)
