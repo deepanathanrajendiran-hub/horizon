@@ -202,6 +202,7 @@ def test_two_sessions_without_a_library_change_raise_the_plateau_alarm(project):
     assert "Plateau: no library source changed in the last 2 sessions" in third
     # the gate (`true`) passes: a finished library is sent to close, not into more edits
     assert "if every part of the request is built, run `close` now" in third
+    assert "Recall the real library" in third
 
 
 def test_a_library_change_clears_the_plateau(project):
@@ -297,7 +298,9 @@ def held_out_rules_missing(text: str) -> list[str]:
 
 @pytest.mark.parametrize("folder", [".claude", ".agents"])
 def test_the_skill_carries_the_held_out_rules(folder):
-    assert held_out_rules_missing((ROOT / folder / "skills/horizon/SKILL.md").read_text()) == []
+    skill = ROOT / folder / "skills/horizon"
+    full = (skill / "SKILL.md").read_text() + "\n" + (skill / "references/guide.md").read_text()
+    assert held_out_rules_missing(full) == []
 
 
 # --- review findings on the branch (fresh reviewer, 2026-10-31) ---------------------------------------
@@ -427,3 +430,37 @@ def test_notes_written_without_a_blank_line_after_the_header_are_kept(project):
     path = Path(glob.glob(str(p / ".claude" / "**" / "notes" / "build-pkg.md"), recursive=True)[0])
     path.write_text(path.read_text().rstrip("\n") + "\n## Map\nmodule X <- lines 1-9\n")
     assert "module X <- lines 1-9" in start_message()
+
+
+# --- the slim skill (fix check, 2026-10-31) -------------------------------------------------------------
+# The full skill was 525 lines (about 8k tokens) loaded every session; on the fix check Haiku applied its rules
+# mechanically and missed the ones that mattered. SKILL.md keeps what every session needs; the rest is the guide.
+
+SLIM_RULES = (
+    "[the full guide](references/guide.md)",
+    "Copy this block and fill in the placeholders; nothing else is needed for setup",
+    "**Run what you wrote, in the same session.**",
+    "**Recall the real library.**",
+    "The spec's silence about a name or a behaviour is not a reason to leave it out",
+    "follow the real library and record the choice with `note --fact`",
+    "Never assert your own guess in the gate",
+    "`waive-example SLUG ID --reason",
+    "**Docs, translations, styles and CI files come last,**",
+    "A goal gets one review round",
+    "never in a session's last calls",
+    "Never approve a changed test on your own judgment",
+    "no one will answer a question",
+    "never spend a session only reading",
+)
+
+
+def slim_missing(text: str) -> list[str]:
+    flat = " ".join(text.split())
+    return [rule for rule in SLIM_RULES if " ".join(rule.split()) not in flat]
+
+
+@pytest.mark.parametrize("folder", [".claude", ".agents"])
+def test_the_slim_skill_holds_the_core_rules_and_stays_small(folder):
+    text = (ROOT / folder / "skills/horizon/SKILL.md").read_text()
+    assert slim_missing(text) == []
+    assert len(text.splitlines()) <= 160 and len(text.split()) <= 1600

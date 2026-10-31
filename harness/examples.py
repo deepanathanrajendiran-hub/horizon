@@ -663,13 +663,15 @@ def waive(gate_dir: Path, item_id: str, reason: str) -> dict:
     return current
 
 def python_for(gate_command: str | None) -> str:
-    """The interpreter the project's gate uses: the gate command's own python or pytest, else the first
-    python on PATH (the hook's own interpreter lacks the project's dependencies)."""
+    """The interpreter the project's gate uses: the first python or pytest the gate command runs, past any
+    `cd X &&`, `;` and environment settings, else the first python on PATH (the hook's own interpreter lacks the
+    project's dependencies; fix check: gates beginning `cd <build> && <venv>/python` fell back to it)."""
     try:
-        words = shlex.split(gate_command or "")
+        words = shlex.split(gate_command or "", posix=True)
     except ValueError:
-        words = []
-    for word in words[:3]:
+        words = (gate_command or "").split()
+    for word in words:
+        word = word.rstrip(";")
         name = os.path.basename(word)
         if re.fullmatch(r"python[\d.]*", name) and os.sep in word and os.access(word, os.X_OK):
             return word
@@ -701,9 +703,9 @@ def run(gate_dir: Path, project: Path, python: str | None = None, timeout: int =
     with tempfile.TemporaryDirectory() as tmp:
         report = Path(tmp) / "report.xml"
         try:
-            subprocess.run([python or sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
-                            "-W", "ignore", f"--junitxml={report}", str(target)],
-                           cwd=str(project), capture_output=True, text=True, timeout=timeout)
+            done = subprocess.run([python or sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                                   "-W", "ignore", f"--junitxml={report}", str(target)],
+                                  cwd=str(project), capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
             return {"passed": 0, "failed": [], "skipped": 0, "error": f"did not finish in {timeout} s"}
         except OSError as exc:
@@ -711,21 +713,33 @@ def run(gate_dir: Path, project: Path, python: str | None = None, timeout: int =
         try:
             root = ET.parse(report).getroot()
         except (OSError, ET.ParseError):
-            return {"passed": 0, "failed": [], "skipped": 0, "error": "the examples did not run"}
-    result = {"passed": 0, "failed": [], "skipped": 0}
+            why = " ".join(((done.stderr or "") + " " + (done.stdout or "")).split())[-300:]
+            return {"passed": 0, "failed": [], "skipped": 0,
+                    "error": f"the examples did not run with {python or sys.executable}: {why or 'no output'}"}
+    result = {"passed": 0, "failed": [], "skipped": 0,
+              "kinds": {"examples": {"passed": 0, "failed": 0, "skipped": 0},
+                        "signatures": {"passed": 0, "failed": 0, "skipped": 0}}}
     if key is not None:
         result["key"] = key
+    counted = re.search(r"^EXAMPLE_COUNT = (\d+)$", target.read_text(errors="replace"), re.M)
+    result["example_count"] = int(counted.group(1)) if counted else None
     for case in root.iter("testcase"):
         name = case.get("name") or ""
         item = name[name.find("[") + 1:-1] if "[" in name else name
         bad = next((c for c in case if c.tag in ("failure", "error")), None)
+        if not item.startswith(("ex", "sig_")):
+            continue  # pytest's placeholder for an empty list
+        tally = result["kinds"]["signatures" if item.startswith("sig_") else "examples"]
         if bad is not None:
             message = " ".join((bad.get("message") or bad.text or "").split())
             result["failed"].append({"id": item, "message": re.sub(r"^Failed:\s*", "", message)[:400]})
+            tally["failed"] += 1
         elif any(c.tag == "skipped" for c in case):
             result["skipped"] += 1
+            tally["skipped"] += 1
         else:
             result["passed"] += 1
+            tally["passed"] += 1
     if record is not None:
         try:
             Path(record).parent.mkdir(parents=True, exist_ok=True)
@@ -746,15 +760,27 @@ def last(record: Path | None) -> dict | None:
 
 
 def summary_line(result: dict | None, limit: int = 5) -> str:
-    """One line for reports and the session-start message."""
+    """One line for reports and the session-start message: runnable examples and listed signatures apart, so
+    signatures that agree never read as agreeing examples (fix check: pytest-cov's spec has none runnable)."""
     if not result:
         return ""
     if result.get("error"):
         return f"Spec examples: {result['error']}."
     failed = result.get("failed") or []
-    if not failed and not result.get("passed"):
+    kinds = result.get("kinds") or {}
+    ex, sig = kinds.get("examples") or {}, kinds.get("signatures") or {}
+    if not kinds:  # a result recorded before the split
+        ex = {"passed": result.get("passed", 0), "failed": len(failed), "skipped": result.get("skipped", 0)}
+    if not any(ex.values()) and not any(sig.values()):
         return ""
-    line = f"Spec examples: {result.get('passed', 0)} agree, {len(failed)} disagree"
+    if result.get("example_count") == 0 or not any(ex.values()):
+        line = "Spec examples: none runnable in this spec"
+    elif not ex.get("passed") and not ex.get("failed"):
+        line = f"Spec examples: none ran here (all {ex.get('skipped', 0)} skipped: a module or service is missing)"
+    else:
+        line = f"Spec examples: {ex.get('passed', 0)} agree, {ex.get('failed', 0)} disagree"
+    if any(sig.values()):
+        line += f"; signatures: {sig.get('passed', 0)} agree, {sig.get('failed', 0)} disagree"
     if not failed:
         return line + "."
     shown = "; ".join(f"{f['id']}: {f['message'][:160]}" for f in failed[:limit])

@@ -324,7 +324,7 @@ def test_run_reports_agreements_and_each_disagreement_with_its_spec_line(tmp_pat
     # the record lives outside the gate directory: a run must not change the watched files
     assert sorted(p.name for p in gates.iterdir() if p.is_file()) == ["examples_waived.json", "spec_examples.py"]
     line = examples.summary_line(result)
-    assert line.startswith("Spec examples: 6 agree, 3 disagree")
+    assert line.startswith("Spec examples: 5 agree, 2 disagree; signatures: 1 agree, 1 disagree")
     assert "waive-example" in line
 
 
@@ -369,3 +369,47 @@ def test_a_run_on_unchanged_files_reuses_the_recorded_result(tmp_path):
     assert again == first
     changed = examples.run(gates, project, python="/no/such/python", record=record, key="tree-2")
     assert changed.get("error")
+
+
+# --- fix check (2026-10-31): `examples` never ran on gates that start with `cd X &&` --------------------
+
+def _fake_env(tmp_path):
+    venv = tmp_path / "venv" / "bin"
+    venv.mkdir(parents=True)
+    for name in ("python", "pytest"):
+        (venv / name).write_text("#!/bin/sh\n")
+        (venv / name).chmod(0o755)
+    return venv
+
+
+def test_the_interpreter_is_found_after_cd_and_environment_settings(tmp_path):
+    venv = _fake_env(tmp_path)
+    assert examples.python_for(f"cd /some/build && {venv}/python -m pytest -q gates") == str(venv / "python")
+    assert examples.python_for(f"PYTHONPATH=/b/src {venv}/python -m pytest -q") == str(venv / "python")
+    assert examples.python_for(f"cd /b; FOO=1 BAR=2 {venv}/pytest -q") == str(venv / "python")
+
+
+def test_a_run_that_cannot_start_reports_the_real_error(tmp_path):
+    project, gates = _project(tmp_path)
+    fake = tmp_path / "nopytest"
+    fake.write_text("#!/bin/sh\necho 'No module named pytest' >&2\nexit 1\n")
+    fake.chmod(0o755)
+    result = examples.run(gates, project, python=str(fake))
+    assert "No module named pytest" in result["error"]
+
+
+def test_the_summary_tells_examples_from_signatures_and_says_when_there_are_no_examples(tmp_path):
+    project = tmp_path / "proj"
+    (project / "pkg").mkdir(parents=True)
+    (project / "pkg" / "__init__.py").write_text("def run(query, values=None):\n    return query\n")
+    gates = project / "gates"
+    spec = tmp_path / "SPEC.md"
+    spec.write_text(_spec("""
+        from pkg import run
+
+        def run(query, values=None):
+            ...
+    """))
+    examples.write_gate(spec, "pkg", gates / "spec_examples.py")
+    line = examples.summary_line(examples.run(gates, project, python=sys.executable))
+    assert line.startswith("Spec examples: none runnable in this spec; signatures: 1 agree, 0 disagree"), line

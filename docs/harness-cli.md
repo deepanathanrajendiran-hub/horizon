@@ -628,8 +628,13 @@ How a result is decided:
   that is not installed, assumes a file it names but does not create, needs the network, or runs over 10
   seconds.
 
-`examples SLUG` runs it with the gate command's own Python (else the first `python` on `PATH`). It prints a
-`summary` and the `result` (`passed`, `skipped`, and `failed` with each id and message). `check` and `close`
+`examples SLUG` runs it with the Python the gate command runs. That is found anywhere in the command, past `cd X &&`,
+`;` and environment settings, else it is the first `python` on `PATH`. A run that cannot start reports its real
+error output.
+
+It prints a `summary` and the `result`. The result has `passed`, `skipped`, `failed` (each id and message) and
+`kinds`. The summary gives examples and signatures apart. It says "none runnable in this spec" when the spec gives
+no runnable example, and "none ran here" when every example was skipped. `check` and `close`
 add the same `spec_examples` line to their reports, with at most 60 seconds per run. Each run is skipped when the
 watched files are unchanged since the last one. The session-start hook only shows the latest result: it never
 runs spec code itself, so spec code runs only through commands the agent starts. The last result is kept beside

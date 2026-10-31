@@ -36,7 +36,7 @@ def test_documented_commands_parse_with_the_real_cli(runtime, folder, name):
     skill = ROOT / folder / "skills" / name / "SKILL.md"
     sources = [skill]
     if name == "horizon":
-        sources.append(skill.parent / "references/commands.md")
+        sources += [skill.parent / "references/guide.md", skill.parent / "references/commands.md"]
 
     commands = 0
     documented_state_commands = set()
@@ -55,7 +55,7 @@ def test_documented_commands_parse_with_the_real_cli(runtime, folder, name):
                     args = cli.parser().parse_args(shlex.split(expanded)[2:])
                     assert args.runtime == runtime
                     commands += 1
-                    documented_by_source[source.name].add(args.action)
+                    documented_by_source["commands.md" if source.name == "commands.md" else "SKILL.md"].add(args.action)
                     if source.name == "commands.md":
                         documented_state_commands.add(args.action)
 
@@ -167,7 +167,9 @@ def test_documented_state_update_examples_merge_with_real_contract(tmp_path):
             assert all(entry["id"] != "obsolete-finding" for entry in candidate["entries"])
 
 def _horizon_skill(folder):
-    return (ROOT / folder / "skills/horizon/SKILL.md").read_text()
+    """The skill as an agent can read it: the slim SKILL.md every session loads, and the full guide beside it."""
+    skill = ROOT / folder / "skills/horizon"
+    return (skill / "SKILL.md").read_text() + "\n" + (skill / "references/guide.md").read_text()
 
 
 def test_horizon_skills_share_their_sections():

@@ -493,12 +493,14 @@ def _source_digest(root: Path) -> str | None:
 
 
 PLATEAU = ("Plateau: no library source changed in the last 2 sessions while this goal is open. LEAD "
-           "(1) Run `examples SLUG` if this goal has spec examples, and fix "
-           "each disagreement the spec's prose supports. (2) If the spec describes an existing library, its users "
-           "and its own tests call its whole public API, not only the names the spec lists: write down the public "
-           "functions, classes, methods, parameters, return types and exception classes you know the real project "
-           "has, and build what is missing or different. (3) Re-read a part of the spec you have not read in the "
-           "last three sessions and compare it with the code.")
+           "(1) Recall the real library: if the spec describes an existing library, its own tests will judge "
+           "this build. In the notes' `## Real library` part, write from memory how that project behaves where its "
+           "tests look: exact messages and output lines, status codes, token and file formats, defaults, the state "
+           "an object moves through, exception classes, the public names the spec never lists. Run the code against "
+           "each item and fix what differs; the spec's silence is not a reason to leave something out. (2) Run "
+           "`examples SLUG` if the spec has runnable examples, and fix each disagreement the spec's prose supports. "
+           "(3) Re-read a part of the spec you have not read in the last three sessions and compare it with the "
+           "code.")
 
 
 def _plateau_line(state: dict) -> str:

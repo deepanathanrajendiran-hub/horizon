@@ -71,7 +71,8 @@ def test_stop_leaves_state_mode_goals_to_their_workers(state_client):
 
 
 def _skill(folder):
-    return " ".join((ROOT / folder / "skills/horizon/SKILL.md").read_text().split())
+    skill = ROOT / folder / "skills/horizon"
+    return " ".join(((skill / "SKILL.md").read_text() + "\n" + (skill / "references/guide.md").read_text()).split())
 
 
 @pytest.mark.parametrize("folder", [".claude", ".agents"])
