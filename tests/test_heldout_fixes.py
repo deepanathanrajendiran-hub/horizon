@@ -266,3 +266,29 @@ def test_the_digest_lists_code_failures_before_packaging_and_docs_files():
     digest = hooks._gate_digest(output)
     assert digest.index("test_detect_json") < digest.index("README.rst")
     assert "packaging and docs files last" in digest
+
+
+# --- the skill carries the rules -----------------------------------------------------------------------
+
+HELDOUT_RULES = (
+    "A goal gets one review round",
+    "never in a session's last calls",
+    "/spec_examples.py`: the spec's own runnable",
+    "`waive-example SLUG ID --reason",
+    "the package `__init__.py` and the modules first",
+    "Where the spec is silent or only illustrative, do what the real library does",
+    "add the public API you know the real project has",
+    "carries a `# judgment`",
+    "tag `[review]` only a line a reviewer can judge by running the code",
+    "When the session-start message says `Plateau`",
+)
+
+
+def held_out_rules_missing(text: str) -> list[str]:
+    flat = " ".join(text.split())
+    return [rule for rule in HELDOUT_RULES if " ".join(rule.split()) not in flat]
+
+
+@pytest.mark.parametrize("folder", [".claude", ".agents"])
+def test_the_skill_carries_the_held_out_rules(folder):
+    assert held_out_rules_missing((ROOT / folder / "skills/horizon/SKILL.md").read_text()) == []

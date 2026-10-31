@@ -113,7 +113,10 @@ is a short label for this request that no directory there already uses.
    in the request's words. Keep qualifiers such as "exact", "all" and "unchanged",
    and keep stated limits. When the request names a class ("all X", "every Y"),
    list each member; for a build from a large spec, one line per module or
-   section is enough at first. Tag each line `[gate]`, `[review]` or `[unverifiable]`. If a
+   section is enough at first. Tag each line `[gate]`, `[review]` or `[unverifiable]`;
+   tag `[review]` only a line a reviewer can judge by running the code, and tag
+   packaging, docs, CI, examples and lines that state no checkable behaviour
+   ("the functions cooperate") `[unverifiable]`. If a
    line admits more than one reasonable reading, also tag it `[judgment]` and
    record the reading you chose. This file states what was asked: leave out your
    diagnosis, method and planned fix. The reviewer tests `[unverifiable]` lines it
@@ -185,12 +188,22 @@ write no other checks before the first modules exist. Delete a name from it only
 when the spec says it must not exist, or when it is a file name, a URL or a local
 variable in an example.
 
+`--surface-spec` also writes `$GATES/spec_examples.py`: the spec's own runnable
+examples (a printed `# Output:`, an `assert`, an expected exception) and the
+signatures it lists. It is advisory, not part of the gate, because specs are
+often wrong. `examples SLUG` runs it, and the session-start message shows its
+last result. For each disagreement, read the spec's prose and recall the real
+library: fix the library when they agree with the example; otherwise run
+`waive-example SLUG ID --reason "SPEC line N ..."`.
+
 Breadth first. In the first session, make the whole package exist: every
 module the spec's directory tree lists, each with its classes and functions
 (complete where the spec allows, the simplest real code otherwise), the package
 `__init__.py` re-exporting the names the spec lists, the spec's main entry
 point (what its first usage example calls) and the packaging files the tree
-lists, with every file they name, such as the README. A test suite loses every
+lists, with every file they name, such as the README. Write them in that order:
+the package `__init__.py` and the modules first, so the package imports after
+the first few writes, then the entry point, then packaging and docs files. A test suite loses every
 test in a file whose imports fail, so a missing module costs more than a thin
 one. Write straight into the real files, never into scratch parts to join later:
 a session can end at any call, and parts not yet joined are lost. A long module
@@ -209,7 +222,20 @@ the gate with the code: add checks with the code, from the spec's own examples,
 for the part you just wrote, and the spec's own examples for parts already
 built. A check that passes the first time it runs is not progress. A check from
 a spec example asserts the example's literal output: when your code disagrees
-with it, change the code, not the check.
+with it, change the code, not the check. Specs are sometimes wrong: drop such a
+check only when the spec's prose and the real library both contradict the
+example, and record why with `note --fact`, citing the spec lines. When the
+session-start message says `Plateau`, do what it says in that session.
+
+Where the spec is silent or only illustrative, do what the real library does
+(for a new library, what standard Python does): return `datetime` objects for
+dates, raise built-in exception classes or subclasses of them, and keep the real
+project's public names, parameter names and order, and module layout. If the
+spec describes an existing library, its users and its own tests call its whole
+public API, not only the names the spec lists: once the spec's names exist, add
+the public API you know the real project has. Never assert your own guess in the
+gate: a check of behaviour the spec does not state carries a `# judgment`
+comment, and it is not evidence that the library is right.
 
 Use `--coverage` with the same criterion instead of `--gate` when no command can
 check any line. When you write the gate yourself (`--gate-path`), always pass
@@ -337,6 +363,12 @@ reports `"unchanged_since_baseline": true`, which the final report must state.
 
 ## Independent review
 
+A goal gets one review round. After it, `close` completes on a passing gate and
+lists what went unreviewed (`unreviewed`), once you have fixed any FAIL lines
+the round found (`close` names them). So dispatch that round once, as the first
+action of a session, when every part of the request is built, never in a
+session's last calls; `review_spent` means it has run.
+
 Build first, review last. Dispatch a reviewer only when you believe every part
 of the request is built and your gate checks it. While parts of the request are
 unbuilt or unchecked, spend the session extending the gate and building, even if
@@ -429,7 +461,8 @@ checkpoint, run `review` and then `close` at once.
 A finding blocks only if it bears on whether a requirement line holds, that is,
 it makes the line FAIL or UNVERIFIED. Record other findings as non-blocking gaps
 for the final report, and do not start an increment or a review for them. Run
-at most two review rounds per goal in a session unless the user allows more.
+at most two review rounds per goal in a session unless the user allows more
+(Horizon itself allows one per goal unless `HORIZON_REVIEW_ROUNDS_PER_GOAL` is set).
 Because any edit after a review needs a new review, after a second failed review
 report the open lines instead of fixing and re-briefing. Never narrow a brief or
 pre-explain a finding to get a pass.

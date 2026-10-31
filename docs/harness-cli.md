@@ -602,3 +602,50 @@ lists them, and then `test_packaging_references` checks every file they name
 that each `[project.scripts]` target module exists. When the package itself
 fails to import, every name check fails with that one error and the file and
 line that raised it (`pkg does not import: ...`).
+
+## Spec examples (advisory)
+
+`start --surface-spec SPEC.md --package NAME --gate-path $GATES` also writes
+`$GATES/spec_examples.py` and an empty `$GATES/examples_waived.json`. The file holds:
+
+- **Examples:** each fenced Python block that imports from the package and states an expected result. That is a
+  `print(...)` or an expression with an `# Output:`/`# Result:`/`# ->` comment (on its line or the next), or a
+  bare literal comment such as `# [1, 2]`. It is also an `assert`, an `except` naming a package exception,
+  `pytest.raises`, a doctest, or an argument-free `def test_...()`.
+- **Signatures:** classes and functions a block imports from the package and then lists, and bare
+  `def name(...) -> T:` signature lines. Parameter names and their order are compared, and so are listed
+  methods and base classes.
+
+Its name does not start with `test_`, so a gate that runs pytest on `$GATES` never collects it: it is advisory.
+On NL2Repo's held-out tasks the real upstream releases disagreed with about a quarter of the examples their
+specs give, so a blocking check would push correct code toward a wrong spec.
+
+How a result is decided:
+
+- **Matching** ignores quote style and spacing. `...` matches anything, a set matches a list with the same
+  items, and a value printed after a label (`print(f"Total: {x}")  # 3`) matches.
+- **Skipped, not failed:** an example that uses a name it never defines, needs a module outside the package
+  that is not installed, assumes a file it names but does not create, needs the network, or runs over 10
+  seconds.
+
+`examples SLUG` runs it with the gate command's own Python (else the first `python` on `PATH`). It prints a
+`summary` and the `result` (`passed`, `skipped`, and `failed` with each id and message). `check` and `close`
+add the same `spec_examples` line to their reports, and the session-start hook shows the latest result. The
+last result is kept beside the goal's notes, outside the watched files, so a run never changes the checkpoint.
+
+`waive-example SLUG ID --reason "SPEC line N ..."` skips one example or signature whose spec is wrong. The
+reason must cite a spec line, and the waiver is recorded in `examples_waived.json`.
+
+## One review round per goal
+
+A goal gets one review round, on any checkpoint (`HORIZON_REVIEW_ROUNDS_PER_GOAL` raises the limit). Once a round
+file exists, `close` completes on a passing gate without a passing review, and reports `unreviewed`: why a review
+was required. One case still blocks: a FAIL line that round wrote for exactly the current files. `close` names it
+until the files change. `check` and `close` then print `review_spent` instead of a brief.
+
+A gate in a `--gate-path` directory is reported as "the agent's own, written during this goal". The project's own
+`tox.ini` or `conftest.py` changing is not a gate change.
+
+The session-start message adds `Plateau: ...` when the project's library source (`.py` files outside tests and
+hidden folders) is unchanged across three session starts in a row. Two whole sessions changed nothing, so the
+message sends the agent back to building.
