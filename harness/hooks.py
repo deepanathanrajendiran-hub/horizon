@@ -468,29 +468,6 @@ def _examples_line(state: dict) -> str:
     return f" {line}" if line else ""
 
 
-def _source_digest(root: Path) -> str | None:
-    """A fingerprint of the project's source: every tracked or new file outside tests, hidden and build folders,
-    whatever its language."""
-    import hashlib
-    try:
-        out = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
-                             capture_output=True, timeout=10)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if out.returncode:
-        return None
-    digest = hashlib.sha256()
-    for name in sorted(set(n for n in out.stdout.decode(errors="replace").split("\0") if n)):
-        parts = name.split("/")
-        if (any(p.startswith(".") or p in _NOT_SOURCE or p in ("tests", "test") for p in parts[:-1])
-                or parts[-1].startswith(("test_", ".")) or parts[-1] == "conftest.py"):
-            continue
-        try:
-            data = (root / name).read_bytes()
-        except OSError:
-            continue
-        digest.update(name.encode() + b"\0" + data + b"\0")
-    return digest.hexdigest()
 
 
 PLATEAU = ("Plateau: no source file changed in the last 2 sessions while this goal is open. LEAD "
@@ -503,7 +480,8 @@ PLATEAU = ("Plateau: no source file changed in the last 2 sessions while this go
 def _plateau_line(state: dict) -> str:
     """Record this session's library fingerprint; two sessions in a row without a change raise the alarm. When
     the gate passes on the current files the library may simply be done, so the alarm sends it to close first."""
-    digest = _source_digest(paths.project_root())
+    digest = tree_hash.source_digest(paths.project_root(), docs=False,
+                                     skip=[p for p in [state.get("gate_path")] if p])
     if digest is None:
         return ""
     path = goal.notes_path(state["slug"]).with_suffix(".sessions.json")  # bookkeeping: never hashed

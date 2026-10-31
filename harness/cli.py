@@ -21,6 +21,7 @@ import hooks
 from datetime import datetime
 import surface
 import examples
+import sections
 
 
 def parser() -> argparse.ArgumentParser:
@@ -397,6 +398,7 @@ def dispatch(args) -> tuple[dict, int]:
         report = status(state)
         report["observation"] = goal.latest_observation(state)
         report["other_goals"] = goal_rows(exclude=state["slug"])
+        report["uncited_sections"] = sections.uncited_in_goal(state.get("gate_path"), state["cwd"])
         report.update(installed)
         if getattr(args, "spec_examples", None) is not None:
             report["spec_examples"] = args.spec_examples
@@ -447,7 +449,9 @@ def dispatch(args) -> tuple[dict, int]:
                 # Unfingerprintable files or unreadable requirements: `missing`
                 # already says so, and there is no snapshot to hand a reviewer.
                 digest, needs_review = None, False
-            if needs_review and evidence.passing_record(state, digest):
+            # A reviewer is sent only once the requirement lines cover the request.
+            if (needs_review and evidence.passing_record(state, digest)
+                    and not sections.uncited_in_goal(state.get("gate_path"), state["cwd"])):
                 _review_handoff(result, state, digest)
             _with_examples(result, state)
         return result, 0 if result["complete"] else 1

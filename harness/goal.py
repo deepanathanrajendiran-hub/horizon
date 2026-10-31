@@ -22,6 +22,7 @@ from pathlib import Path
 import evidence
 import gate
 import evidence as evidence_rules  # _apply_review has a parameter named evidence
+import sections
 import subprocess
 
 MAX_GATE_OUTPUT = 4000
@@ -521,7 +522,7 @@ def _checkpoint_locked(slug, did, next_action, tree_hash_value,
         "turn": state["used"]["turns"] + 1, "at": _now(),
         "did": did, "next": next_action, "head": _git_head(), "tree_hash": tree_hash_value,
         "gate": gate_result, "gate_output": _bounded(gate_output),
-        "gate_spec": dict(state["gate"]),
+        "gate_spec": dict(state["gate"]), "source_hash": _work_digest(state),
     })
     state["used"]["turns"] += 1
     return _save(state)
@@ -575,6 +576,7 @@ def observe(slug: str, role: str, timeout: int = gate.DEFAULT_TIMEOUT, next_acti
         state.setdefault("observations", []).append({
             "kind": "observation", "role": role, "at": _now(), "tree_hash": digest,
             "gate": result, "gate_output": _bounded(output), "gate_spec": dict(state["gate"]),
+            "source_hash": _work_digest(state),
             **({"next": next_action.strip(), "head": _git_head()} if next_action and next_action.strip() else {}),
         })
         if manifest is not None:
@@ -590,6 +592,40 @@ def _git_head() -> str | None:
         return None
     head = out.stdout.strip()
     return head if out.returncode == 0 and re.fullmatch(r"[0-9a-f]{40,64}", head) else None
+
+def _work_digest(state: dict) -> str | None:
+    """The fingerprint of the work at a checkpoint: every project file outside tests, hidden folders and the gate
+    directory, docs included, so a reviewer's FAIL is known to have been fixed in the work, not only in the checks."""
+    return tree_hash.source_digest(state["cwd"], skip=[p for p in [state.get("gate_path")] if p])
+
+
+def _unfixed_fail_lines(state: dict) -> list[str]:
+    """FAIL lines from this goal's review rounds whose checkpoint had the work as it is now, less the lines a
+    `Disputed Rk:` finding answers.
+
+    NL2Repo generic check, bleach: the one round failed R11 (an unquoted javascript: URL kept in CSS); the next
+    session changed only the gate file, and `close` completed with R11 still broken."""
+    current = _work_digest(state)
+    if current is None:
+        return []
+    recorded = {}
+    for record in (state.get("checkpoints") or []) + (state.get("observations") or []):
+        if record.get("tree_hash") and record.get("source_hash"):
+            recorded[str(record["tree_hash"])[:reviewing.HASH_ECHO]] = record["source_hash"]
+    disputes = [f.get("text", "") for f in state.get("findings") or [] if isinstance(f, dict)]
+    disputes = [d for d in disputes if d.lstrip().lower().startswith("disputed")]
+    out = []
+    for path in reviewing.goal_rounds(state):
+        match = re.search(r"-([0-9a-f]{%d})-\d+\.md$" % reviewing.HASH_ECHO, path)
+        if not match or recorded.get(match.group(1)) != current:
+            continue
+        for line in reviewing._fail_lines(reviewing._text(path)):
+            decided = reviewing._DECIDED.match(line)
+            rid = reviewing._rid(decided.group(1)) if decided else None
+            answered = any(re.search(rf"\b{re.escape(rid)}\b", d, re.I) for d in disputes) if rid else bool(disputes)
+            if not answered:
+                out.append(line)
+    return list(dict.fromkeys(out))
 
 
 def changed_since_next(state: dict) -> list[str] | None:
@@ -881,6 +917,9 @@ def _apply_completion(state: dict, observed_hash: str, gate_output: str, allow_u
         raise GateNotPassed(
             "Baseline test files changed: " + ", ".join(changed)
             + ". Completion needs a reviewer's or the user's approval: approve-test-change.")
+    uncited = sections.uncited_in_goal(state.get("gate_path"), state["cwd"])
+    if uncited:
+        raise GateNotPassed(sections.message(uncited))
     reasons = evidence.review_reasons(state, _requirements(state))
     if reasons:
         criterion = state["gate"]["review_criterion"]
@@ -898,6 +937,12 @@ def _apply_completion(state: dict, observed_hash: str, gate_output: str, allow_u
                 raise GateNotPassed(
                     "This goal's review failed these exact files: " + "; ".join(failed)
                     + ". Fix them; the review does not run again, so the changed files close without one.")
+            unfixed = _unfixed_fail_lines(state)
+            if unfixed:
+                raise GateNotPassed(
+                    "The review failed " + "; ".join(unfixed) + ", and no file of the work changed since that "
+                    "round: only checks, tests or harness files did. Fix the work; if a FAIL "
+                    "line is wrong, record why with `note --finding \"Disputed Rk: <reason>\"`.")
             earlier = reviewing.goal_fail_lines(state)
             state["unreviewed"] = ("Closed after this goal's one review round, without a passing review: "
                                    + "; ".join(reasons) + "."

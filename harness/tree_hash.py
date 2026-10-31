@@ -151,3 +151,43 @@ if __name__ == "__main__":
     target = sys.argv[1] if len(sys.argv) > 1 else "."
     watch = sys.argv[2:] or None
     print(compute(target, watch))
+
+NOT_SOURCE = {"venv", "env", "site-packages", "node_modules", "build", "dist", "__pycache__"}
+DOC_SUFFIXES = (".md", ".rst", ".txt", ".adoc")
+
+
+def source_digest(root, docs: bool = True, skip=()) -> str | None:
+    """A fingerprint of the project's work: every tracked or new file outside tests, hidden and build folders,
+    in any language. `docs=False` also leaves out documentation (doc folders and .md/.rst/.txt/.adoc files), so a
+    README-only session is no progress for Plateau. `skip` names further folders to leave out, such as a gate
+    directory outside `.claude`. None when the project is not a Git repository."""
+    root = Path(root)
+    try:
+        out = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+                             capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode:
+        return None
+    skipped = []
+    for folder in skip or ():
+        try:
+            skipped.append(Path(folder).resolve().relative_to(root.resolve()).as_posix() + "/")
+        except (OSError, ValueError):
+            continue
+    digest = hashlib.sha256()
+    for name in sorted(set(n for n in out.stdout.decode(errors="replace").split("\0") if n)):
+        parts = name.split("/")
+        if (any(p.startswith(".") or p in NOT_SOURCE or p in ("tests", "test") for p in parts[:-1])
+                or parts[-1].startswith(("test_", ".")) or parts[-1] == "conftest.py"
+                or any(name.startswith(s) for s in skipped)):
+            continue
+        if not docs and (parts[-1].lower().endswith(DOC_SUFFIXES)
+                         or any(p in ("docs", "doc") for p in parts[:-1])):
+            continue
+        try:
+            data = (root / name).read_bytes()
+        except OSError:
+            continue
+        digest.update(name.encode() + b"\0" + data + b"\0")
+    return digest.hexdigest()

@@ -109,8 +109,10 @@ is a short label for this request that no directory there already uses.
    requirement, reported symptom, deliverable and constraint in the request, quoted
    in the request's words. Keep qualifiers such as "exact", "all" and "unchanged",
    and keep stated limits. When the request names a class ("all X", "every Y"),
-   list each member; for a long input, one line per
-   section is enough at first. Tag each line `[gate]`, `[review]` or `[unverifiable]`;
+   list each member. For a long input (200 lines or more), quote every section
+   heading (a heading with no sub-heading under it) in some line; a section you
+   will not build gets a line that quotes it and says why. `start` prints the
+   `uncited_sections`, and `close` refuses while any remain. Tag each line `[gate]`, `[review]` or `[unverifiable]`;
    tag `[review]` only a line a reviewer can judge by running the work, and tag lines
    that state no checkable behaviour
    ("the functions cooperate") `[unverifiable]`. If a
@@ -311,7 +313,10 @@ reports `"unchanged_since_baseline": true`, which the final report must state.
 
 A goal gets one review round. After it, `close` completes on a passing gate and
 lists what went unreviewed (`unreviewed`), once you have fixed any FAIL lines
-the round found (`close` names them). So dispatch that round once, as the first
+the round found (`close` names them) in the work itself: while no file outside
+the gate directory, tests and hidden folders has changed since the FAIL, `close`
+refuses. If a FAIL line is wrong, record why with
+`note --finding "Disputed Rk: <reason>"`. So dispatch that round once, as the first
 action of a session, when every part of the request is built, never in a
 session's last calls; `review_spent` means it has run.
 
