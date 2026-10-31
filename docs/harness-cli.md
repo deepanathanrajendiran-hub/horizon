@@ -665,16 +665,19 @@ for 15 minutes (a reviewer still running keeps writing).
 `close` names these until the files change. `close --if-ready` and the Stop hook never complete a goal without a
 passing review.
 
-When the goal's `request.md`, or a project file it names, is 200 lines or more, every section heading of it
-(a Markdown heading outside code with no sub-heading under it) must be quoted by some requirement line.
-`start` prints the rest as `uncited_sections`; `close` refuses while any remain and sends no reviewer.
-After a failed review round, `close` refuses while the work (every file outside tests, hidden folders and
-the gate directory) is unchanged since the round, unless a `Disputed Rk:` finding answers each FAIL line.
+When the goal's `request.md`, or a Markdown file in the project it names, is 200 lines or more, every section
+heading of it (a heading outside code with no sub-heading under it) must be cited by some requirement line, by
+its words or by a code name it carries (`chunked()`, `BaseUserManager`). `start` prints the rest as
+`uncited_sections`; `close` refuses while any remain and sends no reviewer. A named file the work changes after
+the baseline (a CHANGELOG the request says to extend) is an output and is not checked.
+After a failed review round, `close` refuses while the work (every project file, hidden files and tests
+included, outside the gate directory and Horizon's own state) is unchanged since the round, unless a
+`Disputed Rk:` finding answers each FAIL line.
 
 A gate in a `--gate-path` directory is reported as "the agent's own, written during this goal". The project's own
 `tox.ini` or `conftest.py` changing is not a gate change.
 
 The session-start message adds `Plateau: ...` when the project's source (every file outside tests, hidden
 and build folders and the gate directory, in any language, documentation excluded: doc folders and `.md`,
-`.rst`, `.txt`, `.adoc` files) is unchanged across three session starts in a row. Two whole sessions
+`.rst`, `.adoc` files) is unchanged across three session starts in a row. Two whole sessions
 changed nothing, so the message sends the agent back to running and building the work.

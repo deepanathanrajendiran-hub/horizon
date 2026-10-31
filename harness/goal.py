@@ -581,6 +581,8 @@ def observe(slug: str, role: str, timeout: int = gate.DEFAULT_TIMEOUT, next_acti
         })
         if manifest is not None:
             state.setdefault("test_manifest", manifest)
+        if role == "baseline":
+            state.setdefault("request_inputs", sections.input_hashes(state.get("gate_path"), state["cwd"]))
         return _persist_mutation_locked(state)
 
 def _git_head() -> str | None:
@@ -594,9 +596,16 @@ def _git_head() -> str | None:
     return head if out.returncode == 0 and re.fullmatch(r"[0-9a-f]{40,64}", head) else None
 
 def _work_digest(state: dict) -> str | None:
-    """The fingerprint of the work at a checkpoint: every project file outside tests, hidden folders and the gate
-    directory, docs included, so a reviewer's FAIL is known to have been fixed in the work, not only in the checks."""
-    return tree_hash.source_digest(state["cwd"], skip=[p for p in [state.get("gate_path")] if p])
+    """The fingerprint of the work at a checkpoint: every project file, hidden files and tests included, outside
+    the gate directory and Horizon's own state, so a FAIL is known to have been fixed in the work, not only in the
+    agent's checks."""
+    return tree_hash.source_digest(state["cwd"], hidden=True, tests=True,
+                                   skip=[p for p in [state.get("gate_path"), str(paths.harness_root())] if p])
+
+def uncited_sections(state: dict) -> list[dict]:
+    """Sections of a long request, or of a Markdown file it names, that no requirement line cites; a named file
+    the work has changed since the baseline is an output, not part of the request."""
+    return sections.uncited_in_goal(state.get("gate_path"), state["cwd"], state.get("request_inputs"))
 
 
 def _unfixed_fail_lines(state: dict) -> list[str]:
@@ -917,7 +926,7 @@ def _apply_completion(state: dict, observed_hash: str, gate_output: str, allow_u
         raise GateNotPassed(
             "Baseline test files changed: " + ", ".join(changed)
             + ". Completion needs a reviewer's or the user's approval: approve-test-change.")
-    uncited = sections.uncited_in_goal(state.get("gate_path"), state["cwd"])
+    uncited = uncited_sections(state)
     if uncited:
         raise GateNotPassed(sections.message(uncited))
     reasons = evidence.review_reasons(state, _requirements(state))
@@ -941,7 +950,7 @@ def _apply_completion(state: dict, observed_hash: str, gate_output: str, allow_u
             if unfixed:
                 raise GateNotPassed(
                     "The review failed " + "; ".join(unfixed) + ", and no file of the work changed since that "
-                    "round: only checks, tests or harness files did. Fix the work; if a FAIL "
+                    "round: only the gate's checks or Horizon's files did. Fix the work; if a FAIL "
                     "line is wrong, record why with `note --finding \"Disputed Rk: <reason>\"`.")
             earlier = reviewing.goal_fail_lines(state)
             state["unreviewed"] = ("Closed after this goal's one review round, without a passing review: "

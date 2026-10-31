@@ -199,3 +199,49 @@ def test_the_skill_says_requirement_lines_cite_every_section_of_a_long_input(fol
     assert "cite every section heading" in core
     assert "uncited_sections" in core
     assert "Disputed Rk:" in core
+
+
+# --- fresh review of 1c8d4df ---------------------------------------------------------------------------
+
+def test_only_named_markdown_files_are_checked_and_not_ones_the_goal_changes(project):
+    p, cli, _ = project
+    (p / "src" / "app.py").write_text("# Copyright 2024 Acme\n" + "x = 1\n" * 250 + "# helpers\n")
+    (p / "CHANGELOG.md").write_text("# Changelog\n" + FILLER + "## 1.0.0 (2024-01-01)\n- first\n")
+    slug, gates, out = _start(p, cli, 'R1 [gate] "parse works"\n',
+                              request="Fix the crash in src/app.py and add an entry to CHANGELOG.md\n")
+    assert [s["heading"] for s in out["uncited_sections"]] == ["1.0.0 (2024-01-01)"]  # no .py comments
+    (p / "CHANGELOG.md").write_text("# Changelog\n" + FILLER + "## 1.0.1\n- fix\n\n## 1.0.0 (2024-01-01)\n- first\n")
+    code, out = cli("close", slug)
+    assert not any("cite" in m for m in out["missing"]), out  # a file the goal writes is not an input
+
+
+def test_only_requirement_lines_cite_and_by_whole_words():
+    import sections
+    text = "# T\n" + FILLER + "## Use\nx\n## Install\ny\n"
+    assert [h for _, h in sections.uncited(text, 'R1 [gate] "users reinstall it"\n')] == ["Use", "Install"]
+    assert [h for _, h in sections.uncited(text, '# Use\n# Install\nR1 [gate] "works"\n')] == ["Use", "Install"]
+    assert sections.uncited(text, 'R1 [gate] "Use: it works"\nR2 [review] "Install it"\n') == []
+
+
+def test_a_tilde_fence_inside_a_backtick_fence_does_not_hide_later_headings():
+    import sections
+    text = "# T\n## A\n```\n~~~\n## Not a heading\n```\n## After\n   ## Indented\n"
+    assert [h for _, h in sections.leaf_headings(text)] == ["A", "After", "Indented"]
+
+
+def test_a_fix_in_a_hidden_file_or_a_test_counts_as_changing_the_work(project):
+    p, cli, _ = project
+    slug, gates = _failed_round(p, cli)
+    (p / ".github").mkdir()
+    (p / ".github" / "ci.yml").write_text("on: push\n")
+    code, out = cli("close", slug)
+    assert code == 0 and out["complete"], out
+
+
+def test_a_requirements_txt_edit_clears_the_plateau(project):
+    p, cli, start_message = project
+    cli("start", "Build the tool", "--gate", "true")
+    start_message()
+    start_message()
+    (p / "requirements.txt").write_text("requests\n")
+    assert "Plateau" not in start_message()
