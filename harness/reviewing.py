@@ -433,18 +433,93 @@ def _started(state: dict) -> float:
     except (KeyError, TypeError, ValueError):
         return 0.0
 
+# A round with decided lines but no END VERDICTS counts as finished once its file has been quiet this long: a
+# reviewer still running keeps appending verdicts (the brief says so), a cut-off one stops.
+ROUND_QUIET_S = 900
+
+
+def round_finished(text: str, age_s: float) -> bool:
+    """A complete reply, or a cut-off one that decided something and has been quiet for ROUND_QUIET_S."""
+    if re.search(r"^[ \t]*END VERDICTS[ \t]*$", text, re.M):
+        return True
+    return bool(_fail_lines(text) or any(_DECIDED.match(l) for l in text.splitlines()
+                                         if not l.lstrip().startswith(">"))) and age_s >= ROUND_QUIET_S
+
+
+def _text(path: str) -> str:
+    try:
+        return Path(path).read_text()
+    except (OSError, UnicodeError):
+        return ""
+
+
+def _goal_hashes(state: dict) -> set[str]:
+    hashes = [c.get("tree_hash") for c in state.get("checkpoints") or []]
+    hashes += [o.get("tree_hash") for o in state.get("observations") or []]
+    hashes += [r.get("tree_hash") for r in state.get("reviews") or []]
+    return {str(h)[:HASH_ECHO] for h in hashes if h}
+
+
+def _goal_round_paths(state: dict) -> list[str]:
+    """Round files named for one of this goal's own checkpoints and naming it, written since the goal began."""
+    directory = review_dir(state.get("watch_paths") or [state["cwd"]])
+    known = _goal_hashes(state)
+    out = []
+    for path in goal_round_files(state["slug"], directory, _started(state)):
+        match = re.search(r"-([0-9a-f]{%d})-\d+\.md$" % HASH_ECHO, path)
+        if match and match.group(1) in known and echoes(_text(path), match.group(1)):
+            out.append(path)
+    return out
+
+
+def goal_rounds(state: dict) -> list[str]:
+    """This goal's finished review rounds."""
+    import time
+    now = time.time()
+    return [p for p in _goal_round_paths(state) if round_finished(_text(p), now - _mtime(p))]
+
 
 def review_spent(state: dict) -> bool:
-    """Whether this goal has had its review round."""
-    directory = review_dir(state.get("watch_paths") or [state["cwd"]])
-    return len(goal_round_files(state["slug"], directory, _started(state))) >= rounds_per_goal()
+    """Whether this goal has had its review round(s): finished rounds on this goal's own checkpoints."""
+    return len(goal_rounds(state)) >= rounds_per_goal()
 
 
-def failed_on(state: dict, digest: str, requirements: dict) -> list[str]:
-    """FAIL lines a round wrote for exactly these files."""
-    directory = review_dir(state.get("watch_paths") or [state["cwd"]])
-    unused = os.path.join(directory, f"horizon-review-{state['slug']}-none.md")
-    return failed_in_rounds(state["slug"], digest, requirements, unused, _started(state))
+def _fail_lines(text: str) -> list[str]:
+    """`Rk: FAIL` lines and FAIL headlines ("Verdict: FAIL") in a round file, as written; quoted lines ignored."""
+    out = []
+    for line in text.splitlines():
+        if line.lstrip().startswith(">"):
+            continue
+        decided = _DECIDED.match(line)
+        if decided and _kind(decided.group(2)) == "FAIL":
+            out.append(line.strip())
+        elif not decided and not _OPEN.match(line) and (
+                _LABEL_FAIL.match(line) or _BOLD_FAIL.match(line) or _ALONE_FAIL.match(line)):
+            out.append(line.strip())
+    return list(dict.fromkeys(out))
+
+
+def failed_on(state: dict, digest: str) -> list[str]:
+    """Why a reviewer failed exactly these files: a recorded `review --result fail`, or FAIL lines and headlines
+    in a round file for this checkpoint, whatever the requirement ids."""
+    out = [f"a recorded review FAIL by {r.get('judge')}" for r in state.get("reviews") or []
+           if r.get("tree_hash") == digest and r.get("result") == "fail"]
+    prefix = str(digest)[:HASH_ECHO]
+    for path in _goal_round_paths(state):
+        if f"-{prefix}-" not in os.path.basename(path):
+            continue
+        text = _text(path)
+        if echoes(text, digest):
+            out += _fail_lines(text)
+    return list(dict.fromkeys(out))
+
+
+def goal_fail_lines(state: dict) -> list[str]:
+    """FAIL lines and headlines every round of this goal wrote, on any checkpoint."""
+    out = []
+    for path in goal_rounds(state):
+        out += _fail_lines(_text(path))
+    return list(dict.fromkeys(out))
 
 
 def decided_counts(slug: str, review_file: str, since: float = 0.0) -> list[int]:

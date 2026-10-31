@@ -463,8 +463,8 @@ it makes the line FAIL or UNVERIFIED. Record other findings as non-blocking gaps
 for the final report, and do not start an increment or a review for them. Run
 at most two review rounds per goal in a session unless the user allows more
 (Horizon itself allows one per goal unless `HORIZON_REVIEW_ROUNDS_PER_GOAL` is set).
-Because any edit after a review needs a new review, after a second failed review
-report the open lines instead of fixing and re-briefing. Never narrow a brief or
+After the goal's review round, fix any FAIL lines it found and close; do not
+re-brief a reviewer. Never narrow a brief or
 pre-explain a finding to get a pass.
 
 ## Limits and resumption

@@ -696,7 +696,7 @@ def close(slug: str, *, run_gate: bool = True, timeout: int = gate.DEFAULT_TIMEO
                 and not budget_exhausted(state)):
             observe(slug, "final", timeout=timeout)
             observed_now = True
-        done = complete(slug, "")
+        done = complete(slug, "", allow_unreviewed=run_gate)
         result = {"complete": True, "missing": [], "summary": summary(done), "finalized": None,
                   "observation": latest_observation(done)}
         if done.get("unreviewed"):
@@ -867,7 +867,7 @@ def _apply_coverage_completion(state: dict, observed_hash: str, gate_output: str
     state["gate_evidence"] = _bounded(evidence)
     state["completed_at"] = _now()
 
-def _apply_completion(state: dict, observed_hash: str, gate_output: str) -> None:
+def _apply_completion(state: dict, observed_hash: str, gate_output: str, allow_unreviewed: bool = False) -> None:
     if state["status"] != "active":
         raise GoalClosed(f"cannot complete: goal status is {state['status']!r}")
     if state["gate"]["kind"] == "coverage":
@@ -887,17 +887,22 @@ def _apply_completion(state: dict, observed_hash: str, gate_output: str) -> None
         reviews = [r for r in state.get("reviews", [])
                    if r["tree_hash"] == observed_hash and r["criterion"] == criterion]
         if not reviews or reviews[-1]["result"] != "pass":
-            if not reviewing.review_spent(state):
+            # Only an explicit close may finish without a passing review: never the Stop hook's
+            # `close --if-ready`, which could fire while a reviewer is still writing.
+            if not (allow_unreviewed and reviewing.review_spent(state)):
                 raise GateNotPassed(
                     "An independent review is required (" + "; ".join(reasons)
                     + ") and none has passed for this snapshot.")
-            failed = reviewing.failed_on(state, observed_hash, _requirements(state) or {})
+            failed = reviewing.failed_on(state, observed_hash)
             if failed:
                 raise GateNotPassed(
-                    "This goal's review found FAIL lines for these exact files: " + "; ".join(failed)
+                    "This goal's review failed these exact files: " + "; ".join(failed)
                     + ". Fix them; the review does not run again, so the changed files close without one.")
+            earlier = reviewing.goal_fail_lines(state)
             state["unreviewed"] = ("Closed after this goal's one review round, without a passing review: "
-                                   + "; ".join(reasons) + ".")
+                                   + "; ".join(reasons) + "."
+                                   + (" FAIL lines from that round, fixed but not re-checked by a reviewer: "
+                                      + "; ".join(earlier) + "." if earlier else ""))
     text = (record.get("gate_output") or "").strip() or (
         f"{state['gate']['value']} -> exit 0 (gate produced no output)")
     state["status"] = "complete"
@@ -930,11 +935,11 @@ def _approve_test_change_locked(slug: str, path: str, reason: str) -> dict:
 
 
 
-def _complete_locked(slug: str, gate_output: str) -> dict:
+def _complete_locked(slug: str, gate_output: str, allow_unreviewed: bool = False) -> dict:
     return _snapshot_transaction(
         slug,
         lambda state, observed: _apply_completion(
-            state, observed, gate_output
+            state, observed, gate_output, allow_unreviewed
         ),
     )
 

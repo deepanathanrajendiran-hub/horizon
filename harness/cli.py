@@ -141,14 +141,18 @@ def examples_record(state: dict) -> Path:
     """Where a goal's last spec-example result is kept: beside its notes, which the checkpoint never hashes."""
     return goal.notes_path(state["slug"]).with_suffix(".examples.json")
 
-def _run_examples(state: dict, timeout: int = 120) -> dict | None:
+def _run_examples(state: dict, timeout: int = 60) -> dict | None:
     """Run the goal's advisory spec examples with the project's own interpreter, or None without them."""
     gate_path = state.get("gate_path")
     if not gate_path or not (Path(gate_path) / examples.FILE).is_file():
         return None
     python = examples.python_for(state["gate"]["value"] if state["gate"]["kind"] == "command" else None)
+    try:
+        key = tree_hash.compute(state["cwd"], state.get("watch_paths"))
+    except Exception:
+        key = None
     return examples.run(Path(gate_path), Path(state["cwd"]), python=python, timeout=timeout,
-                        record=examples_record(state))
+                        record=examples_record(state), key=key)
 
 
 def _with_examples(report: dict, state: dict) -> dict:
@@ -466,7 +470,11 @@ def _start_surface(args) -> None:
     if not args.gate_path or not args.package:
         raise ValueError("--surface-spec needs --gate-path and --package")
     surface.write_gate(args.surface_spec, args.package, Path(args.gate_path) / "test_surface.py")
-    args.spec_examples = examples.write_gate(args.surface_spec, args.package, Path(args.gate_path) / examples.FILE)
+    try:  # advisory: a failure here never stops the goal
+        args.spec_examples = examples.write_gate(args.surface_spec, args.package,
+                                                 Path(args.gate_path) / examples.FILE)
+    except Exception as exc:
+        args.spec_examples = {"error": f"{type(exc).__name__}: {exc}"}
 
 def main(argv=None) -> int:
     args = parser().parse_args(argv)

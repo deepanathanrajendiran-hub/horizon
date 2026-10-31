@@ -343,3 +343,29 @@ def test_the_interpreter_comes_from_the_gate_command(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", str(venv))
     assert examples.python_for("pytest gates -q") == str(venv / "python")
     assert examples.python_for("cd x && make test") == str(venv / "python")
+
+
+def test_top_level_await_with_an_output_comment_runs(tmp_path):
+    project = tmp_path / "proj"
+    (project / "pkg").mkdir(parents=True)
+    (project / "pkg" / "__init__.py").write_text("async def three():\n    return 3\n")
+    gates = project / "gates"
+    spec = tmp_path / "SPEC.md"
+    spec.write_text(_spec("""
+        from pkg import three
+        await three()  # Output: 3
+        print(await three())  # Output: 3
+    """))
+    examples.write_gate(spec, "pkg", gates / "spec_examples.py")
+    result = examples.run(gates, project, python=sys.executable)
+    assert (result["passed"], result["failed"]) == (1, []), result
+
+
+def test_a_run_on_unchanged_files_reuses_the_recorded_result(tmp_path):
+    project, gates = _project(tmp_path)
+    record = tmp_path / "notes" / "goal.examples.json"
+    first = examples.run(gates, project, python=sys.executable, record=record, key="tree-1")
+    again = examples.run(gates, project, python="/no/such/python", record=record, key="tree-1")
+    assert again == first
+    changed = examples.run(gates, project, python="/no/such/python", record=record, key="tree-2")
+    assert changed.get("error")

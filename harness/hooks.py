@@ -300,7 +300,7 @@ def _resume_line(state: dict) -> str:
     return out
 
 
-def _placeholders(root: Path, limit: int = 10, known: str = "") -> str:
+def _placeholders(root: Path, limit: int = 10, facts=()) -> str:
     """Source files whose functions only raise NotImplementedError (abstract methods aside) or that call
     themselves placeholders (NL2Repo bench6 deepdiff: a green gate over five placeholder modules).
 
@@ -322,7 +322,8 @@ def _placeholders(root: Path, limit: int = 10, known: str = "") -> str:
         if (any(p.startswith(".") or p in _NOT_SOURCE or p in ("tests", "test") for p in parts[:-1])
                 or parts[-1].startswith("test_") or parts[-1] == "conftest.py"):
             continue
-        if known and name in known:
+        if any("by design" in fact.lower() and re.search(r"(?<![\w/.-])" + re.escape(name) + r"(?![\w/.-])", fact)
+               for fact in facts):
             continue
         try:
             tree = ast.parse((root / name).read_text(errors="replace"))
@@ -334,7 +335,7 @@ def _placeholders(root: Path, limit: int = 10, known: str = "") -> str:
             node, prefix = stack.pop(0)
             if isinstance(node, ast.ClassDef):
                 bases = {getattr(b, "attr", None) or getattr(b, "id", None) for b in node.bases}
-                if node.name.startswith(("Abstract", "Base")) or bases & {"ABC", "Protocol"} or any(
+                if re.match(r"(?:Abstract|Base)(?:[A-Z_]|$)", node.name) or bases & {"ABC", "Protocol"} or any(
                         (getattr(k.value, "attr", None) or getattr(k.value, "id", None)) == "ABCMeta"
                         for k in node.keywords):
                     continue
@@ -450,28 +451,20 @@ def _notes_line(slug: str, limit: int = 3000) -> str:
         text = path.read_text(errors="replace").strip()
     except OSError:
         text = ""
-    body = text.split("\n", 1)[1].strip() if text.startswith("# Notes for") and "\n" in text else text
-    if body.startswith("What you learned from large inputs"):
-        body = body.split("\n\n", 1)[1].strip() if "\n\n" in body else ""
+    header = goal.NOTES_HEADER.format(slug=slug).rstrip("\n")
+    body = text[len(header):].strip() if text.startswith(header) else text
     if not body:
         return f" Notes: {path} (no parts yet)."
     cut = f"\n[cut at {limit} characters; the rest is in {path}]" if len(body) > limit else ""
     return f" Notes ({path}):\n{body[:limit]}{cut}\n"
 
-def _examples_line(state: dict, deadline: float | None) -> str:
-    """The goal's advisory spec examples: run now when this hook has time left, else the last run's result."""
+def _examples_line(state: dict) -> str:
+    """The latest result of the goal's advisory spec examples. The hook never runs them itself: spec code runs
+    only through the `examples`, `check` and `close` commands, which the agent's own tool calls start."""
     gate_path = state.get("gate_path")
     if not gate_path or not (Path(gate_path) / examples.FILE).is_file():
         return ""
-    left = int(deadline - time.monotonic()) if deadline is not None else 0
-    result = None
-    if left >= 5:
-        python = examples.python_for(state["gate"]["value"] if state["gate"]["kind"] == "command" else None)
-        result = examples.run(Path(gate_path), Path(state["cwd"]), python=python, timeout=left,
-                              record=goal.notes_path(state["slug"]).with_suffix(".examples.json"))
-    if result is None or result.get("error"):
-        result = examples.last(goal.notes_path(state["slug"]).with_suffix(".examples.json")) or result
-    line = examples.summary_line(result)
+    line = examples.summary_line(examples.last(goal.notes_path(state["slug"]).with_suffix(".examples.json")))
     return f" {line}" if line else ""
 
 
@@ -499,8 +492,8 @@ def _source_digest(root: Path) -> str | None:
     return digest.hexdigest()
 
 
-PLATEAU = ("Plateau: no library source changed in the last 2 sessions while this goal is open. This session, do "
-           "not run close or start a review: build. (1) Run `examples SLUG` if this goal has spec examples, and fix "
+PLATEAU = ("Plateau: no library source changed in the last 2 sessions while this goal is open. LEAD "
+           "(1) Run `examples SLUG` if this goal has spec examples, and fix "
            "each disagreement the spec's prose supports. (2) If the spec describes an existing library, its users "
            "and its own tests call its whole public API, not only the names the spec lists: write down the public "
            "functions, classes, methods, parameters, return types and exception classes you know the real project "
@@ -509,7 +502,8 @@ PLATEAU = ("Plateau: no library source changed in the last 2 sessions while this
 
 
 def _plateau_line(state: dict) -> str:
-    """Record this session's library fingerprint; two sessions in a row without a change raise the alarm."""
+    """Record this session's library fingerprint; two sessions in a row without a change raise the alarm. When
+    the gate passes on the current files the library may simply be done, so the alarm sends it to close first."""
     digest = _source_digest(paths.project_root())
     if digest is None:
         return ""
@@ -524,9 +518,16 @@ def _plateau_line(state: dict) -> str:
         path.write_text(json.dumps(marks))
     except OSError:
         pass
-    if len(marks) >= 3 and marks[-1] == marks[-2] == marks[-3]:
-        return " " + PLATEAU.replace("SLUG", state["slug"])
-    return ""
+    if not (len(marks) >= 3 and marks[-1] == marks[-2] == marks[-3]):
+        return ""
+    try:
+        current = tree_hash.compute(state["cwd"], state.get("watch_paths"))
+        passing = evidence.passing_record(goal.load(state["slug"]), current) is not None
+    except Exception:
+        passing = False
+    lead = ("The gate passes on these files: if every part of the request is built, run `close` now. "
+            "Otherwise, build this session." if passing else "Build this session; do not start a review.")
+    return " " + PLATEAU.replace("SLUG", state["slug"]).replace("LEAD", lead)
 
 
 def _paths_line() -> str:
@@ -586,11 +587,11 @@ def _session_start(session: str | None, source: str | None = None) -> dict | Non
             if ran and ran != "ran":
                 line += f" The gate on the current files {ran}; run `observe` for a result."
             try:
-                line += _examples_line(state, deadline if startup else None)
+                line += _examples_line(state)
             except Exception:
                 pass
             plateau = _plateau_line(state) if startup else ""
-            known.append(" ".join(f["text"] for f in state.get("facts") or []))
+            known += [f["text"] for f in state.get("facts") or []]
             lines.append(f"{line}{plateau}{note}{_notes_line(state['slug'])} Run `close {state['slug']}` "
                          "when you think it is done.")
         except Exception:
@@ -605,7 +606,7 @@ def _session_start(session: str | None, source: str | None = None) -> dict | Non
     files = _files_line(paths.project_root())
     if files:
         lines.append(files)
-    stubs = _placeholders(paths.project_root(), known=" ".join(known))
+    stubs = _placeholders(paths.project_root(), facts=known)
     if stubs:
         lines.append(stubs)
     return {"hookSpecificOutput": {"hookEventName": "SessionStart",

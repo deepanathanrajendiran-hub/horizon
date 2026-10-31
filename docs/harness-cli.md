@@ -630,18 +630,35 @@ How a result is decided:
 
 `examples SLUG` runs it with the gate command's own Python (else the first `python` on `PATH`). It prints a
 `summary` and the `result` (`passed`, `skipped`, and `failed` with each id and message). `check` and `close`
-add the same `spec_examples` line to their reports, and the session-start hook shows the latest result. The
-last result is kept beside the goal's notes, outside the watched files, so a run never changes the checkpoint.
+add the same `spec_examples` line to their reports, with at most 60 seconds per run. Each run is skipped when the
+watched files are unchanged since the last one. The session-start hook only shows the latest result: it never
+runs spec code itself, so spec code runs only through commands the agent starts. The last result is kept beside
+the goal's notes, outside the watched files, so a run never changes the checkpoint. A project pytest
+configuration that collects every `*.py` file would collect `spec_examples.py` into the gate; keep the default
+`test_*.py` pattern.
 
 `waive-example SLUG ID --reason "SPEC line N ..."` skips one example or signature whose spec is wrong. The
-reason must cite a spec line, and the waiver is recorded in `examples_waived.json`.
+reason must cite a spec line, and the waiver is recorded in `examples_waived.json`. That file is in the gate
+directory, so a waiver changes the checkpoint: run the gate again before `close`.
 
 ## One review round per goal
 
-A goal gets one review round, on any checkpoint (`HORIZON_REVIEW_ROUNDS_PER_GOAL` raises the limit). Once a round
-file exists, `close` completes on a passing gate without a passing review, and reports `unreviewed`: why a review
-was required. One case still blocks: a FAIL line that round wrote for exactly the current files. `close` names it
-until the files change. `check` and `close` then print `review_spent` instead of a brief.
+A goal gets one review round, on any checkpoint (`HORIZON_REVIEW_ROUNDS_PER_GOAL` raises the limit).
+
+**What counts as a round:** a round file named for one of the goal's own checkpoints that repeats its hash, and
+is finished. A file is finished when its reply ends in `END VERDICTS`, or when it decided a line and has been quiet
+for 15 minutes (a reviewer still running keeps writing).
+
+**After the round,** an explicit `close` completes on a passing gate without a passing review. It reports
+`unreviewed`: why a review was required, plus the FAIL lines the round found that were fixed but not re-checked.
+`check` and `close` then print `review_spent` instead of a brief.
+
+**Two cases still block:**
+- a recorded `review --result fail` on exactly the current files;
+- a FAIL line or FAIL headline that the round wrote for them.
+
+`close` names these until the files change. `close --if-ready` and the Stop hook never complete a goal without a
+passing review.
 
 A gate in a `--gate-path` directory is reported as "the agent's own, written during this goal". The project's own
 `tox.ini` or `conftest.py` changing is not a gate change.

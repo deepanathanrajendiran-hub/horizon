@@ -58,6 +58,7 @@ def project(tmp_path, monkeypatch):
         done = subprocess.run([sys.executable, ENTRY, "--runtime", "claude", "--project", str(p), *args],
                               cwd=p, capture_output=True, text=True, timeout=120, env=env)
         return done.returncode, (json.loads(done.stdout) if done.stdout.strip().startswith("{") else done.stderr)
+    cli.env = env
 
     def hook(event, payload):
         done = subprocess.run([sys.executable, ENTRY, "--runtime", "claude", "--project", str(p), "hook", event],
@@ -121,9 +122,11 @@ def test_waive_example_records_a_cited_reason_and_refuses_an_uncited_one(project
     assert out["summary"].startswith("Spec examples: 1 agree, 0 disagree")
 
 
-def test_session_start_shows_the_spec_examples(project):
+def test_session_start_shows_the_last_explicit_examples_run_and_never_runs_spec_code_itself(project):
     p, cli, start_message, *_ = project
     slug, gates, _ = _start_spec_goal(p, cli)
+    assert "Spec examples" not in start_message()
+    cli("examples", slug)
     assert "Spec examples: 1 agree, 1 disagree" in start_message()
 
 
@@ -136,7 +139,8 @@ def test_a_goal_needs_at_most_one_review_round_then_close_completes_and_lists_wh
     code, out = cli("close", slug)
     assert code == 1 and out["review_brief"], out
     # the reviewer is dispatched and cut off by the session's call cap after writing only its header
-    Path(out["review_file"]).write_text(f"Reviewed checkpoint: {out['observation']['tree_hash']}\n")
+    Path(out["review_file"]).write_text(f"Reviewed checkpoint: {out['observation']['tree_hash']}\n"
+                                        "VERDICTS\nR1: UNVERIFIED\nEND VERDICTS\n")
     code, out = cli("close", slug)
     assert code == 0 and out["complete"], out
     assert "one review round" in out["unreviewed"].lower()
@@ -148,7 +152,8 @@ def test_a_fail_the_one_reviewer_found_must_be_fixed_before_close(project):
     (p / "pkg" / "extra.py").write_text("X = 1\n")
     code, out = cli("close", slug)
     digest = out["observation"]["tree_hash"]
-    Path(out["review_file"]).write_text(f"Reviewed checkpoint: {digest}\nR1: FAIL - double(3) - got 5\n")
+    Path(out["review_file"]).write_text(f"Reviewed checkpoint: {digest}\nR1: FAIL - double(3) - got 5\n"
+                                        "VERDICTS\nR1: FAIL\nEND VERDICTS\n")
     code, out = cli("close", slug)
     assert code == 1 and "R1: FAIL" in " ".join(out["missing"]), out
     # the fix changes the files: the goal closes without a second review
@@ -195,7 +200,8 @@ def test_two_sessions_without_a_library_change_raise_the_plateau_alarm(project):
     assert "Plateau" not in first and "Plateau" not in second
     third = start_message()
     assert "Plateau: no library source changed in the last 2 sessions" in third
-    assert "do not run close" in third
+    # the gate (`true`) passes: a finished library is sent to close, not into more edits
+    assert "if every part of the request is built, run `close` now" in third
 
 
 def test_a_library_change_clears_the_plateau(project):
@@ -292,3 +298,132 @@ def held_out_rules_missing(text: str) -> list[str]:
 @pytest.mark.parametrize("folder", [".claude", ".agents"])
 def test_the_skill_carries_the_held_out_rules(folder):
     assert held_out_rules_missing((ROOT / folder / "skills/horizon/SKILL.md").read_text()) == []
+
+
+# --- review findings on the branch (fresh reviewer, 2026-10-31) ---------------------------------------
+
+def _round_reply(digest, *lines, end=True):
+    body = f"Reviewed checkpoint: {digest}\n" + "".join(line + "\n" for line in lines)
+    return body + ("VERDICTS\nR1: ?\nEND VERDICTS\n" if end else "")
+
+
+def _brief(p, cli):
+    slug, gates, _ = _start_spec_goal(p, cli)
+    (p / "pkg" / "extra.py").write_text("X = 1\n")
+    code, out = cli("close", slug)
+    assert out.get("review_file"), out
+    return slug, out["observation"]["tree_hash"], Path(out["review_file"])
+
+
+def test_a_recorded_fail_on_the_current_files_blocks_close(project):
+    p, cli, *_ = project
+    slug, digest, review_file = _brief(p, cli)
+    review_file.write_text(_round_reply(digest, "Verdict: FAIL", "The output is wrong."))
+    cli("review", slug, "--result", "fail", "--judge", "reviewer-1", "--hash", digest,
+        "--evidence-file", str(review_file))
+    code, out = cli("close", slug)
+    assert code == 1 and not out["complete"], out
+
+
+def test_a_fail_headline_in_the_round_file_blocks_close_without_rk_lines(project):
+    p, cli, *_ = project
+    slug, digest, review_file = _brief(p, cli)
+    review_file.write_text(_round_reply(digest, "Verdict: FAIL", "Broken."))
+    code, out = cli("close", slug)
+    assert code == 1 and not out["complete"], out
+
+
+def test_an_empty_file_with_a_round_name_does_not_spend_the_review(project):
+    p, cli, _, _, review_dir = project
+    slug, digest, review_file = _brief(p, cli)
+    (review_dir / f"horizon-review-{slug}-000000000000-1.md").write_text("")
+    code, out = cli("close", slug)
+    assert code == 1 and out.get("review_brief"), out
+
+
+def test_a_reviewer_still_writing_does_not_spend_the_round(project):
+    p, cli, *_ = project
+    slug, digest, review_file = _brief(p, cli)
+    review_file.write_text(_round_reply(digest, "R1: PASS - ran it - ok", end=False))
+    code, out = cli("close", slug)
+    assert code == 1 and not out["complete"], out
+
+
+def test_a_cut_off_round_counts_once_it_has_gone_quiet():
+    import reviewing
+    assert not reviewing.round_finished("Reviewed checkpoint: abc\nR1: PASS\n", age_s=60)
+    assert reviewing.round_finished("Reviewed checkpoint: abc\nR1: PASS\n", age_s=reviewing.ROUND_QUIET_S + 1)
+    assert reviewing.round_finished("Reviewed checkpoint: abc\nVERDICTS\nR1: PASS\nEND VERDICTS\n", age_s=1)
+    assert not reviewing.round_finished("", age_s=10 ** 6)
+
+
+def test_the_stop_hook_never_completes_a_goal_without_its_review(project):
+    p, cli, _, hook, _ = project
+    slug, digest, review_file = _brief(p, cli)
+    review_file.write_text(_round_reply(digest, "R1: UNVERIFIED - could not run"))
+    hook("Stop", {"session_id": "s"})
+    code, out = cli("status", slug)
+    assert out["status"] == "active", out
+    code, out = cli("close", slug)
+    assert out["complete"], out
+
+
+def test_unreviewed_keeps_the_fail_lines_of_an_earlier_checkpoint(project):
+    p, cli, *_ = project
+    slug, digest, review_file = _brief(p, cli)
+    review_file.write_text(_round_reply(digest, "R1: FAIL - double(3) - got 5"))
+    (p / "pkg" / "extra.py").write_text("X = 2\n")
+    code, out = cli("close", slug)
+    assert out["complete"], out
+    assert "R1: FAIL - double(3) - got 5" in out["unreviewed"]
+
+
+def test_more_review_rounds_can_be_allowed(project):
+    p, cli, *_ = project
+    cli.env["HORIZON_REVIEW_ROUNDS_PER_GOAL"] = "2"
+    slug, digest, review_file = _brief(p, cli)
+    review_file.write_text(_round_reply(digest, "R1: UNVERIFIED - could not run"))
+    code, out = cli("close", slug)
+    assert code == 1 and out.get("review_brief"), out
+
+
+def test_running_the_examples_leaves_the_checkpoint_unchanged(project):
+    p, cli, *_ = project
+    slug, gates, out = _start_spec_goal(p, cli)
+    before = out["observation"]["tree_hash"]
+    cli("examples", slug)
+    code, out = cli("observe", slug)
+    assert out["observation"]["tree_hash"] == before
+
+
+def test_the_plateau_says_build_when_the_gate_fails(project):
+    p, cli, start_message, *_ = project
+    cli("start", "Build pkg", "--gate", "false")
+    start_message()
+    start_message()
+    third = start_message()
+    assert "Plateau" in third and "run `close` now" not in third
+
+
+def test_a_fact_silences_a_placeholder_only_when_it_says_by_design_about_that_exact_file(project):
+    p, cli, start_message, *_ = project
+    (p / "pkg" / "a.py").write_text("def f():\n    raise NotImplementedError\n")
+    cli("start", "Build pkg", "--gate", "true")
+    cli("note", "build-pkg", "--fact", "pkg/a.py f() is still a stub, build it next")
+    assert "pkg/a.py (f)" in start_message()
+
+
+def test_classes_that_only_start_with_base_are_still_checked(project):
+    p, cli, start_message, *_ = project
+    (p / "pkg" / "codec.py").write_text("class Base64Codec:\n    def encode(self):\n        raise NotImplementedError\n")
+    cli("start", "Build pkg", "--gate", "true")
+    assert "pkg/codec.py (Base64Codec.encode)" in start_message()
+
+
+def test_notes_written_without_a_blank_line_after_the_header_are_kept(project):
+    p, cli, start_message, *_ = project
+    cli("start", "Build pkg", "--gate", "true")
+    import glob
+    path = Path(glob.glob(str(p / ".claude" / "**" / "notes" / "build-pkg.md"), recursive=True)[0])
+    path.write_text(path.read_text().rstrip("\n") + "\n## Map\nmodule X <- lines 1-9\n")
+    assert "module X <- lines 1-9" in start_message()

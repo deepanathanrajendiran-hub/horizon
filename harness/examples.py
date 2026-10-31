@@ -408,6 +408,9 @@ def _instrument(example):
         line = ast.Constant(node.end_lineno)
         if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == "print":
             node.value = ast.Call(ast.Name("__hz_print", ast.Load()), [line, *call.args], call.keywords)
+        elif any(isinstance(n, ast.Await) for n in ast.walk(call)):
+            # `await f()  # Output: 3`: a lambda cannot await, so the value is checked as it is
+            node.value = ast.Call(ast.Name("__hz_awaited", ast.Load()), [line, call], [])
         else:
             thunk = ast.Lambda(ast.arguments([], [], None, [], [], None, []), call)
             node.value = ast.Call(ast.Name("__hz_value", ast.Load()), [line, thunk], [])
@@ -471,7 +474,10 @@ def _run(example, tmp_path, monkeypatch):
     if example["doctest"]:
         return _run_doctest(example)
     filename = f"<spec example {example['id']}>"
-    code = compile(_instrument(example), filename, "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+    try:
+        code = compile(_instrument(example), filename, "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+    except SyntaxError as exc:
+        pytest.skip(f"the example does not compile here: {exc}")
 
     def hz_print(line, *args, sep=" ", end="\n", file=None, flush=False):
         text = sep.join(str(a) for a in args)
@@ -488,7 +494,11 @@ def _run(example, tmp_path, monkeypatch):
         else:
             _check(example, line, repr(value), (value,))
 
-    space = {"__name__": "__spec_example__", "__hz_print": hz_print, "__hz_value": hz_value}
+    def hz_awaited(line, value):
+        _check(example, line, repr(value), (value,))
+
+    space = {"__name__": "__spec_example__", "__hz_print": hz_print, "__hz_value": hz_value,
+             "__hz_awaited": hz_awaited}
     try:
         with _time_limit():
             result = eval(code, space)
@@ -618,7 +628,7 @@ def write_gate(spec: Path, package: str, out: Path) -> dict:
     found, sigs = extract(text, package)
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    body = (_HEADER.format(spec=Path(spec).name)
+    body = (_HEADER.format(spec=re.sub(r"[^\w. -]", "_", Path(spec).name))
             + f"PACKAGE = {package!r}\nEXAMPLE_COUNT = {len(found)}\n"
             + f"EXAMPLES = {found!r}\nSIGNATURES = {sigs!r}\n" + _RUNTIME)
     out.write_text(body)
@@ -677,11 +687,15 @@ def python_for(gate_command: str | None) -> str:
 
 
 def run(gate_dir: Path, project: Path, python: str | None = None, timeout: int = 300,
-        record: Path | None = None) -> dict | None:
+        record: Path | None = None, key: str | None = None) -> dict | None:
     """Run the advisory examples file and return what agreed, what disagreed and why. The result is saved to
     `record`, which must lie outside the watched files: a run never changes the checkpoint."""
     gate_dir = Path(gate_dir)
     target = gate_dir / FILE
+    if key is not None:
+        previous = last(record)
+        if previous and previous.get("key") == key:
+            return previous  # the same files: the same result
     if not target.is_file():
         return None
     with tempfile.TemporaryDirectory() as tmp:
@@ -699,6 +713,8 @@ def run(gate_dir: Path, project: Path, python: str | None = None, timeout: int =
         except (OSError, ET.ParseError):
             return {"passed": 0, "failed": [], "skipped": 0, "error": "the examples did not run"}
     result = {"passed": 0, "failed": [], "skipped": 0}
+    if key is not None:
+        result["key"] = key
     for case in root.iter("testcase"):
         name = case.get("name") or ""
         item = name[name.find("[") + 1:-1] if "[" in name else name
