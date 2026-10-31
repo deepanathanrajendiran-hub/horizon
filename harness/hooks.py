@@ -22,6 +22,7 @@ import steps
 import sys
 import tree_hash
 import re
+import examples
 
 MARK = "horizon-hook"
 _EVENTS = {"SessionStart": None, "PostToolUse": "*", "Stop": None}
@@ -222,13 +223,18 @@ def _gate_digest(output: str) -> str:
         ranked = sorted(groups.items(), key=lambda kv: -kv[1])  # stable: first seen first among equals
         more = f" and {len(ranked) - 10} more modules" if len(ranked) > 10 else ""
         parts.append("Missing names by module: " + ", ".join(f"{m} {n}" for m, n in ranked[:10]) + more + ".")
-    others = [i for i in ids if not i.startswith("test_spec_name_exists[")]
+    # The package's own code before the packaging and docs files the spec's tree lists (NL2Repo held-out
+    # flask-restful and tablib: nine packaging files were written before the package's __init__.py).
+    others = sorted((i for i in ids if not i.startswith("test_spec_name_exists[")),
+                    key=lambda i: i.startswith(("test_spec_file_exists[", "test_packaging_references")))
     summary = _SUMMARY.findall(output)
     tail = f" ({summary[-1]})." if summary else "."
     if others or not names:
         shown = others or ids
         more = f" and {len(shown) - 12} more" if len(shown) > 12 else ""
-        parts.append(f"Failing: {', '.join(shown[:12])}{more}{tail}")
+        files_last = (" (packaging and docs files last)" if any(i.startswith("test_spec_file_exists[") for i in shown)
+                      and not all(i.startswith("test_spec_file_exists[") for i in shown) else "")
+        parts.append(f"Failing{files_last}: {', '.join(shown[:12])}{more}{tail}")
     elif summary:
         parts.append(f"({summary[-1]}).")
     return ". " + " ".join(parts)
@@ -294,9 +300,13 @@ def _resume_line(state: dict) -> str:
     return out
 
 
-def _placeholders(root: Path, limit: int = 10) -> str:
+def _placeholders(root: Path, limit: int = 10, known: str = "") -> str:
     """Source files whose functions only raise NotImplementedError (abstract methods aside) or that call
-    themselves placeholders (NL2Repo bench6 deepdiff: a green gate over five placeholder modules)."""
+    themselves placeholders (NL2Repo bench6 deepdiff: a green gate over five placeholder modules).
+
+    Methods of abstract base classes (named Abstract*/Base*, or based on ABC/Protocol) are interfaces, not
+    placeholders, and a file named in a recorded fact is the agent's settled judgment (NL2Repo held-out:
+    DictDataBase and python-jose re-checked the same abstract stubs in 4-5 sessions each)."""
     import ast
     try:
         out = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
@@ -312,6 +322,8 @@ def _placeholders(root: Path, limit: int = 10) -> str:
         if (any(p.startswith(".") or p in _NOT_SOURCE or p in ("tests", "test") for p in parts[:-1])
                 or parts[-1].startswith("test_") or parts[-1] == "conftest.py"):
             continue
+        if known and name in known:
+            continue
         try:
             tree = ast.parse((root / name).read_text(errors="replace"))
         except (OSError, SyntaxError, ValueError):
@@ -321,6 +333,11 @@ def _placeholders(root: Path, limit: int = 10) -> str:
         while stack:
             node, prefix = stack.pop(0)
             if isinstance(node, ast.ClassDef):
+                bases = {getattr(b, "attr", None) or getattr(b, "id", None) for b in node.bases}
+                if node.name.startswith(("Abstract", "Base")) or bases & {"ABC", "Protocol"} or any(
+                        (getattr(k.value, "attr", None) or getattr(k.value, "id", None)) == "ABCMeta"
+                        for k in node.keywords):
+                    continue
                 stack += [(child, f"{prefix}{node.name}.") for child in node.body]
             elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 abstract = any((getattr(d, "attr", None) or getattr(d, "id", None)) == "abstractmethod"
@@ -423,12 +440,93 @@ def _fresh_gate(state: dict, deadline: float) -> str | None:
     return "ran"
 
 
-def _notes_line(slug: str) -> str:
+def _notes_line(slug: str, limit: int = 3000) -> str:
+    """The notes file and its text, so a session need not read it (NL2Repo held-out: a notes `cat` opened every
+    session). A long file is cut, and the message says where the rest is."""
     path = goal.notes_path(slug)
     if not path.exists():
         return ""
-    sections = goal.notes_sections(slug)
-    return f" Notes: {path}" + (f" (parts: {'; '.join(sections)})." if sections else " (no parts yet).")
+    try:
+        text = path.read_text(errors="replace").strip()
+    except OSError:
+        text = ""
+    body = text.split("\n", 1)[1].strip() if text.startswith("# Notes for") and "\n" in text else text
+    if body.startswith("What you learned from large inputs"):
+        body = body.split("\n\n", 1)[1].strip() if "\n\n" in body else ""
+    if not body:
+        return f" Notes: {path} (no parts yet)."
+    cut = f"\n[cut at {limit} characters; the rest is in {path}]" if len(body) > limit else ""
+    return f" Notes ({path}):\n{body[:limit]}{cut}\n"
+
+def _examples_line(state: dict, deadline: float | None) -> str:
+    """The goal's advisory spec examples: run now when this hook has time left, else the last run's result."""
+    gate_path = state.get("gate_path")
+    if not gate_path or not (Path(gate_path) / examples.FILE).is_file():
+        return ""
+    left = int(deadline - time.monotonic()) if deadline is not None else 0
+    result = None
+    if left >= 5:
+        python = examples.python_for(state["gate"]["value"] if state["gate"]["kind"] == "command" else None)
+        result = examples.run(Path(gate_path), Path(state["cwd"]), python=python, timeout=left,
+                              record=goal.notes_path(state["slug"]).with_suffix(".examples.json"))
+    if result is None or result.get("error"):
+        result = examples.last(goal.notes_path(state["slug"]).with_suffix(".examples.json")) or result
+    line = examples.summary_line(result)
+    return f" {line}" if line else ""
+
+
+def _source_digest(root: Path) -> str | None:
+    """A fingerprint of the project's library source: .py files outside tests, hidden and build folders."""
+    import hashlib
+    try:
+        out = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+                             capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode:
+        return None
+    digest = hashlib.sha256()
+    for name in sorted(set(n for n in out.stdout.decode(errors="replace").split("\0") if n.endswith(".py"))):
+        parts = name.split("/")
+        if (any(p.startswith(".") or p in _NOT_SOURCE or p in ("tests", "test") for p in parts[:-1])
+                or parts[-1].startswith("test_") or parts[-1] == "conftest.py"):
+            continue
+        try:
+            data = (root / name).read_bytes()
+        except OSError:
+            continue
+        digest.update(name.encode() + b"\0" + data + b"\0")
+    return digest.hexdigest()
+
+
+PLATEAU = ("Plateau: no library source changed in the last 2 sessions while this goal is open. This session, do "
+           "not run close or start a review: build. (1) Run `examples SLUG` if this goal has spec examples, and fix "
+           "each disagreement the spec's prose supports. (2) If the spec describes an existing library, its users "
+           "and its own tests call its whole public API, not only the names the spec lists: write down the public "
+           "functions, classes, methods, parameters, return types and exception classes you know the real project "
+           "has, and build what is missing or different. (3) Re-read a part of the spec you have not read in the "
+           "last three sessions and compare it with the code.")
+
+
+def _plateau_line(state: dict) -> str:
+    """Record this session's library fingerprint; two sessions in a row without a change raise the alarm."""
+    digest = _source_digest(paths.project_root())
+    if digest is None:
+        return ""
+    path = goal.notes_path(state["slug"]).with_suffix(".sessions.json")  # bookkeeping: never hashed
+    try:
+        marks = json.loads(path.read_text())
+    except (OSError, ValueError):
+        marks = []
+    marks = (marks + [digest])[-10:]
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(marks))
+    except OSError:
+        pass
+    if len(marks) >= 3 and marks[-1] == marks[-2] == marks[-3]:
+        return " " + PLATEAU.replace("SLUG", state["slug"])
+    return ""
 
 
 def _paths_line() -> str:
@@ -464,6 +562,7 @@ def _session_start(session: str | None, source: str | None = None) -> dict | Non
     # Gates run only when a session really starts: not on resume, clear or compaction.
     startup = source in (None, "startup")
     deadline = time.monotonic() + _gate_budget()
+    known = []
     for state in _active_goals():
         try:
             note = ""
@@ -486,7 +585,13 @@ def _session_start(session: str | None, source: str | None = None) -> dict | Non
             line = _goal_line(goal.load(state["slug"]), fresh=ran == "ran")
             if ran and ran != "ran":
                 line += f" The gate on the current files {ran}; run `observe` for a result."
-            lines.append(f"{line}{note}{_notes_line(state['slug'])} Run `close {state['slug']}` "
+            try:
+                line += _examples_line(state, deadline if startup else None)
+            except Exception:
+                pass
+            plateau = _plateau_line(state) if startup else ""
+            known.append(" ".join(f["text"] for f in state.get("facts") or []))
+            lines.append(f"{line}{plateau}{note}{_notes_line(state['slug'])} Run `close {state['slug']}` "
                          "when you think it is done.")
         except Exception:
             continue
@@ -500,7 +605,7 @@ def _session_start(session: str | None, source: str | None = None) -> dict | Non
     files = _files_line(paths.project_root())
     if files:
         lines.append(files)
-    stubs = _placeholders(paths.project_root())
+    stubs = _placeholders(paths.project_root(), known=" ".join(known))
     if stubs:
         lines.append(stubs)
     return {"hookSpecificOutput": {"hookEventName": "SessionStart",
@@ -550,7 +655,8 @@ def _stop(again: bool = False) -> dict | None:
                        "length is not the goal's deadline, and your work is committed whenever the session is "
                        "cut off, so keep building: do the next action now and keep `note --next` current. "
                        "Stop only if the goal is done (run `close`), or someone is here and you need them; "
-                       "then stop again.")}
+                       "then stop again. In an unattended run no one will answer a question: if you need a "
+                       "decision, make it, record it with `note --fact`, and keep building.")}
 
 
 def run(event: str, payload: dict) -> dict | None:

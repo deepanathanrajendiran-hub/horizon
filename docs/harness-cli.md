@@ -237,7 +237,9 @@ bears on whether it holds. Test a line tagged [unverifiable] if you can; if you
 cannot, its verdict is NOT REVIEWED. If a symptom the request reports still
 reproduces, that requirement FAILS even when a comment, docstring or design
 note justifies the behaviour. Do not repeat earlier reviewers' lines. List
-anything else under `Non-blocking:`. Keep the review under ten minutes.
+anything else under `Non-blocking:`. Keep the review under ten minutes and
+within about six tool calls: test the riskiest lines first, and append each
+verdict to the file as soon as you decide it.
 
 End your reply with this block. Change each `?` to exactly one of PASS, FAIL,
 UNVERIFIED or NOT REVIEWED, and write nothing else on those lines:

@@ -26,8 +26,10 @@ def client(tmp_path, request):
     # Review files live in the temporary directory; a shared one would carry rounds between tests.
     temp = tmp_path / "temp"
     temp.mkdir()
+    # These tests cover the multi-round review (carried lines, batches, the pause); the default of one round
+    # per goal is covered in test_heldout_fixes.py.
     env = dict(os.environ, HOME=str(home), CODEX_HOME=str(home / ".codex"),
-               PYTHONDONTWRITEBYTECODE="1", TMPDIR=str(temp))
+               PYTHONDONTWRITEBYTECODE="1", TMPDIR=str(temp), HORIZON_REVIEW_ROUNDS_PER_GOAL="99")
 
     def run(*args, cwd=None):
         result = subprocess.run(

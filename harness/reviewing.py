@@ -246,7 +246,9 @@ bears on whether it holds. Test a line tagged [unverifiable] if you can; if you
 cannot, its verdict is NOT REVIEWED. If a symptom the request reports still
 reproduces, that requirement FAILS even when a comment, docstring or design
 note justifies the behaviour. Do not repeat earlier reviewers' lines. List
-anything else under `Non-blocking:`. Keep the review under ten minutes.
+anything else under `Non-blocking:`. Keep the review under ten minutes and
+within about six tool calls: test the riskiest lines first, and append each
+verdict to the file as soon as you decide it.
 
 End your reply with this block. Change each `?` to exactly one of PASS, FAIL,
 UNVERIFIED or NOT REVIEWED, and write nothing else on those lines:
@@ -392,6 +394,57 @@ REVIEW_BATCH = 8
 # After this many rounds on unchanged files, Horizon stops briefing reviewers and sends the agent back
 # to building (NL2Repo benchmark: nine rounds on one checkpoint, no code change for eight sessions).
 REVIEW_ROUNDS_PER_CHECKPOINT = 4
+
+# One review round per goal, on any checkpoint. After it, `close` completes on a passing gate without
+# another round, listing what went unreviewed (NL2Repo held-out: in 7 of 12 losses, close/review rounds that a
+# 15-call session never finished took 3-8 sessions in which the library did not change).
+REVIEW_ROUNDS_PER_GOAL = 1
+
+
+def rounds_per_goal() -> int:
+    """REVIEW_ROUNDS_PER_GOAL, or HORIZON_REVIEW_ROUNDS_PER_GOAL when set (a large value restores the
+    multi-round review: carried lines, smaller batches, the pause after REVIEW_ROUNDS_PER_CHECKPOINT)."""
+    try:
+        return max(1, int(os.environ["HORIZON_REVIEW_ROUNDS_PER_GOAL"]))
+    except (KeyError, ValueError):
+        return REVIEW_ROUNDS_PER_GOAL
+
+
+def review_dir(watch_paths=()) -> str:
+    """The directory round files are written to."""
+    return os.path.dirname(review_file("goal", "0" * 64, 1, watch_paths))
+
+
+def goal_round_files(slug: str, directory: str, since: float = 0.0) -> list[str]:
+    """Every round file of this goal, on any checkpoint, written since the goal started."""
+    name = re.compile(re.escape(f"horizon-review-{slug}-") + r"[0-9a-f]{%d}-\d+\.md" % HASH_ECHO)
+    try:
+        entries = os.listdir(directory)
+    except OSError:
+        return []
+    paths = [os.path.join(directory, e) for e in sorted(entries) if name.fullmatch(e)]
+    return [p for p in paths if _mtime(p) >= since]
+
+
+def _started(state: dict) -> float:
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(state["used"]["started"]).timestamp()
+    except (KeyError, TypeError, ValueError):
+        return 0.0
+
+
+def review_spent(state: dict) -> bool:
+    """Whether this goal has had its review round."""
+    directory = review_dir(state.get("watch_paths") or [state["cwd"]])
+    return len(goal_round_files(state["slug"], directory, _started(state))) >= rounds_per_goal()
+
+
+def failed_on(state: dict, digest: str, requirements: dict) -> list[str]:
+    """FAIL lines a round wrote for exactly these files."""
+    directory = review_dir(state.get("watch_paths") or [state["cwd"]])
+    unused = os.path.join(directory, f"horizon-review-{state['slug']}-none.md")
+    return failed_in_rounds(state["slug"], digest, requirements, unused, _started(state))
 
 
 def decided_counts(slug: str, review_file: str, since: float = 0.0) -> list[int]:

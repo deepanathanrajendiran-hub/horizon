@@ -20,6 +20,7 @@ import evidence
 import hooks
 from datetime import datetime
 import surface
+import examples
 
 
 def parser() -> argparse.ArgumentParser:
@@ -48,6 +49,14 @@ def parser() -> argparse.ArgumentParser:
     surface_cmd.add_argument("--spec", type=Path, required=True)
     surface_cmd.add_argument("--package", required=True, help="Top-level import name, such as jwt")
     surface_cmd.add_argument("--out", type=Path, required=True, help="Test file to write, usually $GATES/test_surface.py")
+    examples_cmd = commands.add_parser("examples", help="Run the spec's own examples (advisory) and list where the "
+                                       "library disagrees")
+    examples_cmd.add_argument("slug")
+    examples_cmd.add_argument("--timeout", type=int, default=300)
+    waive = commands.add_parser("waive-example", help="Skip one spec example that is wrong in the spec itself")
+    waive.add_argument("slug")
+    waive.add_argument("item")
+    waive.add_argument("--reason", required=True, help="Cite the spec line that makes the example wrong")
     check = commands.add_parser("check", help="Run verification and checkpoint one completed increment")
     check.add_argument("slug")
     check.add_argument("--did", required=True)
@@ -128,6 +137,30 @@ def parser() -> argparse.ArgumentParser:
 def status(state: dict) -> dict:
     return goal.summary(state)
 
+def examples_record(state: dict) -> Path:
+    """Where a goal's last spec-example result is kept: beside its notes, which the checkpoint never hashes."""
+    return goal.notes_path(state["slug"]).with_suffix(".examples.json")
+
+def _run_examples(state: dict, timeout: int = 120) -> dict | None:
+    """Run the goal's advisory spec examples with the project's own interpreter, or None without them."""
+    gate_path = state.get("gate_path")
+    if not gate_path or not (Path(gate_path) / examples.FILE).is_file():
+        return None
+    python = examples.python_for(state["gate"]["value"] if state["gate"]["kind"] == "command" else None)
+    return examples.run(Path(gate_path), Path(state["cwd"]), python=python, timeout=timeout,
+                        record=examples_record(state))
+
+
+def _with_examples(report: dict, state: dict) -> dict:
+    """Add the spec-example summary to a check or close report. Advisory: never changes the outcome."""
+    try:
+        line = examples.summary_line(_run_examples(state))
+    except Exception:
+        line = ""
+    if line:
+        report["spec_examples"] = line
+    return report
+
 
 def goal_rows(exclude: str | None = None) -> list[dict]:
     directory = paths.harness_root() / "goals"
@@ -174,6 +207,10 @@ def _review_handoff(report: dict, state: dict, digest: str) -> None:
             "A reviewer of these files found FAIL lines: " + "; ".join(report["review_failed_lines"])
             + ". Record each file in review_failed_files with `review --result fail` (as the evidence file), "
             "then fix those lines and run check.")
+        return
+    if reviewing.review_spent(state):
+        report["review_spent"] = ("This goal has had its review round; close completes on a passing gate without "
+                                  "another, listing what went unreviewed.")
         return
     # Lines an earlier reviewer of this same checkpoint passed before it was cut off.
     carried, carried_from = reviewing.carried(state["slug"], digest, requirements, review_file)
@@ -237,6 +274,7 @@ def check(args) -> tuple[dict, int]:
         _review_handoff(report, state, digest)
     if error:
         report["error"] = error
+    _with_examples(report, state)
     return report, (2 if error else 0 if result == "pass" else 1)
 
 def _step_error(args, error: Exception) -> dict:
@@ -356,7 +394,19 @@ def dispatch(args) -> tuple[dict, int]:
         report["observation"] = goal.latest_observation(state)
         report["other_goals"] = goal_rows(exclude=state["slug"])
         report.update(installed)
+        if getattr(args, "spec_examples", None) is not None:
+            report["spec_examples"] = args.spec_examples
         return report, 0
+    if args.action == "examples":
+        result = _run_examples(goal.load(args.slug), timeout=args.timeout)
+        if result is None:
+            raise ValueError("This goal has no spec examples: start it with --surface-spec and --gate-path")
+        return {"summary": examples.summary_line(result) or "Spec examples: none ran.", "result": result}, 0
+    if args.action == "waive-example":
+        state = goal.load(args.slug)
+        if not state.get("gate_path"):
+            raise ValueError("This goal has no gate directory, so no spec examples")
+        return {"waived": examples.waive(Path(state["gate_path"]), args.item, args.reason)}, 0
     if args.action == "install-hooks":
         changed = hooks.install(paths.project_root(), args.entrypoint)
         hooks.set_opted_out(False)
@@ -395,6 +445,7 @@ def dispatch(args) -> tuple[dict, int]:
                 digest, needs_review = None, False
             if needs_review and evidence.passing_record(state, digest):
                 _review_handoff(result, state, digest)
+            _with_examples(result, state)
         return result, 0 if result["complete"] else 1
     if args.action == "approve-test-change":
         return status(goal.approve_test_change(args.slug, args.path, args.reason)), 0
@@ -415,6 +466,7 @@ def _start_surface(args) -> None:
     if not args.gate_path or not args.package:
         raise ValueError("--surface-spec needs --gate-path and --package")
     surface.write_gate(args.surface_spec, args.package, Path(args.gate_path) / "test_surface.py")
+    args.spec_examples = examples.write_gate(args.surface_spec, args.package, Path(args.gate_path) / examples.FILE)
 
 def main(argv=None) -> int:
     args = parser().parse_args(argv)

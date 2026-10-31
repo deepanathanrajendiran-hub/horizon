@@ -699,6 +699,8 @@ def close(slug: str, *, run_gate: bool = True, timeout: int = gate.DEFAULT_TIMEO
         done = complete(slug, "")
         result = {"complete": True, "missing": [], "summary": summary(done), "finalized": None,
                   "observation": latest_observation(done)}
+        if done.get("unreviewed"):
+            result["unreviewed"] = done["unreviewed"]
         if unchanged:
             result["unchanged_since_baseline"] = True
         return result
@@ -885,9 +887,17 @@ def _apply_completion(state: dict, observed_hash: str, gate_output: str) -> None
         reviews = [r for r in state.get("reviews", [])
                    if r["tree_hash"] == observed_hash and r["criterion"] == criterion]
         if not reviews or reviews[-1]["result"] != "pass":
-            raise GateNotPassed(
-                "An independent review is required (" + "; ".join(reasons)
-                + ") and none has passed for this snapshot.")
+            if not reviewing.review_spent(state):
+                raise GateNotPassed(
+                    "An independent review is required (" + "; ".join(reasons)
+                    + ") and none has passed for this snapshot.")
+            failed = reviewing.failed_on(state, observed_hash, _requirements(state) or {})
+            if failed:
+                raise GateNotPassed(
+                    "This goal's review found FAIL lines for these exact files: " + "; ".join(failed)
+                    + ". Fix them; the review does not run again, so the changed files close without one.")
+            state["unreviewed"] = ("Closed after this goal's one review round, without a passing review: "
+                                   + "; ".join(reasons) + ".")
     text = (record.get("gate_output") or "").strip() or (
         f"{state['gate']['value']} -> exit 0 (gate produced no output)")
     state["status"] = "complete"

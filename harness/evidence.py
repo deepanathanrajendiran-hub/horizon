@@ -171,7 +171,10 @@ def review_reasons(state: dict, requirements: dict | None) -> list[str]:
     reasons = []
     if not gate_is_strong(state):
         gate_files = changed_gate_files(state)
-        if gate_files:
+        if state.get("gate_path"):
+            # The project's own tox.ini or conftest.py is not the gate (NL2Repo held-out funcy, fsutil, jose).
+            reasons.append("the gate is not strong: it is the agent's own, written during this goal")
+        elif gate_files:
             reasons.append("the gate is not strong: its own scripts or configuration changed "
                            "during this goal: " + ", ".join(gate_files))
         else:
