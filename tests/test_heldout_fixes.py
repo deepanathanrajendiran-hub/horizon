@@ -199,10 +199,10 @@ def test_two_sessions_without_a_library_change_raise_the_plateau_alarm(project):
     second = start_message()
     assert "Plateau" not in first and "Plateau" not in second
     third = start_message()
-    assert "Plateau: no library source changed in the last 2 sessions" in third
+    assert "Plateau: no source file changed in the last 2 sessions" in third
     # the gate (`true`) passes: a finished library is sent to close, not into more edits
     assert "if every part of the request is built, run `close` now" in third
-    assert "Recall the real library" in third
+    assert "Run the work the way a user would" in third
 
 
 def test_a_library_change_clears_the_plateau(project):
@@ -282,12 +282,9 @@ HELDOUT_RULES = (
     "never in a session's last calls",
     "/spec_examples.py`: the spec's own runnable",
     "`waive-example SLUG ID --reason",
-    "the package `__init__.py` and the modules first",
-    "Where the spec is silent or only illustrative, do what the real library does",
-    "add the public API you know the real project has",
+    "Where the request is silent or only illustrative, follow the conventions of the project and its language",
     "carries a `# judgment`",
-    "tag `[review]` only a line a reviewer can judge by running the code",
-    "When the session-start message says `Plateau`",
+    "tag `[review]` only a line a reviewer can judge by running the work",
 )
 
 
@@ -301,6 +298,10 @@ def test_the_skill_carries_the_held_out_rules(folder):
     skill = ROOT / folder / "skills/horizon"
     full = (skill / "SKILL.md").read_text() + "\n" + (skill / "references/guide.md").read_text()
     assert held_out_rules_missing(full) == []
+    if folder == ".claude":
+        assert "When the session-start message says `Plateau`" in " ".join(full.split())
+    else:
+        assert "When two sessions in a row changed no source file" in " ".join(full.split())
 
 
 # --- review findings on the branch (fresh reviewer, 2026-10-31) ---------------------------------------
@@ -438,14 +439,13 @@ def test_notes_written_without_a_blank_line_after_the_header_are_kept(project):
 
 SLIM_RULES = (
     "[the full guide](references/guide.md)",
-    "Copy this block and fill in the placeholders; nothing else is needed for setup",
+    "## Starting a goal",
     "**Run what you wrote, in the same session.**",
-    "**Recall the real library.**",
-    "The spec's silence about a name or a behaviour is not a reason to leave it out",
-    "follow the real library and record the choice with `note --fact`",
+    "**Build before you verify.**",
+    "**Grow the gate with the work.**",
     "Never assert your own guess in the gate",
-    "`waive-example SLUG ID --reason",
-    "**Docs, translations, styles and CI files come last,**",
+    "Take expected values from the request and its inputs, never from your own code",
+    "fix the code, not the caller",
     "A goal gets one review round",
     "never in a session's last calls",
     "Never approve a changed test on your own judgment",
@@ -464,3 +464,42 @@ def test_the_slim_skill_holds_the_core_rules_and_stays_small(folder):
     text = (ROOT / folder / "skills/horizon/SKILL.md").read_text()
     assert slim_missing(text) == []
     assert len(text.splitlines()) <= 160 and len(text.split()) <= 1600
+
+# --- the skill is task-neutral (2026-10-31) -------------------------------------------------------------
+# The rules tuned on NL2Repo (recall the real library over the spec, package first, docs last, the spec-build
+# setup) fit a benchmark that rebuilds existing libraries and grades them with their own tests. For a real user
+# they would override the user's own spec, so they are gone; the spec tools remain as optional CLI features.
+
+FITTED = ("real library", "Real library", "real project", "spec's silence", "Docs, translations",
+          "Breadth first", "package `__init__.py`", "namespace package", "pkg-build", "SPEC.md lines",
+          "Make the package exist first", "Starting a build from a spec", "### Building from a spec",
+          "library source", "unbuilt part of the library", "fix the library")
+
+
+@pytest.mark.parametrize("folder", [".claude", ".agents"])
+def test_the_skill_is_task_neutral(folder):
+    skill = ROOT / folder / "skills/horizon"
+    full = (skill / "SKILL.md").read_text() + "\n" + (skill / "references/guide.md").read_text()
+    flat = " ".join(full.split())
+    assert [phrase for phrase in FITTED if phrase in flat] == []
+    core = " ".join((skill / "SKILL.md").read_text().split())
+    for phrase in ("## Starting a goal", "--gate-path", "[unverifiable]", "# Still passes:",
+                   "Take expected values from the request", "baseline `observation`"):
+        assert phrase in core, phrase
+
+
+def test_the_plateau_message_is_task_neutral():
+    import hooks
+    assert [phrase for phrase in FITTED if phrase in hooks.PLATEAU] == []
+    assert "spec" not in hooks.PLATEAU.lower()
+
+def test_a_non_python_source_change_clears_the_plateau(project):
+    # Task-neutral: a goal on a TypeScript app or a config change makes progress without touching a .py file.
+    p, cli, start_message, *_ = project
+    cli("start", "Build the app", "--gate", "true")
+    start_message()
+    start_message()
+    (p / "src").mkdir()
+    (p / "src" / "app.ts").write_text("export const run = () => 1;\n")
+    third = start_message()
+    assert "Plateau" not in third

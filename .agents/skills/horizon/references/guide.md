@@ -43,7 +43,7 @@ file once and go on to the next unbuilt part; it also lists the files changed
 since the next action was recorded and the placeholders still to build.
 
 ```bash
-python3 "$HARNESS" --runtime codex --project "$PROJECT" note "$SLUG" --next "Write pkg/testing.py from SPEC.md lines 1599-1741"
+python3 "$HARNESS" --runtime codex --project "$PROJECT" note "$SLUG" --next "Make parse_date in src/dates.py accept the ISO forms R3 lists"
 ```
 
 ## Large inputs
@@ -51,8 +51,8 @@ python3 "$HARNESS" --runtime codex --project "$PROJECT" note "$SLUG" --next "Wri
 Read a large input in parts of up to about 250 lines per command, since longer
 output is cut. Never `cat`
 it (the output is cut to a short preview), and never read it in small slices:
-a small read costs a call, as a large one does. Read a spec whole, once, in the
-first session, before you write code. The goal's notes file (`notes_file` in
+a small read costs a call, as a large one does. Read a large input whole,
+once, before you write code that depends on it. The goal's notes file (`notes_file` in
 `start` and `status SLUG`) keeps only what saves a re-read: for each part of the
 input, a `## ` heading with its line range and the file it maps to, and the
 signatures and rules you will need again. Never record in notes what is or is
@@ -103,17 +103,16 @@ create it. Let `GATES` be the `gates` path `doctor` printed, plus `/NAME`, where
 is a short label for this request that no directory there already uses.
 
 1. Save the request verbatim to `$GATES/request.md`. Read the inputs it names, the
-   code it concerns, and that code's existing tests and callers. For a build from a large spec, read its first part now, which holds its outline
-   and module list, and the rest right after `start` (see "Building from a spec"
-   below).
+   code it concerns, and that code's existing tests and callers. For a large input,
+   read its outline now and the rest right after `start`.
 2. Write `$GATES/requirements.md` with one numbered line (R1, R2, ...) for each
    requirement, reported symptom, deliverable and constraint in the request, quoted
    in the request's words. Keep qualifiers such as "exact", "all" and "unchanged",
    and keep stated limits. When the request names a class ("all X", "every Y"),
-   list each member; for a build from a large spec, one line per module or
+   list each member; for a long input, one line per
    section is enough at first. Tag each line `[gate]`, `[review]` or `[unverifiable]`;
-   tag `[review]` only a line a reviewer can judge by running the code, and tag
-   packaging, docs, CI, examples and lines that state no checkable behaviour
+   tag `[review]` only a line a reviewer can judge by running the work, and tag lines
+   that state no checkable behaviour
    ("the functions cooperate") `[unverifiable]`. If a
    line admits more than one reasonable reading, also tag it `[judgment]` and
    record the reading you chose. This file states what was asked: leave out your
@@ -121,9 +120,8 @@ is a short label for this request that no directory there already uses.
    can and answers the rest `NOT REVIEWED`; the final report lists those lines
    first.
 3. Write the gate in `$GATES` as checks of the `[gate]` lines, each check naming its
-   line (a large build may start with a small gate; see below the `start` example; for
-   a build from a spec, the first gate is the surface gate alone, as "Building from a
-   spec" says). Exercise the entry points the request names, called the way existing
+   line (a large build may start with a
+   small gate and grow it with the work, as "Building" below says). Exercise the entry points the request names, called the way existing
    callers and tests call them. If your change will add an interface or change a
    consumer, also check the old interface's observable behaviour. When the request
    says existing behaviour must stay the same, capture the current outputs now and
@@ -153,88 +151,6 @@ python3 "$HARNESS" --runtime codex --project "$PROJECT" start "Requested outcome
    behaviour). Carried checks must pass; report a carried check that fails here
    as a pre-existing regression.
 
-### Building from a spec
-
-For a build from a spec, such as a library or an application described in a
-document, the first session goes: right after the first part of the spec, which
-holds its outline and module list, set the goal up in one Bash call, so that a session
-cut off early still leaves a goal; then read the rest of the spec in large parts,
-and write the modules. Copy this block and fill in the placeholders; nothing else
-is needed for setup. `GATES_ROOT` is the `gates` path `doctor` printed, `pkg` is the package's import
-name, and `PY` is the Python that has pytest.
-
-```bash
-GATES="$GATES_ROOT/pkg-build"; mkdir -p "$GATES"
-cat > "$GATES/request.md" <<'EOF'
-<the request, verbatim>
-EOF
-cat > "$GATES/requirements.md" <<'EOF'
-R1 [gate] "<the first module or section the spec lists, in its words>"
-R2 [review] "<the next one>"
-EOF
-python3 "$HARNESS" --runtime codex --project "$PROJECT" start "Build pkg as SPEC.md describes" \
-  --gate-path "$GATES" --surface-spec "$PROJECT/SPEC.md" --package pkg \
-  --gate "$PY -m pytest -q -p no:cacheprovider $GATES" \
-  --review "Every line of $GATES/requirements.md holds, judged against $GATES/request.md"
-```
-
-`--surface-spec` writes `$GATES/test_surface.py` before the baseline: one test per
-public name the spec gives (`pkg.mod.Name`, `from pkg.mod import Name`), failing
-when a package directory lacks its `__init__.py`, because a directory without one
-still imports, as a namespace package. The surface gate is the whole first gate:
-write no other checks before the first modules exist. Delete a name from it only
-when the spec says it must not exist, or when it is a file name, a URL or a local
-variable in an example.
-
-`--surface-spec` also writes `$GATES/spec_examples.py`: the spec's own runnable
-examples (a printed `# Output:`, an `assert`, an expected exception) and the
-signatures it lists. It is advisory, not part of the gate, because specs are
-often wrong. `examples SLUG` runs it, and the session-start message shows its
-last result. For each disagreement, read the spec's prose and recall the real
-library: fix the library when they agree with the example; otherwise run
-`waive-example SLUG ID --reason "SPEC line N ..."`.
-
-Breadth first. In the first session, make the whole package exist: every
-module the spec's directory tree lists, each with its classes and functions
-(complete where the spec allows, the simplest real code otherwise), the package
-`__init__.py` re-exporting the names the spec lists, the spec's main entry
-point (what its first usage example calls) and the packaging files the tree
-lists, with every file they name, such as the README. Write them in that order:
-the package `__init__.py` and the modules first, so the package imports after
-the first few writes, then the entry point, then packaging and docs files. A test suite loses every
-test in a file whose imports fail, so a missing module costs more than a thin
-one. Write straight into the real files, never into scratch parts to join later:
-a session can end at any call, and parts not yet joined are lost. A long module
-goes in as several appends to the module itself. Keep the package importable
-after every write: define a name in the same edit that exports it, and never
-import a module that does not exist yet. Then
-deepen the least-built part first: the next action is the largest part of the
-spec still unbuilt or a placeholder, not the next section in spec order, and no
-module gets more than about a session while others are placeholders. When a
-probe, example or caller fails on a name or behaviour the spec gives, add it to
-the library; never rewrite the probe around it.
-
-Build before you verify. While any part of the spec is unbuilt or a
-placeholder, the next action is building it, not new checks or a review. Grow
-the gate with the code: add checks with the code, from the spec's own examples,
-for the part you just wrote, and the spec's own examples for parts already
-built. A check that passes the first time it runs is not progress. A check from
-a spec example asserts the example's literal output: when your code disagrees
-with it, change the code, not the check. Specs are sometimes wrong: drop such a
-check only when the spec's prose and the real library both contradict the
-example, and record why with `note --fact`, citing the spec lines. When the
-session-start message says `Plateau`, do what it says in that session.
-
-Where the spec is silent or only illustrative, do what the real library does
-(for a new library, what standard Python does): return `datetime` objects for
-dates, raise built-in exception classes or subclasses of them, and keep the real
-project's public names, parameter names and order, and module layout. If the
-spec describes an existing library, its users and its own tests call its whole
-public API, not only the names the spec lists: once the spec's names exist, add
-the public API you know the real project has. Never assert your own guess in the
-gate: a check of behaviour the spec does not state carries a `# judgment`
-comment, and it is not evidence that the library is right.
-
 Use `--coverage` with the same criterion instead of `--gate` when no command can
 check any line. When you write the gate yourself (`--gate-path`), always pass
 `--review`: such a gate is never "strong", and without `--review` no reviewer
@@ -249,6 +165,38 @@ run (a log or audit trail), watch the deliverables and inputs instead of the
 directory that holds it. Choose proportional budgets; user limits take precedence
 over the example. Save the returned slug. State belongs to this runtime's project
 `.codex/harness`.
+
+### Building
+
+Write straight into the real files, never into scratch parts to join later: a session can end at any call, and
+parts not yet joined are lost. A long file goes in as several appends to the file itself. Keep the work runnable
+after every write, and run what you wrote in the same session, the way a user would: code never run is a guess.
+
+Build before you verify. While any part of the request is unbuilt or a placeholder, the next action is building
+it, not new checks or a review. Take the largest part still unbuilt next, not the next one in the order you read
+it, and give no part more than about a session while others are placeholders. Grow the gate with the work: add
+checks for the part you just built, from the request and its own examples. A check that passes the first time it
+runs is not progress. A check from an example in the request asserts the example's literal result: when your
+code disagrees with it, change the code, not the check. An example can be wrong: drop such a check only when the
+rest of the request contradicts it, and record why with `note --fact`. When two sessions in a row changed no
+source file, build in the next one rather than closing or reviewing.
+
+Where the request is silent or only illustrative, follow the conventions of the project and its language: its
+existing names, patterns, error types and layout. Never assert your own guess in the gate: a check of behaviour
+the request does not state carries a `# judgment` comment, and it is not evidence that the work is right.
+
+### A spec that lists a Python API
+
+When the request comes with a spec that names a Python package's public modules, classes and functions, `start
+--surface-spec SPEC --package NAME` (with `--gate-path`) writes `$GATES/test_surface.py` before the baseline:
+one test per public name the spec gives. It fails when a package directory lacks its `__init__.py`, since such a
+directory still imports. Delete a name from it only when the spec says it must not exist, or when it is a file
+name, a URL or a local variable in an example. It checks names only, so grow the gate with checks of behaviour.
+
+`--surface-spec` also writes `$GATES/spec_examples.py`: the spec's own runnable examples and the signatures it
+lists. It is advisory, not part of the gate, because specs are often wrong. `examples SLUG` runs it. For each
+disagreement, fix the code when the spec's prose agrees with the example; otherwise run `waive-example SLUG ID
+--reason "SPEC line N ..."`.
 
 ## Optional state mode
 
@@ -381,19 +329,12 @@ report, listing the lines no reviewer passed as unverified. Dispatch a reviewer
 at the start of a session, with most of the session left, not near its end.
 A reviewer's calls count against a session that is limited in length: when a
 round ends without verdicts, go back to building rather than dispatching
-another. A requirement that asks for no library behaviour (docs, benchmarks,
-examples) never comes before an unbuilt part of the library.
+another. 
 
-A passing gate means your checks pass, not that the request is met. While budget
-remains, extend the gate to the next part of the request it does not check yet,
-preferring parts that are not built yet:
-every item the spec enumerates (each module and public name, each listed table
-or range as a whole, not only the examples shown; docs, CI and config files only
-when the request asks for them, and after the library) and the
-behaviour of each listed method, including closing, releasing and deleting
-objects. Work on the library's behaviour before docs, examples or images. When
-an example or a caller fails against the library, fix the library, not the
-caller.
+A passing gate means your checks pass, not that the request is met. While budget remains, extend the gate to the
+next part of the request it does not check yet, preferring parts that are not built yet: every item the request
+enumerates, not only the examples it shows. When an example or a caller fails against your work, fix the code,
+not the caller.
 
 When `close` (or `check`) reports that a review is required, it prints
 `review_brief` and `review_file`, unless it prints `review_failed_lines` or

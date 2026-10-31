@@ -469,7 +469,8 @@ def _examples_line(state: dict) -> str:
 
 
 def _source_digest(root: Path) -> str | None:
-    """A fingerprint of the project's library source: .py files outside tests, hidden and build folders."""
+    """A fingerprint of the project's source: every tracked or new file outside tests, hidden and build folders,
+    whatever its language."""
     import hashlib
     try:
         out = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
@@ -479,10 +480,10 @@ def _source_digest(root: Path) -> str | None:
     if out.returncode:
         return None
     digest = hashlib.sha256()
-    for name in sorted(set(n for n in out.stdout.decode(errors="replace").split("\0") if n.endswith(".py"))):
+    for name in sorted(set(n for n in out.stdout.decode(errors="replace").split("\0") if n)):
         parts = name.split("/")
         if (any(p.startswith(".") or p in _NOT_SOURCE or p in ("tests", "test") for p in parts[:-1])
-                or parts[-1].startswith("test_") or parts[-1] == "conftest.py"):
+                or parts[-1].startswith(("test_", ".")) or parts[-1] == "conftest.py"):
             continue
         try:
             data = (root / name).read_bytes()
@@ -492,15 +493,11 @@ def _source_digest(root: Path) -> str | None:
     return digest.hexdigest()
 
 
-PLATEAU = ("Plateau: no library source changed in the last 2 sessions while this goal is open. LEAD "
-           "(1) Recall the real library: if the spec describes an existing library, its own tests will judge "
-           "this build. In the notes' `## Real library` part, write from memory how that project behaves where its "
-           "tests look: exact messages and output lines, status codes, token and file formats, defaults, the state "
-           "an object moves through, exception classes, the public names the spec never lists. Run the code against "
-           "each item and fix what differs; the spec's silence is not a reason to leave something out. (2) Run "
-           "`examples SLUG` if the spec has runnable examples, and fix each disagreement the spec's prose supports. "
-           "(3) Re-read a part of the spec you have not read in the last three sessions and compare it with the "
-           "code.")
+PLATEAU = ("Plateau: no source file changed in the last 2 sessions while this goal is open. LEAD "
+           "(1) Run the work the way a user would, on the request's own examples and inputs, and fix what differs "
+           "from what the request asks. (2) Build the largest part of the request that is still unbuilt or a "
+           "placeholder. (3) Re-read a part of the request you have not read in the last three sessions and "
+           "compare it with the work.")
 
 
 def _plateau_line(state: dict) -> str:

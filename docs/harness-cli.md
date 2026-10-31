@@ -668,6 +668,6 @@ passing review.
 A gate in a `--gate-path` directory is reported as "the agent's own, written during this goal". The project's own
 `tox.ini` or `conftest.py` changing is not a gate change.
 
-The session-start message adds `Plateau: ...` when the project's library source (`.py` files outside tests and
-hidden folders) is unchanged across three session starts in a row. Two whole sessions changed nothing, so the
-message sends the agent back to building.
+The session-start message adds `Plateau: ...` when the project's source (every file outside tests, hidden
+and build folders, in any language) is unchanged across three session starts in a row. Two whole sessions
+changed nothing, so the message sends the agent back to running and building the work.

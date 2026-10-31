@@ -6,15 +6,16 @@ description: Use for explicitly requested bounded work that must resume across t
 # Horizon for Claude Code
 
 Horizon keeps a goal, its gate (a check command), notes and the next action on disk, so work survives the end of
-a session. This file holds what every session needs. For anything it does not cover (earlier goals, coverage
-gates, state mode, the multi-round review, scheduling), read [the full guide](references/guide.md), and see
-[the CLI reference](references/commands.md) for every command.
+a session. This file holds what every session needs. For anything it does not cover (earlier goals, large inputs,
+coverage gates, state mode, the multi-round review, scheduling), read [the full guide](references/guide.md), and
+see [the CLI reference](references/commands.md) for every command.
 
 `HARNESS` is the absolute `scripts/harness.py` beside this SKILL.md. `PROJECT` is the directory this session
 started in. If the session-start message gives `HARNESS`, `PROJECT` and `GATES_ROOT`, use them, and paste the
 literal paths it gives into every command: shell variables do not carry over between commands. If it names an
 active goal for this request, go straight to Resuming: do not run `doctor` or `status`. Otherwise run `doctor`
-once and use the `gates` path it prints as `GATES_ROOT`.
+once and use the `gates` path it prints as `GATES_ROOT`. If an earlier goal may cover this request, read
+"Earlier goals" in the guide before starting a new one.
 
 ```bash
 python3 "$HARNESS" --runtime claude --project "$PROJECT" doctor
@@ -24,76 +25,72 @@ python3 "$HARNESS" --runtime claude --project "$PROJECT" doctor
 
 The session-start message shows the next action, the gate's latest result with the failing checks by name, the
 notes, the files the last commit changed and every file with its line count. Do not run `status`, `ls` or `wc`
-to get these again, and do not re-read the request, the requirements or the spec unless the next action needs a
-part of it. Make your first edit within your first few tool calls; never spend a session only reading. When the
-message says `Plateau`, do what it says in that session.
+to get these again, and do not re-read the request or the requirements unless the next action needs a part of
+it. Make your first edit within your first few tool calls; never spend a session only reading. When the message
+says `Plateau`, do what it says in that session.
 
-Keep the next action current with `note` after each write: one concrete edit, naming the file and the input lines
-it needs, never a reading plan. Record a bug you will not fix in the same call with `--finding`, and an
-environment problem that is not a code bug with `--fact`, once.
+Keep the next action current with `note` after each write: one concrete edit, naming the file and what it needs,
+never a reading plan. Record a bug you will not fix in the same call with `--finding`, and an environment problem
+that is not a code bug with `--fact`, once.
 
 ```bash
-python3 "$HARNESS" --runtime claude --project "$PROJECT" note "$SLUG" --next "Write pkg/testing.py from SPEC.md lines 1599-1741"
+python3 "$HARNESS" --runtime claude --project "$PROJECT" note "$SLUG" --next "Make parse_date in src/dates.py accept the ISO forms R3 lists"
 ```
 
 Shell: the shell may be zsh on macOS. There is no `timeout` command (use `--timeout` on `start`, `check`,
 `observe` and `close`), `sed -i` needs `''`, and a test run's exit status never comes through a pipe.
 
-## Starting a build from a spec
+## Starting a goal
 
-Read the spec's first part, which holds its outline and module list, with the Read tool (up to about 800 lines
-per call; never `cat` it, never in small slices). Then set the goal up in one Bash call, so that a session cut off
-early still leaves a goal. Copy this block and fill in the placeholders; nothing else is needed for setup. `pkg`
-is the package's import name and `PY` the Python that has pytest.
+Before changing anything, read the request, the inputs it names, the code it concerns, and that code's existing
+tests and callers. Read a large input with the Read tool, up to about 800 lines per call; never `cat` it. Then
+set the goal up in one Bash call, so that a session cut off early still leaves a goal. `NAME` is a short label for
+this request that no directory in `GATES_ROOT` uses yet.
 
 ```bash
-GATES="$GATES_ROOT/pkg-build"; mkdir -p "$GATES"
+GATES="$GATES_ROOT/NAME"; mkdir -p "$GATES"
 cat > "$GATES/request.md" <<'EOF'
 <the request, verbatim>
 EOF
 cat > "$GATES/requirements.md" <<'EOF'
-R1 [gate] "<the first module or section the spec lists, in its words>"
+R1 [gate] "<a requirement, symptom, deliverable or constraint, in the request's words>"
 R2 [review] "<the next one>"
 EOF
-python3 "$HARNESS" --runtime claude --project "$PROJECT" start "Build pkg as SPEC.md describes" \
-  --gate-path "$GATES" --surface-spec "$PROJECT/SPEC.md" --package pkg \
-  --gate "$PY -m pytest -q -p no:cacheprovider $GATES" \
+cat > "$GATES/test_request.py" <<'EOF'
+# Still passes: <one wrong result this gate would accept, or none>
+<checks of the [gate] lines, each naming its line>
+EOF
+python3 "$HARNESS" --runtime claude --project "$PROJECT" start "Requested outcome" \
+  --gate-path "$GATES" --gate "<command that runs the checks in $GATES>" \
   --review "Every line of $GATES/requirements.md holds, judged against $GATES/request.md"
 ```
 
-One requirement line per module or section, quoted in the spec's words. Tag `[review]` only a line a reviewer can
-judge by running the code; packaging, docs, CI, examples and lines that state no checkable behaviour are
-`[unverifiable]`. `--surface-spec` writes the surface gate, one test per public name the spec gives; it is the
-whole first gate. It also writes the advisory `spec_examples.py` (see Building). Then read the rest of the spec in
-large parts. The notes file keeps only what saves a re-read: a `## ` heading per part with its line range and the
-file it maps to, and the signatures and rules you will need again. Write notes in the same Bash call as an edit.
+- **Requirements:** one line for each requirement, reported symptom, deliverable and constraint, in the
+  request's words, keeping qualifiers such as "exact", "all" and "unchanged". Tag `[gate]` a line a command can
+  check, `[review]` a line a reviewer can judge by running the work, and `[unverifiable]` a line that states no
+  checkable behaviour. Add `[judgment]` to a line with more than one reasonable reading, and record the reading
+  you chose.
+- **The gate:** checks of the `[gate]` lines, called the way existing callers and tests call the code. Take
+  expected values from the request and its inputs, never from your own code. When the request says existing
+  behaviour must stay the same, capture the current outputs now and compare against them.
+- **The baseline:** `start` runs the gate once and prints the baseline `observation`; read it, and do not run
+  `check` for it. Checks of behaviour the request calls broken or missing must fail there.
 
-## Building
+## Working
 
-1. **Make the package exist first.** The package `__init__.py` and every module the spec lists, each with its
-   classes and functions, then the main entry point, then packaging files. Write straight into the real files and
-   keep the package importable after every write: define a name in the same edit that exports it.
-2. **Run what you wrote, in the same session.** Before the session can end, import the package and run the spec's
-   first usage example. A module never run is a guess.
-3. **Recall the real library.** If the spec describes an existing library, its own tests are what will judge
-   the build. Once the package imports, write a `## Real library` part in the notes, from memory: how that
-   project behaves where its tests look. Cover the exact messages and output lines, status codes, token and file
-   formats, defaults, the state an object moves through (open, share, close, reuse), the exception classes, and
-   the public names the spec never lists. Run the code against each item and fix what differs. Where your recall
-   and the spec's prose disagree on an observable result, follow the real library and record the choice with
-   `note --fact`. The spec's silence about a name or a behaviour is not a reason to leave it out.
-4. **Where the spec is silent or only illustrative,** do what the real library does (for a new library, what
-   standard Python does): `datetime` for dates, built-in exception classes, the real names, parameters and module
-   layout. Never assert your own guess in the gate: a check of behaviour the spec does not state carries a
-   `# judgment` comment.
-5. **Spec examples.** `examples SLUG` runs the spec's own runnable examples and listed signatures. It is
-   advisory, not part of the gate, because specs are often wrong. For each disagreement, fix the library when the
-   prose and the real library agree with the example; otherwise run `waive-example SLUG ID --reason "SPEC line N ..."`.
-6. **Deepen the least-built part next.** The next action is the largest part still unbuilt or a placeholder, not
-   the next section in spec order. Grow the gate with the code, from the spec's examples and your real-library
-   notes. When an example or caller fails, fix the library, not the caller; never weaken the gate, a reviewer's
-   test or the requirements to fit your output.
-7. **Docs, translations, styles and CI files come last,** after the library runs and the recall pass is done.
+1. **Write straight into the real files,** never into scratch parts to join later, and keep the work runnable
+   after every write: a session can end at any call.
+2. **Run what you wrote, in the same session.** Before the session can end, run the changed code the way a user
+   would. Code never run is a guess.
+3. **Build before you verify.** While a part of the request is unbuilt, the next action is building it, not new
+   checks or a review. Take the largest unbuilt part next, not the next one in reading order.
+4. **Grow the gate with the work.** Add checks for each part as you build it, from the request and its examples.
+   A check that passes the first time it runs is not progress. A passing gate means your checks pass, not that
+   the request is met.
+5. **Where the request is silent,** follow the conventions of the project and its language. Never assert your own
+   guess in the gate: a check of behaviour the request does not state carries a `# judgment` comment.
+6. **Never weaken the gate,** a reviewer's test or the requirements to fit your output. When an example or a
+   caller fails, fix the code, not the caller.
 
 ```bash
 python3 "$HARNESS" --runtime claude --project "$PROJECT" check "$SLUG" \

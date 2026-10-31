@@ -220,11 +220,10 @@ def test_horizon_skills_build_first_and_hand_off_early(folder):
     for phrase in ("## Resuming", "never spend a session only reading", "Keep the next action current with `note`",
                    "never a reading plan, and no session numbers", "`observe` takes `--next`",
                    "## Large inputs", "## Shell", "There is no `timeout` command", "`--timeout` on `start`",
-                   "### Building from a spec",
-                   "a directory without one still imports, as a namespace package",
-                   "define a name in the same edit that exports it",
+                   "### Building",
+                   "Keep the work runnable after every write",
                    "A passing gate means your checks pass, not that the request is met",
-                   "fix the library, not the caller", "Dispatch a reviewer at the start of a session",
+                   "fix the code, not the caller", "Dispatch a reviewer at the start of a session",
                    "Build first, review last", "`review_failed_lines`", "`review_paused`",
                    "`review_failed_files` with `review --result fail`",
                    "listing the lines no reviewer passed as unverified",
@@ -237,38 +236,25 @@ def test_horizon_skills_build_first_and_hand_off_early(folder):
         assert "run `observe` for a current result" in text
 
 @pytest.mark.parametrize("folder", [".claude", ".agents"])
-def test_horizon_skills_build_a_spec_as_fast_as_plain(folder):
-    # NL2Repo bench3: reading the spec in small slices with a notes pass cost pyjwt its first two sessions
-    # (plain read it in four calls and scored 196 after session 1); structlog imported every module but missed
-    # spec names and scored 0; notes said "nothing implemented" after the code existed; one session wrote
-    # docs files because the skill said "each file in its tree" (fun repo: nl2repo-bench3/report.md).
-    # NL2Repo bench3: reading the spec in small slices with a notes pass cost pyjwt its first two sessions
-    # (plain read it in four calls and scored 196 after session 1); structlog imported every module but missed
-    # spec names and scored 0; notes said "nothing implemented" after the code existed; one session wrote
-    # docs files because the skill said "each file in its tree" (fun repo: nl2repo-bench3/report.md).
-    # NL2Repo bench3: reading the spec in small slices with a notes pass cost pyjwt its first two sessions
-    # (plain read it in four calls and scored 196 after session 1); structlog imported every module but missed
-    # spec names and scored 0; notes said "nothing implemented" after the code existed; one session wrote
-    # docs files because the skill said "each file in its tree" (fun repo: nl2repo-bench3/report.md).
-    # bench4 pilot: session 1 spent calls on `doctor`/`status` and split setup over three calls.
+def test_horizon_skills_read_large_inputs_in_large_parts(folder):
+    # NL2Repo bench3: reading an input in small slices with a notes pass cost two sessions; notes said "nothing
+    # implemented" after the code existed. The spec-build steps from the same review were benchmark-specific
+    # and are gone (task-neutral skill, 2026-10-31); the spec tools stay as an optional subsection.
     text = " ".join(_horizon_skill(folder).split())
     for phrase in ("never read it in small slices", "Never record in notes what is or is not implemented",
-                   "never in a call of their own",
+                   "never in a call of their own", "Read a large input whole, once",
                    "--surface-spec", "one test per public name the spec gives",
                    "Delete a name from it only when the spec says it must not exist, or when it is a file name",
-                   "never rewrite the probe around it",
-                   "right after the first part of the spec, which holds its outline and module list",
-                   "then read the rest of the spec in large parts",
-                   "Grow the gate with the code", "the spec's own examples for parts already built",
-                   "preferring parts that are not built yet",
-                   "docs, CI and config files only when the request asks for them"):
+                   "It checks names only, so grow the gate with checks of behaviour",
+                   "Grow the gate with the work", "preferring parts that are not built yet"):
         assert phrase in text, phrase
     for gone in ("Never `cat` a file over 50 KB", "Read the notes before the input", "each file in its tree",
                  "read only its outline and module list now", "each as an importable stub",
-                 "do not write checks for code that already passes them"):
+                 "do not write checks for code that already passes them",
+                 "The surface gate is the whole first gate", "Read a spec whole, once, in the first session"):
         assert gone not in text, gone
     if folder == ".claude":
-        assert "up to about 800 lines per call" in text and "Read a spec whole, once, in the first session" in text
+        assert "up to about 800 lines per call" in text
         assert "Do not run `status` to get these again, nor `ls` or `wc` for the files it lists" in text
         assert "If it says there is no active Horizon goal, skip \"Earlier goals\" and do not run `status`" in text
         assert "`GATES_ROOT`" in text
@@ -276,17 +262,12 @@ def test_horizon_skills_build_a_spec_as_fast_as_plain(folder):
         assert "up to about 250 lines per command" in text
 
 @pytest.mark.parametrize("folder", [".claude", ".agents"])
-def test_a_spec_build_sets_up_in_one_copied_call_with_only_the_surface_gate(folder):
-    # bench4 pilot 2: unidecode wrote its own spec-example gate (8 calls) before any code, first edit at call 20;
-    # pyjwt searched references/commands.md for how to use --surface-spec, first edit at call 15.
-    raw = _horizon_skill(folder)
-    text = " ".join(raw.split())
-    for phrase in ("The surface gate is the whole first gate",
-                   "write no other checks before the first modules exist",
-                   "add checks with the code, from the spec's own examples",
-                   "Copy this block and fill in the placeholders; nothing else is needed for setup"):
-        assert phrase in text, phrase
-    block = raw.split("Copy this block and fill in the placeholders", 1)[1].split("```bash\n", 1)[1].split("```", 1)[0]
+def test_a_goal_sets_up_in_one_copied_call(folder):
+    # bench4 pilot 2: setup split over several calls left no goal when a session was cut off early. The copied
+    # block is now task-neutral: request, requirements and a gate of the request's own checks, no spec tools.
+    raw = (ROOT / folder / "skills/horizon/SKILL.md").read_text()
+    block = raw.split("## Starting a goal", 1)[1].split("```bash\n", 1)[1].split("```", 1)[0]
     for part in ('mkdir -p "$GATES"', 'cat > "$GATES/request.md"', 'cat > "$GATES/requirements.md"',
-                 "--surface-spec", "--package", "--gate-path", "--review"):
+                 "# Still passes:", "--gate-path", "--gate ", "--review"):
         assert part in block, part
+    assert "--surface-spec" not in block and "--package" not in block
