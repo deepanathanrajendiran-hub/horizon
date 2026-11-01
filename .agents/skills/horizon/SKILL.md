@@ -103,8 +103,8 @@ python3 "$HARNESS" --runtime codex --project "$PROJECT" observe "$SLUG"
 When every part is built, run `close`. It completes the goal if a passing gate covers the current files and
 nothing else is missing; otherwise it lists what is. For a long request, or a Markdown file it names (200
 lines or more), `close` lists each section heading that no requirement line quotes and whose function, class
-or path the work does not define: build each, or add a requirement line that quotes the heading and says why
-it is out of scope.
+or path the work does not define: build each, or add a requirement line
+that quotes the heading (saying why, if it is out of scope).
 
 A goal gets one review round. Dispatch it once, as the first action of a session, never in a session's last
 calls: when `close` prints a `review_brief`, send it unchanged to a fresh reviewer with the available Codex

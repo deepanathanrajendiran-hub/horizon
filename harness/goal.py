@@ -583,6 +583,8 @@ def observe(slug: str, role: str, timeout: int = gate.DEFAULT_TIMEOUT, next_acti
             state.setdefault("test_manifest", manifest)
         if role == "baseline":
             state.setdefault("request_inputs", sections.input_hashes(state.get("gate_path"), state["cwd"]))
+            state.setdefault("predefined_sections",
+                             sections.defined_sections(state.get("gate_path"), state["cwd"], _not_work(state)))
         return _persist_mutation_locked(state)
 
 def _git_head() -> str | None:
@@ -595,18 +597,22 @@ def _git_head() -> str | None:
     head = out.stdout.strip()
     return head if out.returncode == 0 and re.fullmatch(r"[0-9a-f]{40,64}", head) else None
 
+def _not_work(state: dict) -> list[str]:
+    """The folders that are not the work: the gate directory and Horizon's own state."""
+    return [p for p in [state.get("gate_path"), str(paths.harness_root())] if p]
+
 def _work_digest(state: dict) -> str | None:
     """The fingerprint of the work at a checkpoint: every project file, hidden files and tests included, outside
     the gate directory and Horizon's own state, so a FAIL is known to have been fixed in the work, not only in the
     agent's checks."""
-    return tree_hash.source_digest(state["cwd"], hidden=True, tests=True,
-                                   skip=[p for p in [state.get("gate_path"), str(paths.harness_root())] if p])
+    return tree_hash.source_digest(state["cwd"], hidden=True, tests=True, skip=_not_work(state))
 
 def uncited_sections(state: dict) -> list[dict]:
     """Sections of a long request, or of a Markdown file it names, that no requirement line cites and whose code
-    name the work does not define; a named file the work has changed since the baseline is an output."""
+    name the work does not define; a named file the work has changed since the baseline is an output, and code
+    the project had at the baseline does not cover a section."""
     return sections.uncited_in_goal(state.get("gate_path"), state["cwd"], state.get("request_inputs"),
-                                    skip=[p for p in [state.get("gate_path"), str(paths.harness_root())] if p])
+                                    skip=_not_work(state), predefined=state.get("predefined_sections", ()))
 
 
 def _unfixed_fail_lines(state: dict) -> list[str]:

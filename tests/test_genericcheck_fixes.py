@@ -199,6 +199,7 @@ def test_the_skill_says_close_lists_the_sections_neither_cited_nor_built(folder)
     assert "cite every section heading" not in core  # no citing up front
     assert "`close` lists each section heading" in core
     assert "the work does not define" in core
+    assert "saying why, if it is out of scope" in core  # a prose section is cited, not ruled out
     assert "Disputed Rk:" in core
 
 
@@ -268,9 +269,10 @@ def test_a_section_whose_code_name_the_work_defines_needs_no_citing():
     # a heading with no code name still needs its words in a requirement line
     assert [h for _, h in sections.uncited(CODE_SPEC, 'R1 [gate] "works"\n', defined)] == [
         "`render_table()` Function", "Overview"]
-    # a dotted name is covered by its last part
+    # a dotted name is covered when the work defines each part
     text = "# T\n" + FILLER + "## `more_itertools.chunked`\nx\n"
-    assert sections.uncited(text, "R1 x\n", {"chunked"}) == []
+    assert sections.uncited(text, "R1 x\n", {"more_itertools", "chunked"}) == []
+    assert sections.uncited(text, "R1 x\n", {"chunked"}) != []
 
 
 def test_the_work_defines_what_its_source_defines_and_the_paths_it_has(tmp_path):
@@ -298,16 +300,63 @@ def test_the_work_defines_what_its_source_defines_and_the_paths_it_has(tmp_path)
 def test_close_counts_a_section_the_work_defines_as_covered(project):
     p, cli, _ = project
     (p / "DESIGN.md").write_text(CODE_SPEC)
+    slug, gates, out = _start(p, cli, 'R1 [gate] "Overview: what it is"\n')
     (p / "pkg" / "_vendor").mkdir(parents=True)
     (p / "pkg" / "_vendor" / "__init__.py").write_text("")
     (p / "src" / "store.py").write_text("class Store:\n    pass\n")
-    slug, gates, out = _start(p, cli, 'R1 [gate] "Overview: what it is"\n')
     code, out = cli("close", slug)
     text = " ".join(out["missing"])
     assert code == 1 and "render_table" in text, out
-    assert "parse()" not in text and "Store" not in text and "_vendor" not in text
+    assert "Store" not in text and "_vendor" not in text
     assert "Build each" in text
     assert not out.get("review_brief"), out
     (p / "src" / "table.py").write_text("def render_table(rows):\n    return rows\n")
     code, out = cli("close", slug)
     assert not any("render_table" in m for m in out["missing"]), out
+
+
+def test_a_section_the_project_defined_before_the_goal_still_needs_a_line(project):
+    # review of d0513fe: in a long spec of changes to an existing codebase, every section names code that is
+    # already there, so a definition alone must not cover it.
+    p, cli, _ = project
+    (p / "DESIGN.md").write_text(CODE_SPEC)  # the fixture's src/tool.py already defines parse
+    slug, gates, out = _start(p, cli, 'R1 [gate] "Overview: what it is"\n')
+    code, out = cli("close", slug)
+    assert "`parse()` Function" in " ".join(out["missing"]), out
+
+
+def test_a_path_heading_needs_that_path_and_a_dotted_name_each_part(tmp_path):
+    # review of d0513fe: a js/ folder covered every missing .js file, a folder named in a path covered the path,
+    # and any close method covered Server.close.
+    import sections
+    p = tmp_path / "w "
+    for name in ("static/js/app.js", "more_itertools/more.py", "src/main/java/com/x/Store.java"):
+        (p / name).parent.mkdir(parents=True, exist_ok=True)
+        (p / name).write_text("")
+    (p / "client.py").write_text("class Client:\n    def close(self):\n        pass\n")
+    _git(p, "init", "-q")
+    defined = sections.defined_names(p)
+    headings = ["`static/js/cart.js` Module", "`checkout.js`", "`com/x/Missing.java`", "`more_itertools/missing.py`",
+                "`Server.close()`", "`static/js/app.js`", "`app.js`", "`Store` Class", "`Client.close()`",
+                "`more_itertools.more`", "`com/x/Store.java`"]
+    text = "# T\n" + FILLER + "".join(f"## {h}\nx\n" for h in headings)
+    assert [h for _, h in sections.uncited(text, "R1 x\n", defined)] == headings[:5]
+
+
+def test_definitions_are_read_in_other_languages_and_not_from_config(tmp_path):
+    import sections
+    p = tmp_path / "w "
+    (p / "src" / "lib_pkg").mkdir(parents=True)
+    files = {"Main.java": "public class Store {\n    private static final int LIMIT = 3;\n}\n",
+             "app.kt": "fun mountRoutes() {}\ninternal class Router\n",
+             "view.swift": "public func render() {}\n",
+             "api.php": "<?php\nclass Api {\n    public function fetchAll() {}\n}\n",
+             "lib.rs": "pub const fn limit() -> u8 { 3 }\npub(crate) struct Row;\n",
+             "pyproject.toml": "[project]\nname = \"x\"\nversion = \"1\"\n",
+             "src/lib_pkg/core.py": ""}
+    for name, body in files.items():
+        (p / name).write_text(body)
+    _git(p, "init", "-q")
+    names = sections.defined_names(p)
+    assert {"Store", "mountRoutes", "Router", "render", "Api", "fetchAll", "limit", "Row", "lib_pkg.core"} <= names
+    assert not {"fn", "name", "version", "public"} & names

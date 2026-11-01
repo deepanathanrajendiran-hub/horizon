@@ -335,8 +335,8 @@ session's last calls; `review_spent` means it has run.
 
 For a long request, or a Markdown file it names (200 lines or more), `close` also
 lists each section heading that no requirement line quotes and whose function, class
-or path the work does not define, and sends no reviewer while any remain. Build each,
-or add a requirement line that quotes the heading and says why it is out of scope.
+or path the work does not define, and sends no reviewer while any remain. Build each, or add a requirement line that quotes
+the heading (saying why, if it is out of scope).
 
 Build first, review last. Dispatch a reviewer only when you believe every part
 of the request is built and your gate checks it. While parts of the request are
