@@ -23,6 +23,7 @@ import sys
 import tree_hash
 import re
 import examples
+import filelock
 
 MARK = "horizon-hook"
 _EVENTS = {"SessionStart": None, "PostToolUse": "*", "Stop": None}
@@ -471,7 +472,6 @@ def _examples_line(state: dict) -> str:
 
 
 PLATEAU = ("Plateau: no source file changed in the last 2 sessions while this goal is open. LEAD "
-           "Make your first tool call this session an edit to the work, and read only what that edit needs. "
            "(1) Start with the next action: NEXT. (2) Build the largest part of the request that is still unbuilt "
            "or a placeholder. (3) Run the work the way a user would, on the request's own examples and inputs, and "
            "fix what differs from what the request asks.")
@@ -510,14 +510,24 @@ def _plateau_line(state: dict) -> str:
     except Exception:
         passing = False
     lead = ("The gate passes on these files: if every part of the request is built, run `close` now. "
-            "Otherwise, build this session." if passing else "Build this session; do not start a review.")
+            "Otherwise, build this session." if passing else
+            "Build this session; do not start a review. Make your first tool call this session an edit to the work, "
+            "and read only what that edit needs.")
     next_action = goal.row(state)["next_action"] or "the part of the request you would write first"
     return " " + PLATEAU.replace("SLUG", state["slug"]).replace("LEAD", lead).replace("NEXT", next_action)
 
-def _work_fingerprint(state: dict) -> str | None:
-    """The work's fingerprint as Plateau takes it: source files, not docs, the gate directory or Horizon's state."""
-    return tree_hash.source_digest(paths.project_root(), docs=False,
-                                   skip=[p for p in [state.get("gate_path")] if p])
+def _work_fingerprint() -> str | None:
+    """Every project file a session can change, tests, docs, hidden files and the gate directory included, but not
+    Horizon's bookkeeping; None outside a Git repository, where no reminder is given."""
+    root = paths.harness_root()
+    return tree_hash.source_digest(paths.project_root(), docs=True, hidden=True, tests=True,
+                                   skip=[root / name for name in tree_hash.BOOKKEEPING])
+
+
+def _worked_on(state: dict) -> bool:
+    """Whether a session has worked on the goal: it has a next action or a checkpoint. A goal started from the
+    command line before session 1 has neither."""
+    return bool(goal.row(state)["next_action"] or state.get("checkpoints"))
 
 
 def _progress_path() -> Path:
@@ -527,51 +537,51 @@ def _progress_path() -> Path:
 
 
 def _mark_session(session: str | None, states: list[dict]) -> None:
-    """At a session's start, the work's fingerprint for each goal it resumes, so PostToolUse can tell when the
-    session has changed no file of the work. A session that starts no goal (session 1) gets no mark."""
-    if not session or not states:
+    """At a session's start, after the gate ran, the work's fingerprint, when the session resumes a goal some
+    session has worked on, so PostToolUse can tell when it has changed no file of the work. Session 1, a project
+    outside Git, and a compacted or resumed session (which keeps its count) get no new mark."""
+    resumed = [s["slug"] for s in states if _worked_on(s)]
+    if not session or not resumed:
         return
-    try:
-        old = json.loads(_progress_path().read_text())
-    except (OSError, ValueError):
-        old = {}
-    if old.get("session") == session:
-        return  # a resumed or compacted session keeps its count
-    record = {"session": session, "calls": 0, "changed": False,
-              "digests": {s["slug"]: _work_fingerprint(s) for s in states}}
-    try:
-        _progress_path().write_text(json.dumps(record))
-    except OSError:
-        pass
+    digest = _work_fingerprint()
+    if digest is None:
+        return
+    path = _progress_path()
+    with filelock.locked(path):
+        try:
+            old = json.loads(path.read_text())
+        except (OSError, ValueError):
+            old = {}
+        if old.get("session") == session:
+            return
+        path.write_text(json.dumps({"session": session, "calls": 0, "changed": False, "digest": digest,
+                                    "goals": resumed}))
 
 
-def _reading_reminder(session: str | None) -> str:
+def _reading_reminder(session: str | None, payload: dict | None = None) -> str:
     """After REMIND_AT tool calls in a resumed session that has changed no file of the work, a reminder that
-    names the next action."""
-    try:
-        record = json.loads(_progress_path().read_text())
-    except (OSError, ValueError):
+    names the next action. A subagent's calls (a reviewer's reads) are not counted and get no reminder."""
+    if not session or (isinstance(payload, dict) and (payload.get("agent_id") or payload.get("agent_type"))):
         return ""
-    if not session or record.get("session") != session or record.get("changed"):
-        return ""
-    record["calls"] = record.get("calls", 0) + 1
-    out = ""
-    if record["calls"] in REMIND_AT:
-        states = {s["slug"]: s for s in _active_goals()}
-        for slug, digest in (record.get("digests") or {}).items():
-            state = states.get(slug)
-            if state is None:
-                continue
-            if _work_fingerprint(state) != digest:
+    path = _progress_path()
+    with filelock.locked(path):
+        try:
+            record = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return ""
+        if record.get("session") != session or record.get("changed") or not record.get("digest"):
+            return ""
+        record["calls"] = record.get("calls", 0) + 1
+        out = ""
+        if record["calls"] in REMIND_AT:
+            if _work_fingerprint() != record["digest"]:
                 record["changed"] = True
-                out = ""
-                break
-            next_action = goal.row(state)["next_action"]
-            out = REMINDER.format(calls=record["calls"], next=f": {next_action}" if next_action else "")
-    try:
-        _progress_path().write_text(json.dumps(record))
-    except OSError:
-        pass
+            else:
+                states = {s["slug"]: s for s in _active_goals()}
+                actions = [goal.row(states[g])["next_action"] for g in record.get("goals", []) if g in states]
+                actions = [a for a in actions if a]
+                out = REMINDER.format(calls=record["calls"], next=f": {'; '.join(actions)}" if actions else "")
+        path.write_text(json.dumps(record))
     return out
 
 
@@ -621,11 +631,6 @@ def _session_start(session: str | None, source: str | None = None) -> dict | Non
     deadline = time.monotonic() + _gate_budget()
     known = []
     active = _active_goals()
-    if startup:
-        try:
-            _mark_session(session, active)
-        except Exception:
-            pass
     for state in active:
         try:
             note = ""
@@ -658,10 +663,16 @@ def _session_start(session: str | None, source: str | None = None) -> dict | Non
             except Exception:
                 differ = ""
             known += [f["text"] for f in state.get("facts") or []]
-            lines.append(f"{line}{plateau}{differ}{RESUME}{note}{_notes_line(state['slug'])} Run "
+            resume = RESUME if _worked_on(state) else ""
+            lines.append(f"{line}{plateau}{differ}{resume}{note}{_notes_line(state['slug'])} Run "
                          f"`close {state['slug']}` when you think it is done.")
         except Exception:
             continue
+    if startup:
+        try:
+            _mark_session(session, _active_goals())  # after the gate ran, which may write files
+        except Exception:
+            pass
     if not lines:
         # Session 1 of a goal still needs the paths and the files (bench4 pilot: `doctor`, `status`, `ls`).
         lines.append("No active Horizon goal.")
@@ -736,7 +747,7 @@ def run(event: str, payload: dict) -> dict | None:
     if event == "PostToolUse":
         _post_tool_use(session)
         try:
-            reminder = _reading_reminder(session)
+            reminder = _reading_reminder(session, payload)
         except Exception:
             reminder = ""
         if reminder:

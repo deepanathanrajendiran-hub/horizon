@@ -680,10 +680,12 @@ is missing. `close` refuses while any section remains, and sends no reviewer; it
 code the work has not built, then prose sections. `start` does not check. At session start, the hook lists the sections whose code differs, so a session sees them
 before `close`.
 
-In a session that resumes a goal, the session-start message asks for a change to the work within
-the first 5 tool calls. If the 6th or the 11th call comes with no file of the work changed (source files, not docs,
-the gate directory or Horizon's state), the PostToolUse hook adds a reminder that names the next action. A
-session that starts its goal gets no reminder. A named file the work changes after
+In a session that resumes a goal some session has worked on (it has a next action or a checkpoint), the
+session-start message asks for a change to the work within the first 5 tool calls. If the 6th or the 11th call
+comes with no project file changed since the session started (tests, docs, hidden files and the gate directory
+count; Horizon's bookkeeping does not), the PostToolUse hook adds a reminder that names the next action. A
+subagent's calls are not counted. There is no reminder in a session that starts its goal, in a goal started
+from the command line that no session has worked on yet, or outside a Git repository. A named file the work changes after
 the baseline (a CHANGELOG the request says to extend) is an output and is not checked.
 After a failed review round, `close` refuses while the work (every project file, hidden files and tests
 included, outside the gate directory and Horizon's own state) is unchanged since the round, unless a

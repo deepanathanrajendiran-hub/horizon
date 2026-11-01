@@ -570,3 +570,90 @@ def test_session_start_lists_sections_whose_given_code_the_work_defines_differen
     (p / "src" / "strategy.py").write_text("from abc import ABC\n\nclass Strategy(ABC):\n    pass\n")
     text = start_message()
     assert "defines differently" in text and "Strategy Class" in text and "lacks base" in text, text
+
+# --- review of f965579 -------------------------------------------------------------------------------------
+
+def _resumed(p, cli, gate="true"):
+    code, out = cli("start", "Build the tool", "--gate", gate)
+    cli("note", out["slug"], "--next", "write src/extra.py with render()")
+    return out["slug"]
+
+
+def _calls(p, session, n, **extra):
+    return [_hook(p, "PostToolUse", {"session_id": session, "tool_name": "Read", **extra}) for _ in range(n)]
+
+
+def test_no_reminder_where_the_work_cannot_be_fingerprinted(tmp_path):
+    p = tmp_path / "plain "
+    (p / ".claude").mkdir(parents=True)
+
+    def cli(*args):
+        done = subprocess.run([sys.executable, ENTRY, "--runtime", "claude", "--project", str(p), *args],
+                              cwd=p, capture_output=True, text=True, timeout=120)
+        return done.returncode, json.loads(done.stdout)
+
+    _resumed(p, cli)  # not a Git repository
+    _hook(p, "SessionStart", {"session_id": "s1", "source": "startup"})
+    (p / "b.py").write_text("x = 1\n")
+    assert not any(_calls(p, "s1", 12))
+
+
+def test_a_change_to_tests_hidden_files_or_the_gate_counts_as_work(project):
+    p, cli, _ = project
+    for i, path in enumerate(["tests/test_extra.py", ".github/ci.yml"]):
+        _resumed(p, cli) if i == 0 else None
+        _hook(p, "SessionStart", {"session_id": f"s{i}", "source": "startup"})
+        (p / path).parent.mkdir(parents=True, exist_ok=True)
+        (p / path).write_text("x = 1\n")
+        assert not any(_calls(p, f"s{i}", 12)), path
+
+
+def test_a_subagent_s_calls_are_not_counted_or_reminded(project):
+    p, cli, _ = project
+    _resumed(p, cli)
+    _hook(p, "SessionStart", {"session_id": "s1", "source": "startup"})
+    assert not any(_calls(p, "s1", 12, agent_id="reviewer-1", agent_type="general-purpose"))
+    said = _calls(p, "s1", 6)
+    assert "no file of the work has changed" in said[5], said
+
+
+def test_a_goal_no_session_has_worked_on_gets_no_reminder_and_no_resume_line(project):
+    p, cli, start_message = project
+    cli("start", "Build the tool", "--gate", "true")  # started from the command line before session 1
+    assert "within your first 5 tool calls" not in start_message()
+    _hook(p, "SessionStart", {"session_id": "s1", "source": "startup"})
+    assert not any(_calls(p, "s1", 12))
+
+
+def test_a_compacted_session_keeps_its_count(project):
+    p, cli, _ = project
+    _resumed(p, cli)
+    _hook(p, "SessionStart", {"session_id": "s1", "source": "startup"})
+    assert not any(_calls(p, "s1", 3))
+    _hook(p, "SessionStart", {"session_id": "s1", "source": "compact"})
+    said = _calls(p, "s1", 3)
+    assert "no file of the work has changed" in said[2], said
+
+
+def test_plateau_asks_for_an_edit_first_only_when_the_gate_fails(project):
+    p, cli, start_message = project
+    _resumed(p, cli, gate="false")
+    start_message()
+    start_message()
+    text = start_message()
+    assert "Make your first tool call this session an edit" in text[text.index("Plateau"):]
+
+
+def test_plateau_on_a_passing_gate_does_not_also_demand_an_edit(project):
+    p, cli, start_message = project
+    _resumed(p, cli)
+    start_message()
+    start_message()
+    text = start_message()
+    plateau = text[text.index("Plateau"):]
+    assert "run `close` now" in plateau and "first tool call" not in plateau, plateau
+
+
+def test_the_codex_skill_promises_no_hooks():
+    core = " ".join((ROOT / ".agents/skills/horizon/SKILL.md").read_text().split())
+    assert "Horizon reminds you" not in core and "Make your first edit within your first 5 tool calls" in core
