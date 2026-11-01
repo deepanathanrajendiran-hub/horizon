@@ -665,16 +665,19 @@ for 15 minutes (a reviewer still running keeps writing).
 `close` names these until the files change. `close --if-ready` and the Stop hook never complete a goal without a
 passing review.
 
-When the goal's `request.md`, or a Markdown file in the project it names, is 200 lines or more, every section
-heading of it (a heading outside code with no sub-heading under it) must be cited by some requirement line, by
-its words or by a code name it carries (`chunked()`, `BaseUserManager`), or the work must define that code name:
-a name its source files (not tests, docs or config) define, or a file, folder or dotted module path it has;
-a dotted name needs each part, and code the project had when the goal started does not count. When the
-section gives Python code in a fenced block, the work's definition of a name the heading carries must also
-match it (every base class the request gives, every parameter it names, unless the work takes *args or
-**kwargs); otherwise `close` lists the section with both lines. A heading's code names include the word
-before Class, Function, Method, Protocol and similar ("Strategy Class"). `close` lists differing code first,
-then code the work has not built, then prose sections. `close` lists the rest and refuses while any remain, and sends no reviewer; `start` does not check. A named file the work changes after
+When the goal's `request.md`, or a Markdown file in the project it names, is 200 lines or more, `close` checks
+each section of it: a heading outside code with no sub-heading under it, and a heading with sub-headings whose own
+text gives Python code for a name it carries. A section is covered when a requirement line cites it, by its words
+or by a code name it carries (`chunked()`, `BaseUserManager`), or when the work defines that code name: a name its
+source files (not tests, docs or config) define, or a file, folder or dotted module path it has. A dotted name
+needs each part, and code the project had when the goal started does not count. The word before a capitalised
+Class, Function, Method, Protocol and similar ("Strategy Class") is a code name for looking up the work, not for
+citing. When the section gives Python code in a fenced block, the work's definition must also match it: every base
+class the request gives (directly, through the work's own classes, or as the standard library implies, so
+`ValueError` is an `Exception` and `Protocol[T]` is generic), and every parameter it names (not positional-only
+ones), unless the work takes *args or **kwargs. Otherwise `close` lists the section with both signatures and what
+is missing. `close` refuses while any section remains, and sends no reviewer; it lists differing code first, then
+code the work has not built, then prose sections. `start` does not check. A named file the work changes after
 the baseline (a CHANGELOG the request says to extend) is an output and is not checked.
 After a failed review round, `close` refuses while the work (every project file, hidden files and tests
 included, outside the gate directory and Horizon's own state) is unchanged since the round, unless a

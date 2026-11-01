@@ -7,14 +7,16 @@ it by the heading's words, ignoring case, numbering and Markdown marks.
 
 genericfix: a section is also covered when the work defines the function, class or path its heading names,
 so a spec of one section per function needs no requirement line per function; `close` checks, not `start`."""
+import ast
+import builtins
 import hashlib
 import re
+import textwrap
+import warnings
 from pathlib import Path
 
 import reviewing
 import tree_hash
-import ast
-import textwrap
 
 LONG_INPUT_LINES = 200  # shorter inputs are read whole and need no section check
 _HEADING = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$")
@@ -36,19 +38,25 @@ _NOT_NAMES = {"def", "class", "function", "func", "fun", "fn", "struct", "enum",
               "object", "record", "protocol", "const", "let", "var", "val", "module"}
 CONFIG_SUFFIXES = (".toml", ".cfg", ".ini", ".yaml", ".yml", ".json", ".lock", ".txt", ".env")  # keys are not code
 
-# "Authenticator Class", "JWT Strategy Function": the word before a kind word names code; "The Class ..." does not
-_KIND = re.compile(r"\b([A-Za-z_][\w.]*)[ \t]+(?:class|function|method|protocol|decorator|exception|enum|interface"
-                   r"|struct|trait)\b", re.I)
+# "Authenticator Class", "JWT Strategy Function": the word before a capitalised kind word names code; "The Class",
+# "Class Method" and "writing a handler function" do not
+_KIND = re.compile(r"\b([A-Za-z_][\w.]*)[ \t]+(?:Class|Function|Method|Protocol|Decorator|Exception|Enum|Interface"
+                   r"|Struct|Trait)\b")
 _NOT_KIND_NAMES = {"the", "a", "an", "base", "abstract", "main", "core", "helper", "helpers", "utility", "custom",
                    "new", "this", "each", "every", "data", "python", "public", "private", "generic", "parent", "child",
-                   "test", "top", "key", "other", "user-defined", "built-in"}
+                   "test", "top", "key", "other", "user-defined", "built-in", "class", "static", "instance", "example",
+                   "examples", "your", "my", "wrapper", "sample", "simple", "inner", "nested", "async", "special",
+                   "magic", "dunder", "module", "global", "factory", "callback"}
+# what a standard-library base implies about a class's bases
+_IMPLIED = {"StrEnum": ("str", "Enum"), "IntEnum": ("int", "Enum"), "Flag": ("Enum",),
+            "IntFlag": ("int", "Flag", "Enum"), "ABCMeta": ("ABC",)}
 _GIVEN_LANGUAGES = ("python", "py", "python3", "")  # a fenced block the request gives as Python code
 
 
-def leaf_sections(text: str) -> list[tuple[int, str, str]]:
-    """(line number, heading, body) for each Markdown heading outside code fences that has no deeper heading
-    under it; the body is the text up to the next heading. A fence closes only on the same character, at least as
-    long, as CommonMark has it."""
+def _all_sections(text: str) -> list[tuple[int, str, str, bool]]:
+    """(line number, heading, body, is a leaf) for each Markdown heading outside code fences; the body is the text
+    up to the next heading, and a leaf has no deeper heading under it. A fence closes only on the same character,
+    at least as long, as CommonMark has it."""
     lines, found, fence = text.splitlines(), [], None
     for number, line in enumerate(lines, 1):
         opened = _FENCE.match(line)
@@ -64,9 +72,26 @@ def leaf_sections(text: str) -> list[tuple[int, str, str]]:
         if match:
             found.append((len(match.group(1)), number, match.group(2).strip()))
     ends = [number - 1 for _, number, _ in found[1:]] + [len(lines)]
-    return [(number, heading, "\n".join(lines[number:end]))
-            for i, ((level, number, heading), end) in enumerate(zip(found, ends))
-            if i + 1 == len(found) or found[i + 1][0] <= level]
+    return [(number, heading, "\n".join(lines[number:end]), i + 1 == len(found) or found[i + 1][0] <= level)
+            for i, ((level, number, heading), end) in enumerate(zip(found, ends))]
+
+
+def leaf_sections(text: str) -> list[tuple[int, str, str]]:
+    """(line number, heading, body) for each Markdown heading outside code fences that has no deeper heading
+    under it; the body is the text up to the next heading."""
+    return [(number, heading, body) for number, heading, body, leaf in _all_sections(text) if leaf]
+
+
+def checked_sections(text: str) -> list[tuple[int, str, str]]:
+    """The leaf sections, and each heading with sub-headings whose own text gives Python code for a name the
+    heading carries ("## Strategy Class", its class, then "### Methods")."""
+    out = []
+    for number, heading, body, leaf in _all_sections(text):
+        names = set(_raw_names(heading)) if not leaf else set()
+        if leaf or any(key.split(".")[0] in names | {n.split(".")[-1] for n in names}
+                       for key in given_definitions(body)):
+            out.append((number, heading, body))
+    return out
 
 
 def leaf_headings(text: str) -> list[tuple[int, str]]:
@@ -152,41 +177,65 @@ def defined_names(root, skip=()) -> set[str]:
     return out - _NOT_NAMES - {""}
 
 def _base_name(node) -> str:
-    """`Generic[UP, ID]` -> Generic, `abc.ABC` -> ABC."""
+    """`Generic[UP, ID]` -> Generic, `abc.ABC` -> ABC, `name.setter` -> setter."""
     while isinstance(node, (ast.Subscript, ast.Call)):
         node = node.value if isinstance(node, ast.Subscript) else node.func
     return node.attr if isinstance(node, ast.Attribute) else getattr(node, "id", "")
 
 
+def _class_bases(node: ast.ClassDef) -> tuple:
+    """A class's base names, with what its spelling implies: `Protocol[T]` and PEP 695 `class C[T]` are generic,
+    `metaclass=ABCMeta` is an ABC."""
+    names = []
+    for base in node.bases:
+        name = _base_name(base)
+        names += [name] + (["Generic"] if isinstance(base, ast.Subscript) and name == "Protocol" else [])
+    if getattr(node, "type_params", None):
+        names.append("Generic")
+    names += ["ABC" for k in node.keywords if k.arg == "metaclass" and _base_name(k.value) == "ABCMeta"]
+    return tuple(n for n in dict.fromkeys(names) if n and n != "object")
+
+
+def _signature(node) -> str:
+    """One line: `class Name(bases)` or `def name(params)`, however the source wraps it."""
+    if isinstance(node, ast.ClassDef):
+        return f"class {node.name}({', '.join(ast.unparse(x) for x in node.bases + node.keywords)})"
+    return f"def {node.name}({ast.unparse(node.args)})"
+
+
 def _python_definitions(source: str) -> dict[str, list[tuple]]:
     """Top-level classes and functions, and the methods of top-level classes (`Class.method`), of Python source:
-    {name: [(kind, info, line)]}, where info is a class's base names, or a function's parameter names, whether
-    it takes *args or **kwargs, and whether its first parameter is self or cls; empty for text that is not Python."""
-    try:
-        tree = ast.parse(source)
-    except (SyntaxError, ValueError):
-        return {}
-    lines, out = source.splitlines(), {}
+    {name: [(kind, info, signature, line)]}. info is a class's base names, or a function's parameter names (not
+    positional-only ones), whether it takes *args or **kwargs, and whether its first parameter is self or cls.
+    Setters, deleters and @overload stubs are left out. Empty for text that is not Python or too deep to parse."""
+    out = {}
 
     def add(key, node):
-        line = lines[node.lineno - 1].strip() if node.lineno <= len(lines) else ""
+        if any(_base_name(d) in ("setter", "deleter", "overload") for d in node.decorator_list):
+            return
         if isinstance(node, ast.ClassDef):
-            info = tuple(n for n in (_base_name(b) for b in node.bases) if n and n != "object")
-            out.setdefault(key, []).append(("class", info, line))
+            out.setdefault(key, []).append(("class", _class_bases(node), _signature(node), node.lineno))
         else:
             a = node.args
-            every = [p.arg for p in a.posonlyargs + a.args + a.kwonlyargs]
-            names = [n for n in every if n not in ("self", "cls")]
-            method = bool(every) and every[0] in ("self", "cls")
-            out.setdefault(key, []).append(("def", (tuple(names), bool(a.vararg or a.kwarg), method), line))
+            first = (a.posonlyargs + a.args)[:1]
+            names = [p.arg for p in a.args + a.kwonlyargs if p.arg not in ("self", "cls")]
+            method = bool(first) and first[0].arg in ("self", "cls")
+            out.setdefault(key, []).append(
+                ("def", (tuple(names), bool(a.vararg or a.kwarg), method), _signature(node), node.lineno))
 
-    for node in tree.body:
-        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-            add(node.name, node)
-        if isinstance(node, ast.ClassDef):
-            for item in node.body:
-                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    add(f"{node.name}.{item.name}", item)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            tree = ast.parse(source)
+        for node in tree.body:
+            if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                add(node.name, node)
+            if isinstance(node, ast.ClassDef):
+                for item in node.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        add(f"{node.name}.{item.name}", item)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return {}
     return out
 
 
@@ -210,39 +259,46 @@ def given_definitions(body: str) -> dict[str, list[tuple]]:
 
 
 def work_definitions(root, skip=()) -> dict[str, list[tuple]]:
-    """The Python definitions of the work's source files (not tests or docs), each with its file and line."""
+    """The Python definitions of the work's source files (not tests or docs); each one's line is "FILE line N"."""
     out = {}
     for name in tree_hash.source_files(root, docs=True, tests=True, skip=skip) or []:
         if not name.endswith(".py") or tree_hash.is_test(name) or tree_hash.is_doc(name):
             continue
         text = _read(Path(root) / name)
         for key, found in (_python_definitions(text) if text else {}).items():
-            out.setdefault(key, []).extend((kind, info, f"{line}` ({name})") for kind, info, line in found)
+            out.setdefault(key, []).extend((k, i, s, f"{name} line {n}") for k, i, s, n in found)
     return out
 
 
 def _ancestors(bases: tuple, work: dict, seen=None) -> set[str]:
-    """The base names of a work class and, through the work's own classes, of their bases."""
+    """The base names of a work class and, through the work's own classes, of their bases; with what the standard
+    library implies (`ValueError` is an `Exception`, `StrEnum` a `str` and an `Enum`)."""
     seen = set() if seen is None else seen
     out = set(bases)
     for base in bases:
         if base in seen:
             continue
         seen.add(base)
-        for kind, info, _ in work.get(base, []):
+        out.update(_IMPLIED.get(base, ()))
+        builtin = getattr(builtins, base, None)
+        if isinstance(builtin, type) and issubclass(builtin, BaseException):
+            out.update(c.__name__ for c in builtin.__mro__)
+        for kind, info, *_ in work.get(base, []):
             if kind == "class":
                 out |= _ancestors(info, work, seen)
     return out
 
 
-def _agrees(given: tuple, found: tuple, work: dict) -> bool:
-    """A class agrees when it has every base the request gives, directly or through the work's own classes; a
-    function when it takes every parameter the request names, or takes *args or **kwargs."""
+def _missing(given: tuple, found: tuple, work: dict) -> list[str] | None:
+    """What the work's definition lacks of the request's: base classes, or parameter names; None when it agrees
+    (a function that takes *args or **kwargs agrees), and None for a class against a function."""
     if given[0] != found[0]:
-        return False
+        return None
     if given[0] == "class":
-        return set(given[1]) <= _ancestors(found[1], work)
-    return set(given[1][0]) <= set(found[1][0]) or found[1][1]
+        lacks = [b for b in given[1] if b not in _ancestors(found[1], work)]
+    else:
+        lacks = [] if found[1][1] else [p for p in given[1][0] if p not in found[1][0]]
+    return lacks or None
 
 
 def differs(heading: str, body: str, work: dict) -> str | None:
@@ -256,18 +312,22 @@ def differs(heading: str, body: str, work: dict) -> str | None:
             continue
         for g in given:
             keys = [key] + ([k for k in work if k.endswith("." + key)] if g[0] == "def" and g[1][2] else [])
-            found = [f for k in keys for f in work.get(k, [])]
-            if found and not any(_agrees(g, f, work) for f in found):
-                return f"the request has `{g[2]}`, the work `{found[0][2]}"
+            found = [f for k in keys for f in work.get(k, []) if f[0] == g[0]]
+            gaps = [_missing(g, f, work) for f in found]
+            if found and all(gaps):
+                what = "base " if g[0] == "class" else "parameter "
+                return (f"the request gives `{g[2]}`; the work's `{found[0][2]}` ({found[0][3]}) lacks "
+                        + what + ", ".join(f"`{x}`" for x in gaps[0]))
     return None
 
+
 def _not_quoted(text: str, requirements: str) -> list[tuple[int, str, str]]:
-    """(line, heading, body) of each leaf section of a long input that no requirement line cites; none for a
-    short input."""
+    """(line, heading, body) of each checked section (see checked_sections) of a long input that no requirement
+    line cites; none for a short input."""
     if len(text.splitlines()) < LONG_INPUT_LINES:
         return []
     lines = [_words(line) for line in requirements.splitlines() if reviewing._REQUIREMENT.match(line)]
-    return [(number, heading, body) for number, heading, body in leaf_sections(text)
+    return [(number, heading, body) for number, heading, body in checked_sections(text)
             if not _is_cited(heading, lines)]
 
 

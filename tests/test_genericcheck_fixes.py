@@ -441,3 +441,71 @@ def test_a_base_the_work_inherits_through_its_own_class_agrees_and_a_method_show
                                         "def parse(file_path):\n    pass\n\n"
                                         "class UrlParser:\n    def parse(self, url):\n        pass\n", spec)
     assert sections.uncited_in_goal(str(gates), str(p), skip=[str(gates)]) == []
+
+# --- review of b2e053d ------------------------------------------------------------------------------------
+
+def _one_section(heading, code, sub=""):
+    return "# Lib\n\n" + FILLER + f"\n## {heading}\n\n```python\n{code}\n```\n{sub}\n## Notes\n\nProse.\n"
+
+
+def test_equivalent_python_bases_agree(tmp_path):
+    import sections
+    cases = [("Strategy Class", "class Strategy(Protocol, Generic[UP, ID]): ...",
+              "from typing import Protocol\nclass Strategy(Protocol[UP, ID]):\n    pass\n"),
+             ("Store Class", "class Store(ABC): ...", "from abc import ABCMeta\nclass Store(metaclass=ABCMeta):\n    pass\n"),
+             ("BadInput Exception", "class BadInput(Exception): ...", "class BadInput(ValueError):\n    pass\n"),
+             ("Color Class", "class Color(str, Enum): ...", "from enum import StrEnum\nclass Color(StrEnum):\n    A = 'a'\n")]
+    if sys.version_info >= (3, 12):
+        cases.append(("Box Class", "class Box(Generic[T]): ...", "class Box[T]:\n    pass\n"))
+    for i, (heading, given, work) in enumerate(cases):
+        p, gates = _given_project(tmp_path / str(i), work, _one_section(heading, given))
+        assert sections.uncited_in_goal(str(gates), str(p), skip=[str(gates)]) == [], heading
+
+
+def test_the_detail_names_what_is_missing_and_where_for_a_multiline_signature(tmp_path):
+    import sections
+    given = "def chunked(\n    iterable,\n    n,\n    strict=False,\n): ..."
+    p, gates = _given_project(tmp_path, "import os\n\ndef chunked(\n    iterable,\n    n,\n):\n    pass\n",
+                              _one_section("`chunked()` Function", given))
+    [found] = sections.uncited_in_goal(str(gates), str(p), skip=[str(gates)])
+    assert "strict" in found["detail"] and "pkg/core.py line 3" in found["detail"], found
+
+
+def test_code_under_a_heading_with_sub_headings_is_compared(tmp_path):
+    import sections
+    p, gates = _given_project(tmp_path, "from abc import ABC\nclass Strategy(ABC):\n    pass\n",
+                              _one_section("Strategy Class", "class Strategy(Protocol, Generic[UP, ID]): ...",
+                                           "\n### Methods\n\nread_token reads a token.\n"))
+    found = {m["heading"]: m for m in sections.uncited_in_goal(str(gates), str(p), skip=[str(gates)])}
+    assert found["Strategy Class"]["kind"] == "differs", found
+
+
+def test_close_never_crashes_on_a_file_too_deep_to_parse(tmp_path):
+    import sections
+    p, gates = _given_project(tmp_path, "class Strategy:\n    pass\n\nx = " + " + ".join(["1"] * 30000) + "\n",
+                              _one_section("Strategy Class", "class Strategy(Protocol): ..."))
+    sections.uncited_in_goal(str(gates), str(p), skip=[str(gates)])  # no RecursionError
+
+
+def test_sections_are_labelled_by_what_they_name(tmp_path):
+    import sections
+    spec = ("# Lib\n\n" + FILLER + "\n## `render()` Function\n\nDraws.\n\n## Overview\n\nProse.\n\n"
+            "## Class Method Notes\n\nProse.\n\n## Writing a handler function\n\nProse.\n")
+    p, gates = _given_project(tmp_path, "handler = None\n", spec)
+    kinds = {m["heading"]: m["kind"] for m in sections.uncited_in_goal(str(gates), str(p), skip=[str(gates)])}
+    assert kinds == {"`render()` Function": "code", "Overview": "prose", "Class Method Notes": "prose",
+                     "Writing a handler function": "prose"}, kinds
+
+
+def test_setters_and_positional_only_names_and_syntax_warnings(tmp_path):
+    import warnings
+    import sections
+    given = ("class Box:\n    @property\n    def name(self): ...\n    @name.setter\n    def name(self, value): ...\n"
+             "def fetch(url, /, timeout=1): ...")
+    work = ("import re\nPATTERN = '\\d+'\n\nclass Box:\n    @property\n    def name(self):\n        return 1\n"
+            "    @name.setter\n    def name(self, v):\n        pass\n\ndef fetch(u, /, timeout=1):\n    pass\n")
+    p, gates = _given_project(tmp_path, work, _one_section("`Box` Class and `fetch()` Function", given))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert sections.uncited_in_goal(str(gates), str(p), skip=[str(gates)]) == []
+    assert not [w for w in caught if issubclass(w.category, SyntaxWarning)]
