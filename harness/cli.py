@@ -218,7 +218,7 @@ def _review_handoff(report: dict, state: dict, digest: str, issue: bool = False)
         report["review_spent"] = ("This goal has had its review round; close completes on a passing gate without "
                                   "another, listing what went unreviewed.")
         return
-    if issue and len(state.get("review_issued") or []) >= reviewing.rounds_per_goal():
+    if reviewing.review_pending(state):
         report["review_pending"] = ("A reviewer is still writing its reply for this goal. Keep building; record "
                                     "its reply with `review` when it ends, and never wait for it.")
         return

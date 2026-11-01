@@ -714,17 +714,19 @@ def note(slug: str, next_action: str | None = None, finding: str | None = None, 
         return _save(state)
 
 def issue_review(slug: str, digest: str, review_file: str) -> None:
-    """Record that `close` handed out the review brief for these files. Once a goal's rounds have all been handed
-    out, a round that never comes back (a reviewer cut off by a call cap, or a background one that died with its
-    session) no longer holds the goal open: heldout2 lost about 70 of 193 sessions re-sending one review."""
+    """Record that `close` handed out the review brief for these files, with the session it went to. Once a goal's
+    rounds have all been handed out and the last can no longer come back (`reviewing.issue_expired`), a round that
+    never came back (a reviewer cut off by a call cap, or a background one that died with its session) no longer
+    holds the goal open: heldout2 lost about 70 of 193 sessions re-sending one review. The same file handed out
+    again in a later session is another round."""
     with filelock.goal_locked(_path(slug)):
         state = load(slug)
         if execution_mode(state) == "state" or state["status"] != "active":
             return
         issued = state.setdefault("review_issued", [])
-        if any(i.get("file") == review_file for i in issued):
+        if any(i.get("file") == review_file and not reviewing.issue_expired(i) for i in issued):
             return
-        issued.append({"at": _now(), "digest": digest, "file": review_file})
+        issued.append({"at": _now(), "digest": digest, "file": review_file, "session": paths.current_session()})
         _save(state)
 
 def latest_observation(state: dict) -> dict | None:
@@ -982,7 +984,7 @@ def _apply_completion(state: dict, observed_hash: str, gate_output: str, allow_u
                 raise GateNotPassed(
                     "An independent review is required (" + "; ".join(reasons)
                     + ") and none has passed for this snapshot.")
-            failed = reviewing.failed_on(state, observed_hash)
+            failed = reviewing.failed_on(state, observed_hash, _requirements(state))
             if failed:
                 raise GateNotPassed(
                     "This goal's review failed these exact files: " + "; ".join(failed)
@@ -995,7 +997,10 @@ def _apply_completion(state: dict, observed_hash: str, gate_output: str, allow_u
                     "line is wrong, record why with `note --finding \"Disputed Rk: <reason>\"`.")
             earlier = reviewing.goal_fail_lines(state)
             unverified = reviewing.goal_unverified_lines(state)
-            state["unreviewed"] = ("Closed after this goal's one review round, without a passing review: "
+            rounds = reviewing.rounds_per_goal()
+            state["unreviewed"] = ("Closed after this goal's "
+                                   + ("one review round" if rounds == 1 else f"{rounds} review rounds")
+                                   + ", without a passing review: "
                                    + "; ".join(reasons) + "."
                                    + (" FAIL lines from that round, fixed but not re-checked by a reviewer: "
                                       + "; ".join(earlier) + "." if earlier else "")

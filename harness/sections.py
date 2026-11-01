@@ -45,7 +45,25 @@ _IMPORT_AS = re.compile(r"^[ \t]*import[ \t]+[\w.]+[ \t]+as[ \t]+(\w+)", re.M)
 
 
 def _imported_names(text: str) -> set[str]:
-    """The names a Python file binds by import: `from m import a, b as c` gives a and c, `import m as n` gives n."""
+    """The names a Python file binds by import: `from m import a, b as c` gives a and c, `import m as n` gives n
+    (a plain `import m` names a module, not code). Parsed with ast; a file ast cannot read falls back to a
+    line pattern."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            tree = ast.parse(text)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        tree = None
+    if tree is not None:
+        out = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                for alias in node.names:
+                    if alias.asname:
+                        out.add(alias.asname)
+                    elif isinstance(node, ast.ImportFrom) and alias.name != "*":
+                        out.add(alias.name)
+        return out
     out = set(_IMPORT_AS.findall(text))
     for group in _FROM_IMPORT.findall(text):
         for item in re.sub(r"#[^\n]*", "", group).strip("() \t\n\\").split(","):

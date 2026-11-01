@@ -326,11 +326,12 @@ refuses. If a FAIL line is wrong, record why with
 action of a session, when every part of the request is built, never in a
 session's last calls; `review_spent` means it has run. Once `close` has handed
 out the brief, that is the round: if the reviewer is cut off, or its reply holds
-only its header, never send it again; the next `close` completes on a passing
+only its header, never send it again; `close` prints `review_pending` until a
+later session starts (or 15 quiet minutes pass), then completes on a passing
 gate. A reviewer still appending verdicts holds the goal until it ends or has
 been quiet for 15 minutes. If it runs in the background, keep building while it
-runs and never wait or search for its reply. A reply whose only open lines are
-UNVERIFIED (a check the environment cannot run) does not block `close`: those
+runs and never wait or search for its reply. A reply that would pass but for its
+UNVERIFIED lines (checks the environment cannot run) does not block `close`: those
 lines go to `unreviewed` and the final report.
 
 For a long request, or a Markdown file it names (200 lines or more), `close` also

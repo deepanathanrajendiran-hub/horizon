@@ -486,17 +486,44 @@ def _writing(text: str, age_s: float) -> bool:
     return decided and not round_finished(text, age_s)
 
 
-def review_spent(state: dict) -> bool:
-    """Whether this goal has had its review round(s): finished rounds on this goal's own checkpoints, or every
-    round handed out by `close` with no reviewer still writing. A round handed out and never answered (heldout2:
-    a reviewer cut off by the call cap after its header, or a background one gone with its session) counts."""
-    if len(goal_rounds(state)) >= rounds_per_goal():
+def issue_expired(entry: dict, now: float | None = None) -> bool:
+    """Whether a round `close` handed out can no longer come back: a later session has started (the reviewer, run
+    inside the session that dispatched it, ended with that session), or neither the hand-out nor its reply file
+    has changed for ROUND_QUIET_S (a runtime without hooks)."""
+    import time
+    import paths
+    session = paths.current_session()
+    if entry.get("session") and session and entry["session"] != session:
         return True
-    if len(state.get("review_issued") or []) < rounds_per_goal():
+    from datetime import datetime
+    try:
+        latest = datetime.fromisoformat(entry["at"]).timestamp()
+    except (KeyError, TypeError, ValueError):
+        return True
+    if entry.get("file") and os.path.exists(entry["file"]):
+        latest = max(latest, _mtime(entry["file"]))
+    return (time.time() if now is None else now) - latest >= ROUND_QUIET_S
+
+
+def review_spent(state: dict) -> bool:
+    """Whether this goal has had its review round(s): finished rounds on this goal's own checkpoints or recorded
+    reviews, or every round handed out by `close` gone past coming back with no reviewer still writing. A round
+    handed out and never answered (heldout2: a reviewer cut off by the call cap after its header, or a
+    background one gone with its session) counts once a later session starts."""
+    needed = rounds_per_goal()
+    if max(len(goal_rounds(state)), len(state.get("reviews") or [])) >= needed:
+        return True
+    issued = state.get("review_issued") or []
+    if len(issued) < needed or not issue_expired(issued[-1]):
         return False
     import time
     now = time.time()
     return not any(_writing(_text(p), now - _mtime(p)) for p in _goal_round_paths(state))
+
+
+def review_pending(state: dict) -> bool:
+    """Every round handed out, and the last one may still come back: keep building, send no other reviewer."""
+    return len(state.get("review_issued") or []) >= rounds_per_goal() and not review_spent(state)
 
 
 def _fail_lines(text: str) -> list[str]:
@@ -514,14 +541,14 @@ def _fail_lines(text: str) -> list[str]:
     return list(dict.fromkeys(out))
 
 
-def failed_on(state: dict, digest: str) -> list[str]:
+def failed_on(state: dict, digest: str, requirements: dict | None = None) -> list[str]:
     """Why a reviewer failed exactly these files: a recorded `review --result fail`, or FAIL lines and headlines
-    in a round file for this checkpoint, whatever the requirement ids. A recorded fail whose reply has
-    UNVERIFIED lines and no FAIL line is not one: the reviewer could not check (heldout2: mypy, Windows or
-    another Python missing from the sandbox), and nothing in the work is known to be wrong."""
+    in a round file for this checkpoint, whatever the requirement ids. A recorded fail is not one when the only
+    thing keeping its reply from a pass is UNVERIFIED lines: the reviewer could not check (heldout2: mypy,
+    Windows or another Python missing from the sandbox), and nothing in the work is known to be wrong."""
     out = [f"a recorded review FAIL by {r.get('judge')}" for r in state.get("reviews") or []
            if r.get("tree_hash") == digest and r.get("result") == "fail"
-           and not (_unverified_lines(r.get("evidence") or "") and not _fail_lines(r.get("evidence") or ""))]
+           and not only_unverified(r.get("evidence") or "", digest, requirements)]
     prefix = str(digest)[:HASH_ECHO]
     for path in _goal_round_paths(state):
         if f"-{prefix}-" not in os.path.basename(path):
@@ -530,6 +557,14 @@ def failed_on(state: dict, digest: str) -> list[str]:
         if echoes(text, digest):
             out += _fail_lines(text)
     return list(dict.fromkeys(out))
+
+
+def only_unverified(evidence: str, digest: str, requirements: dict | None) -> bool:
+    """A reply for these files that would be a pass but for its UNVERIFIED lines."""
+    if not echoes(evidence, digest):
+        return False
+    refusals = pass_refusals(evidence, requirements)
+    return bool(refusals) and all(re.match(r"R[\w.]*: UNVERIFIED(?: \(line:|$)", r) for r in refusals)
 
 
 def _unverified_lines(text: str) -> list[str]:

@@ -53,6 +53,12 @@ def project(tmp_path):
                               cwd=p, capture_output=True, text=True, timeout=120, env=env)
         return done.returncode, (json.loads(done.stdout) if done.stdout.strip().startswith("{") else done.stderr)
     cli.env = env
+
+    def new_session(session):
+        subprocess.run([sys.executable, ENTRY, "--runtime", "claude", "--project", str(p), "hook", "SessionStart"],
+                       input=json.dumps({"session_id": session, "source": "startup"}), cwd=p, capture_output=True,
+                       text=True, timeout=120, env=env)
+    cli.new_session = new_session
     return p, cli
 
 
@@ -73,6 +79,7 @@ def _start(p, cli, requirements='R1 [gate] "Parsing, Project Layout, Output Form
 
 
 def _brief(p, cli):
+    cli.new_session("s1")
     slug, gates = _start(p, cli)
     (p / "src" / "extra.py").write_text("X = 1\n")
     code, out = cli("close", slug)
@@ -86,14 +93,29 @@ def test_a_reviewer_cut_off_after_its_header_does_not_hold_the_goal_open(project
     p, cli = project
     slug, digest, review_file = _brief(p, cli)
     review_file.write_text(f"Reviewed checkpoint: {digest}\n")
+    cli.new_session("s2")  # the capped session ended with its reviewer
     code, out = cli("close", slug)
     assert code == 0 and out["complete"], out
     assert "unreviewed" in out and not out.get("review_brief"), out
 
 
+def test_a_second_close_in_the_same_session_waits_for_the_reviewer(project):
+    # review of fe5740f: the reviewer writes its header first and its verdicts only after testing; a second close
+    # in the same session must not complete under it.
+    p, cli = project
+    slug, digest, review_file = _brief(p, cli)
+    code, out = cli("close", slug)
+    assert code == 1 and not out["complete"] and out.get("review_pending"), out
+    review_file.write_text(f"Reviewed checkpoint: {digest}\n")
+    code, out = cli("close", slug)
+    assert code == 1 and not out["complete"] and out.get("review_pending"), out
+    assert not out.get("review_brief"), out
+
+
 def test_a_review_handed_out_and_never_answered_does_not_hold_the_goal_open(project):
     p, cli = project
     slug, digest, review_file = _brief(p, cli)
+    cli.new_session("s2")
     code, out = cli("close", slug)
     assert code == 0 and out["complete"], out
 
@@ -112,8 +134,11 @@ def test_a_reviewer_still_writing_verdicts_holds_the_goal(project):
     p, cli = project
     slug, digest, review_file = _brief(p, cli)
     review_file.write_text(f"Reviewed checkpoint: {digest}\nR1: PASS - ran parse - ok\n")
+    cli.new_session("s2")
     code, out = cli("close", slug)
-    assert code == 1 and not out["complete"], out
+    assert code == 1 and not out["complete"] and out.get("review_pending"), out
+    code, out = cli("check", slug, "--did", "Ran the gate again", "--next", "Run close")
+    assert out.get("review_pending") and not out.get("review_brief"), out
 
 
 def test_more_rounds_still_need_each_round_to_finish(project):
@@ -121,8 +146,23 @@ def test_more_rounds_still_need_each_round_to_finish(project):
     cli.env["HORIZON_REVIEW_ROUNDS_PER_GOAL"] = "2"
     slug, digest, review_file = _brief(p, cli)
     review_file.write_text(f"Reviewed checkpoint: {digest}\n")
+    cli.new_session("s2")
     code, out = cli("close", slug)
     assert code == 1 and out.get("review_brief"), out
+
+
+def test_with_more_rounds_a_reviewer_that_never_writes_does_not_loop(project):
+    # review of fe5740f: the brief kept the same file name while it did not exist, so the round count never grew.
+    p, cli = project
+    cli.env["HORIZON_REVIEW_ROUNDS_PER_GOAL"] = "2"
+    slug, digest, review_file = _brief(p, cli)
+    cli.new_session("s2")
+    code, out = cli("close", slug)
+    assert code == 1 and out.get("review_brief"), out
+    cli.new_session("s3")
+    code, out = cli("close", slug)
+    assert code == 0 and out["complete"], out
+    assert "2 review rounds" in out["unreviewed"], out
 
 
 def test_an_unverified_only_reply_recorded_as_fail_does_not_block_close(project):
@@ -135,6 +175,18 @@ def test_an_unverified_only_reply_recorded_as_fail_does_not_block_close(project)
     code, out = cli("close", slug)
     assert code == 0 and out["complete"], out
     assert "R1" in out["unreviewed"], out
+
+
+def test_a_recorded_fail_whose_failure_is_in_prose_still_blocks(project):
+    # review of fe5740f: a reply with an UNVERIFIED line and a failure stated in plain words, recorded as a fail
+    p, cli = project
+    slug, digest, review_file = _brief(p, cli)
+    review_file.write_text(f"Reviewed checkpoint: {digest}\nR1: UNVERIFIED - mypy missing\n"
+                           "Verdict: the parser drops leading spaces; R1 does not hold.\n")
+    cli("review", slug, "--result", "fail", "--judge", "reviewer-1", "--hash", digest,
+        "--evidence-file", str(review_file))
+    code, out = cli("close", slug)
+    assert code == 1 and not out["complete"], out
 
 
 def test_a_fail_line_still_blocks_close_on_the_same_files(project):
@@ -182,9 +234,16 @@ def test_imported_names_count_as_defined(tmp_path):
         "from .core import (\n    Alpha,\n    Beta as Gamma,  # renamed\n)\nimport json as fast_json\n")
     _git(tmp_path, "init", "-q")
     _git(tmp_path, "add", "-A")
+    (tmp_path / "pkg" / "more.py").write_text(
+        '"""Usage: from fake import Store, or from the import of goods."""\n'
+        "from .core import (\n    a1,  # see f(x)\n    b1,\n)\nfrom m import c1; import n\n"
+        "from m import d1, \\\n    e1\nimport os.path as osp, json as js\n")
+    _git(tmp_path, "add", "-A")
     names = sections.defined_names(tmp_path)
     assert {"overload", "typed_cast", "Alpha", "Gamma", "fast_json"} <= names
     assert "cast" not in names and "Beta" not in names
+    assert {"a1", "b1", "c1", "d1", "e1", "osp", "js"} <= names
+    assert not {"Store", "of"} & names
 
 
 # --- fixes 1, 3, 4, 5: the skill says so -------------------------------------------------------------

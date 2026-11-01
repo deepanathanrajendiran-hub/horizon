@@ -652,18 +652,21 @@ A goal gets one review round, on any checkpoint (`HORIZON_REVIEW_ROUNDS_PER_GOAL
 
 **What counts as a round:** a round file named for one of the goal's own checkpoints that repeats its hash, and
 is finished. A file is finished when its reply ends in `END VERDICTS`, or when it decided a line and has been quiet
-for 15 minutes (a reviewer still running keeps writing). A round that `close` handed out also counts once no
-reviewer is still writing for the goal (a reply with decided lines, no `END VERDICTS`, changed in the last 15
-minutes): a reviewer cut off after its header, or one that never replied, does not hold the goal open. A brief
-that `check` prints does not count until its reply is finished.
+for 15 minutes (a reviewer still running keeps writing). A recorded `review` also ends a round. A round that `close`
+handed out (it records the session it went to) counts once it can no longer come back, that is once a later
+session has started, or once neither the hand-out nor its reply file has changed for 15 minutes, and no reviewer
+is still writing for the goal (a reply with decided lines, no `END VERDICTS`, changed in the last 15 minutes). So
+a reviewer cut off after its header, or one that never replied, does not hold the goal open past its session.
+Until then `check` and `close` print `review_pending` instead of another brief. The same file handed out again in
+a later session is another round. A brief that `check` prints does not count until its reply is finished.
 
 **After the round,** an explicit `close` completes on a passing gate without a passing review. It reports
 `unreviewed`: why a review was required, plus the FAIL lines the round found that were fixed but not re-checked.
 `check` and `close` then print `review_spent` instead of a brief.
 
 **Two cases still block:**
-- a recorded `review --result fail` on exactly the current files, unless its reply has UNVERIFIED lines and no
-  FAIL line (those lines go to `unreviewed`);
+- a recorded `review --result fail` on exactly the current files, unless the only thing keeping its reply from a pass is
+  UNVERIFIED lines (those lines go to `unreviewed`);
 - a FAIL line or FAIL headline that the round wrote for them.
 
 `close` names these until the files change. `close --if-ready` and the Stop hook never complete a goal without a
