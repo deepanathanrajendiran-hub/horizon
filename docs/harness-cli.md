@@ -652,14 +652,18 @@ A goal gets one review round, on any checkpoint (`HORIZON_REVIEW_ROUNDS_PER_GOAL
 
 **What counts as a round:** a round file named for one of the goal's own checkpoints that repeats its hash, and
 is finished. A file is finished when its reply ends in `END VERDICTS`, or when it decided a line and has been quiet
-for 15 minutes (a reviewer still running keeps writing).
+for 15 minutes (a reviewer still running keeps writing). A round that `close` handed out also counts once no
+reviewer is still writing for the goal (a reply with decided lines, no `END VERDICTS`, changed in the last 15
+minutes): a reviewer cut off after its header, or one that never replied, does not hold the goal open. A brief
+that `check` prints does not count until its reply is finished.
 
 **After the round,** an explicit `close` completes on a passing gate without a passing review. It reports
 `unreviewed`: why a review was required, plus the FAIL lines the round found that were fixed but not re-checked.
 `check` and `close` then print `review_spent` instead of a brief.
 
 **Two cases still block:**
-- a recorded `review --result fail` on exactly the current files;
+- a recorded `review --result fail` on exactly the current files, unless its reply has UNVERIFIED lines and no
+  FAIL line (those lines go to `unreviewed`);
 - a FAIL line or FAIL headline that the round wrote for them.
 
 `close` names these until the files change. `close --if-ready` and the Stop hook never complete a goal without a
@@ -669,15 +673,15 @@ When the goal's `request.md`, or a Markdown file in the project it names, is 200
 each section of it: a heading outside code with no sub-heading under it, and a heading with sub-headings whose own
 text gives Python code for a name it carries. A section is covered when a requirement line cites it, by its words
 or by a code name it carries (`chunked()`, `BaseUserManager`), or when the work defines that code name: a name its
-source files (not tests, docs or config) define, or a file, folder or dotted module path it has. A dotted name
+source files (not tests, docs or config) define or import (`from m import a`, `import m as n`), or a file, folder or dotted module path it has. A dotted name
 needs each part, and code the project had when the goal started does not count. The word before a capitalised
 Class, Function, Method, Protocol and similar ("Strategy Class") is a code name for looking up the work, not for
 citing. When the section gives Python code in a fenced block, the work's definition must also match it: every base
 class the request gives (directly, through the work's own classes, or as the standard library implies, so
 `ValueError` is an `Exception` and `Protocol[T]` is generic), and every parameter it names (not positional-only
 ones), unless the work takes *args or **kwargs. Otherwise `close` lists the section with both signatures and what
-is missing. `close` refuses while any section remains, and sends no reviewer; it lists differing code first, then
-code the work has not built, then prose sections. `start` does not check. At session start, the hook lists the sections whose code differs, so a session sees them
+is missing. Only differing code stops `close` (and no reviewer is sent while any remains). Code the work has not built and
+prose sections are listed in `sections_advisory`, and `close` completes regardless. `start` does not check. At session start, the hook lists the sections whose code differs, so a session sees them
 before `close`.
 
 In a session that resumes a goal some session has worked on (it has a next action or a checkpoint), the

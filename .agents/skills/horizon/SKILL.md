@@ -5,10 +5,10 @@ description: Use for explicitly requested bounded work that must resume across t
 
 # Horizon for Codex
 
-Horizon keeps a goal, its gate (a check command), notes and the next action on disk, so work survives the end of
-a session. This file holds what every session needs. For anything it does not cover (earlier goals, large inputs,
-coverage gates, state mode, the multi-round review, scheduling), read [the full guide](references/guide.md), and
-see [the CLI reference](references/commands.md) for every command.
+Horizon keeps a goal, its gate (a check command), notes and the next action on disk, so work survives the end of a
+session. For anything it does not cover (earlier goals, large inputs, coverage gates, state mode, the multi-round
+review, scheduling), read [the full guide](references/guide.md), and see [the CLI
+reference](references/commands.md) for every command. Never read Horizon's own source or state.
 
 `HARNESS` is the absolute `scripts/harness.py` beside this SKILL.md. `PROJECT` is the directory this session
 started in. Codex has no hooks: run `doctor` once and use the `gates` path it prints as `GATES_ROOT`, then
@@ -29,8 +29,9 @@ review; run what you wrote the way a user would, fix what differs from the reque
 part.
 
 Keep the next action current with `note` after each write: one concrete edit, naming the file and what it needs,
-never a reading plan. Record a bug you will not fix in the same call with `--finding`, and an environment problem
-that is not a code bug with `--fact`, once.
+never a reading plan. Record a bug you will not fix in the same call with `--finding`, and with `--fact`, once, an
+environment problem that is not a code bug or the exact command that worked (interpreter path included), to copy
+instead of retyping.
 
 ```bash
 python3 "$HARNESS" --runtime codex --project "$PROJECT" note "$SLUG" --next "Make parse_date in src/dates.py accept the ISO forms R3 lists"
@@ -77,19 +78,22 @@ python3 "$HARNESS" --runtime codex --project "$PROJECT" start "Requested outcome
 
 ## Working
 
-1. **Write straight into the real files,** never into scratch parts to join later, and keep the work runnable
+1. **Make the deliverable usable first.** In the first session, create the entry point a user calls (the package,
+   module or command the request names) and every module it imports, so that importing or running it works before
+   its parts are filled in; the gate's first check does exactly that.
+2. **Write straight into the real files,** never into scratch parts to join later, and keep the work runnable
    after every write: a session can end at any call.
-2. **Run what you wrote, in the same session.** Before the session can end, run the changed code the way a user
+3. **Run what you wrote, in the same session.** Before the session can end, run the changed code the way a user
    would. Code never run is a guess.
-3. **Build before you verify.** While a part of the request is unbuilt, the next action is building it, not new
+4. **Build before you verify.** While a part of the request is unbuilt, the next action is building it, not new
    checks or a review. Take the largest unbuilt part next, not the next one in reading order.
-4. **Grow the gate with the work.** Add checks for each part as you build it, from the request and its examples.
+5. **Grow the gate with the work.** Add checks for each part as you build it, from the request and its examples.
    A check that passes the first time it runs is not progress. A passing gate means your checks pass, not that
    the request is met.
-5. **Where the request is silent,** follow the conventions of the project and its language. Never assert your own
+6. **Where the request is silent,** follow the conventions of the project and its language. Never assert your own
    guess in the gate: a check of behaviour the request does not state carries a `# judgment` comment.
-6. **Never weaken the gate,** a reviewer's test or the requirements to fit your output. When an example or a
-   caller fails, fix the code, not the caller.
+7. **Never weaken the gate,** a reviewer's test or the requirements to fit your output. When an example or a caller
+   fails, fix the code, not the caller. A check you wrote that contradicts the request is yours to fix.
 
 ```bash
 python3 "$HARNESS" --runtime codex --project "$PROJECT" check "$SLUG" \
@@ -99,21 +103,23 @@ python3 "$HARNESS" --runtime codex --project "$PROJECT" observe "$SLUG"
 
 ## Review and close
 
-When every part is built, run `close`. It completes the goal if a passing gate covers the current files and
-nothing else is missing; otherwise it lists what is. For a long request, or a Markdown file it names (200
-lines or more), `close` lists each section heading that no requirement line quotes and whose function, class
-or path the work does not define: build each, or add a requirement line
-that quotes the heading (saying why, if it is out of scope). A section that gives Python code counts as
-built only when the work's definition matches the code the request gives (its base classes and parameter
-names); `close` shows both, so fix the work to match.
+When every part is built, run `close`. It completes the goal if a passing gate covers the current files and nothing
+else is missing; otherwise it lists what is. For a long request, or a Markdown file it names (200 lines or more),
+`close` lists each section heading that no requirement line quotes and whose function, class or path the work does
+not define, as advice: build what the request needs, but never replace working code, add files the request's layout
+does not list, or write requirement lines only to quote headings; a line saying why, if it is out of scope, is
+enough. A section that gives Python code counts as built only when the work's definition matches the code the
+request gives (its base classes and parameter names); `close` waits for that.
 
-A goal gets one review round. Dispatch it once, as the first action of a session, never in a session's last
-calls: when `close` prints a `review_brief`, send it unchanged to a fresh reviewer with the available Codex
-subagent tool (in this desktop runtime `collaboration.spawn_agent` with `fork_turns: "none"`, then wait for it),
-replacing only `<<ARTIFACTS>>` and `<<HOW_TO_RUN>>`. Record its reply file with `review` (`--result fail` for any FAIL or UNVERIFIED line), fix the
-FAIL lines in the work, and run `close` again: after the round it completes on a passing gate and lists
-what went unreviewed. It will not complete while the work is unchanged since a FAIL. If a FAIL line is wrong,
-record why with `note --finding "Disputed Rk: <reason>"`.
+A goal gets one review round. Dispatch it once, as the first action of a session, never in a session's last calls:
+when `close` prints a `review_brief`, send it unchanged to a fresh reviewer with the available Codex subagent tool
+(in this desktop runtime `collaboration.spawn_agent` with `fork_turns: "none"`, then wait for it), replacing only
+`<<ARTIFACTS>>` and `<<HOW_TO_RUN>>`. Once handed out, it counts as the round: never send it again, even if the
+reviewer is cut off; run `close`. If it runs in the background, keep building while it runs; never wait for its
+reply. Record its reply file with `review` (`--result fail` only when it has a FAIL line; UNVERIFIED lines go to
+the final report), fix the FAIL lines in the work, and run `close` again: after the round it completes on a passing
+gate and lists what went unreviewed. It will not complete while the work is unchanged since a FAIL. If a FAIL line
+is wrong, record why with `note --finding "Disputed Rk: <reason>"`.
 
 ```bash
 python3 "$HARNESS" --runtime codex --project "$PROJECT" close "$SLUG"
@@ -122,18 +128,18 @@ python3 "$HARNESS" --runtime codex --project "$PROJECT" review "$SLUG" \
   --evidence-file "$REVIEW_FILE"
 ```
 
-If `close` says a baseline test file changed, ask the user whether the change is legitimate, and only then record
-it. Never approve a changed test on your own judgment.
+If `close` says a baseline test file changed, restore it and fix the code instead, unless a person is there
+to approve the change; record it only with their approval. Never approve a changed test on your own judgment.
 
 ```bash
 python3 "$HARNESS" --runtime codex --project "$PROJECT" approve-test-change "$SLUG" \
   --path "tests/test_parser.py" --reason "Approved by the user: the old assertion encoded the bug"
 ```
 
-A session's length is not the goal's deadline: never end a session to hand off while the goal is active and
-budget remains. Your work is committed whenever the session is cut off. In an unattended run no one will answer a
-question: make the decision, record it with `note --fact`, and keep building. If `status` shows an attempt you
-did not start, run `step-reclaim` as the guide describes.
+A session's length is not the goal's deadline: never end a session to hand off while the goal is active and budget
+remains. Your work is committed whenever the session is cut off. In an unattended run no one will answer a
+question, so never stop to ask: record your decision, or a check the environment blocks, with `note --fact` and
+keep building. If `status` shows an attempt you did not start, run `step-reclaim` as the guide describes.
 
 ```bash
 python3 "$HARNESS" --runtime codex --project "$PROJECT" step-reclaim "$SLUG" --attempt "$ATTEMPT" --expected-revision 2

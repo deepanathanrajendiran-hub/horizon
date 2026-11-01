@@ -614,6 +614,19 @@ def uncited_sections(state: dict) -> list[dict]:
     return sections.uncited_in_goal(state.get("gate_path"), state["cwd"], state.get("request_inputs"),
                                     skip=_not_work(state), predefined=state.get("predefined_sections", ()))
 
+def differing_sections(state: dict) -> list[dict]:
+    """The sections whose given code the work defines differently: the only part of the section list that stops
+    `close`. The rest is advisory (heldout2)."""
+    return [m for m in uncited_sections(state) if m.get("kind") == "differs"]
+
+
+def advisory_sections(state: dict) -> str:
+    """The `close` note listing unbuilt or unquoted sections, or "" when there are none or they cannot be read."""
+    try:
+        return sections.advisory([m for m in uncited_sections(state) if m.get("kind") != "differs"])
+    except Exception:
+        return ""
+
 
 def _unfixed_fail_lines(state: dict) -> list[str]:
     """FAIL lines from this goal's review rounds whose checkpoint had the work as it is now, less the lines a
@@ -700,6 +713,20 @@ def note(slug: str, next_action: str | None = None, finding: str | None = None, 
             state.setdefault("facts", []).append({"at": _now(), "text": _clip(fact, 400)})
         return _save(state)
 
+def issue_review(slug: str, digest: str, review_file: str) -> None:
+    """Record that `close` handed out the review brief for these files. Once a goal's rounds have all been handed
+    out, a round that never comes back (a reviewer cut off by a call cap, or a background one that died with its
+    session) no longer holds the goal open: heldout2 lost about 70 of 193 sessions re-sending one review."""
+    with filelock.goal_locked(_path(slug)):
+        state = load(slug)
+        if execution_mode(state) == "state" or state["status"] != "active":
+            return
+        issued = state.setdefault("review_issued", [])
+        if any(i.get("file") == review_file for i in issued):
+            return
+        issued.append({"at": _now(), "digest": digest, "file": review_file})
+        _save(state)
+
 def latest_observation(state: dict) -> dict | None:
     """The most recent recorded gate run, trimmed to what an agent needs to act on."""
     records = state.get("observations") or []
@@ -725,12 +752,14 @@ def close(slug: str, *, run_gate: bool = True, timeout: int = gate.DEFAULT_TIMEO
     predates any work. An explicit close may complete them, and says so with
     `unchanged_since_baseline`. When the budget is spent, the current tree is
     recorded as the deliverable (anytime semantics) instead of being left open.
+    Sections of a long request the work has not built are listed in `sections_advisory` and never stop it.
     """
     state = load(slug)
     if state["status"] != "active":
         return {"complete": state["status"] == "complete", "missing": [],
                 "summary": summary(state), "finalized": state.get("finalized"),
                 "observation": latest_observation(state)}
+    advisory = advisory_sections(state)
     try:
         observed = tree_hash.compute(state["cwd"], state.get("watch_paths"))
     except Exception:
@@ -755,6 +784,8 @@ def close(slug: str, *, run_gate: bool = True, timeout: int = gate.DEFAULT_TIMEO
             result["unreviewed"] = done["unreviewed"]
         if unchanged:
             result["unchanged_since_baseline"] = True
+        if advisory:
+            result["sections_advisory"] = advisory
         return result
     except (GateNotPassed, AttemptOpen, RevisionConflict) as exc:
         missing = [str(exc)]
@@ -777,8 +808,11 @@ def close(slug: str, *, run_gate: bool = True, timeout: int = gate.DEFAULT_TIMEO
                                           "tree_hash": observed,
                                           "gate": record["gate"] if record else "not passed"}
                     state = _persist_mutation_locked(state)
-    return {"complete": False, "missing": missing, "summary": summary(state),
-            "finalized": state.get("finalized"), "observation": latest_observation(state)}
+    result = {"complete": False, "missing": missing, "summary": summary(state),
+              "finalized": state.get("finalized"), "observation": latest_observation(state)}
+    if advisory:
+        result["sections_advisory"] = advisory
+    return result
 
 
 
@@ -933,9 +967,9 @@ def _apply_completion(state: dict, observed_hash: str, gate_output: str, allow_u
         raise GateNotPassed(
             "Baseline test files changed: " + ", ".join(changed)
             + ". Completion needs a reviewer's or the user's approval: approve-test-change.")
-    uncited = uncited_sections(state)
-    if uncited:
-        raise GateNotPassed(sections.message(uncited))
+    differing = differing_sections(state)
+    if differing:
+        raise GateNotPassed(sections.message(differing))
     reasons = evidence.review_reasons(state, _requirements(state))
     if reasons:
         criterion = state["gate"]["review_criterion"]
@@ -960,10 +994,13 @@ def _apply_completion(state: dict, observed_hash: str, gate_output: str, allow_u
                     "round: only the gate's checks or Horizon's files did. Fix the work; if a FAIL "
                     "line is wrong, record why with `note --finding \"Disputed Rk: <reason>\"`.")
             earlier = reviewing.goal_fail_lines(state)
+            unverified = reviewing.goal_unverified_lines(state)
             state["unreviewed"] = ("Closed after this goal's one review round, without a passing review: "
                                    + "; ".join(reasons) + "."
                                    + (" FAIL lines from that round, fixed but not re-checked by a reviewer: "
-                                      + "; ".join(earlier) + "." if earlier else ""))
+                                      + "; ".join(earlier) + "." if earlier else "")
+                                   + (" Lines the reviewer could not check: " + "; ".join(unverified) + "."
+                                      if unverified else ""))
     text = (record.get("gate_output") or "").strip() or (
         f"{state['gate']['value']} -> exit 0 (gate produced no output)")
     state["status"] = "complete"

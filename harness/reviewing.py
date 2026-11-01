@@ -479,9 +479,24 @@ def goal_rounds(state: dict) -> list[str]:
     return [p for p in _goal_round_paths(state) if round_finished(_text(p), now - _mtime(p))]
 
 
+def _writing(text: str, age_s: float) -> bool:
+    """A reviewer still at work: its reply has decided lines, no END VERDICTS, and changed within ROUND_QUIET_S."""
+    decided = bool(_fail_lines(text) or any(_DECIDED.match(l) for l in text.splitlines()
+                                            if not l.lstrip().startswith(">")))
+    return decided and not round_finished(text, age_s)
+
+
 def review_spent(state: dict) -> bool:
-    """Whether this goal has had its review round(s): finished rounds on this goal's own checkpoints."""
-    return len(goal_rounds(state)) >= rounds_per_goal()
+    """Whether this goal has had its review round(s): finished rounds on this goal's own checkpoints, or every
+    round handed out by `close` with no reviewer still writing. A round handed out and never answered (heldout2:
+    a reviewer cut off by the call cap after its header, or a background one gone with its session) counts."""
+    if len(goal_rounds(state)) >= rounds_per_goal():
+        return True
+    if len(state.get("review_issued") or []) < rounds_per_goal():
+        return False
+    import time
+    now = time.time()
+    return not any(_writing(_text(p), now - _mtime(p)) for p in _goal_round_paths(state))
 
 
 def _fail_lines(text: str) -> list[str]:
@@ -501,9 +516,12 @@ def _fail_lines(text: str) -> list[str]:
 
 def failed_on(state: dict, digest: str) -> list[str]:
     """Why a reviewer failed exactly these files: a recorded `review --result fail`, or FAIL lines and headlines
-    in a round file for this checkpoint, whatever the requirement ids."""
+    in a round file for this checkpoint, whatever the requirement ids. A recorded fail whose reply has
+    UNVERIFIED lines and no FAIL line is not one: the reviewer could not check (heldout2: mypy, Windows or
+    another Python missing from the sandbox), and nothing in the work is known to be wrong."""
     out = [f"a recorded review FAIL by {r.get('judge')}" for r in state.get("reviews") or []
-           if r.get("tree_hash") == digest and r.get("result") == "fail"]
+           if r.get("tree_hash") == digest and r.get("result") == "fail"
+           and not (_unverified_lines(r.get("evidence") or "") and not _fail_lines(r.get("evidence") or ""))]
     prefix = str(digest)[:HASH_ECHO]
     for path in _goal_round_paths(state):
         if f"-{prefix}-" not in os.path.basename(path):
@@ -512,6 +530,28 @@ def failed_on(state: dict, digest: str) -> list[str]:
         if echoes(text, digest):
             out += _fail_lines(text)
     return list(dict.fromkeys(out))
+
+
+def _unverified_lines(text: str) -> list[str]:
+    """`Rk: UNVERIFIED` lines in a reply, outside its VERDICTS block when the reply gives reasons there."""
+    out = []
+    for line in text.splitlines():
+        decided = _DECIDED.match(line)
+        if decided and not line.lstrip().startswith(">") and _kind(decided.group(2)) == "UNVERIFIED":
+            out.append(line.strip())
+    return list(dict.fromkeys(out))
+
+
+def goal_unverified_lines(state: dict) -> list[str]:
+    """UNVERIFIED lines from this goal's rounds and recorded reviews, for the `unreviewed` note."""
+    out = []
+    for path in goal_rounds(state):
+        out += _unverified_lines(_text(path))
+    for review in state.get("reviews") or []:
+        out += _unverified_lines(review.get("evidence") or "")
+    lines = list(dict.fromkeys(out))
+    detailed = [l for l in lines if len(l.split()) > 2]
+    return detailed or lines
 
 
 def goal_fail_lines(state: dict) -> list[str]:

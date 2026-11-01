@@ -38,6 +38,22 @@ _NOT_NAMES = {"def", "class", "function", "func", "fun", "fn", "struct", "enum",
               "object", "record", "protocol", "const", "let", "var", "val", "module"}
 CONFIG_SUFFIXES = (".toml", ".cfg", ".ini", ".yaml", ".yml", ".json", ".lock", ".txt", ".env")  # keys are not code
 
+# A name the work imports is a name it has: heldout2, typing_extensions replaced 68 working re-exports from
+# `typing` with hand-written copies to clear the section list.
+_FROM_IMPORT = re.compile(r"^[ \t]*from[ \t]+[\w.]+[ \t]+import[ \t]+(\([^)]*\)|[^\n]*)", re.M)
+_IMPORT_AS = re.compile(r"^[ \t]*import[ \t]+[\w.]+[ \t]+as[ \t]+(\w+)", re.M)
+
+
+def _imported_names(text: str) -> set[str]:
+    """The names a Python file binds by import: `from m import a, b as c` gives a and c, `import m as n` gives n."""
+    out = set(_IMPORT_AS.findall(text))
+    for group in _FROM_IMPORT.findall(text):
+        for item in re.sub(r"#[^\n]*", "", group).strip("() \t\n\\").split(","):
+            words = item.split()
+            if words and words[0] != "*":
+                out.add(words[-1] if len(words) == 3 and words[1] == "as" else words[0])
+    return {n for n in out if n.isidentifier()}
+
 # "Authenticator Class", "JWT Strategy Function": the word before a capitalised kind word names code; "The Class",
 # "Class Method" and "writing a handler function" do not
 _KIND = re.compile(r"\b([A-Za-z_][\w.]*)[ \t]+(?:Class|Function|Method|Protocol|Decorator|Exception|Enum|Interface"
@@ -155,10 +171,10 @@ def _defined_by_work(heading: str, defined) -> bool:
 
 
 def defined_names(root, skip=()) -> set[str]:
-    """What the work defines: the names its source files define (not tests, docs or config), and the paths it
-    has: every file and folder path and each trailing part of one (`com/x/Store.java`, `Store.java`), file stems,
-    and dotted module names and their trailing parts (`more_itertools.more` for src/more_itertools/more.py).
-    `skip` names folders to leave out."""
+    """What the work defines: the names its source files define or import (not tests, docs or config), and the
+    paths it has: every file and folder path and each trailing part of one (`com/x/Store.java`, `Store.java`),
+    file stems, and dotted module names and their trailing parts (`more_itertools.more` for
+    src/more_itertools/more.py). `skip` names folders to leave out."""
     out = set()
     for name in tree_hash.source_files(root, docs=True, tests=True, skip=skip) or []:
         parts = name.split("/")
@@ -174,6 +190,8 @@ def defined_names(root, skip=()) -> set[str]:
         if text:
             out.update(_DEFINITION.findall(text))
             out.update(_ASSIGNED.findall(text))
+            if name.endswith((".py", ".pyi")):
+                out.update(_imported_names(text))
     return out - _NOT_NAMES - {""}
 
 def _base_name(node) -> str:
@@ -461,3 +479,24 @@ def message(missing: list[dict], limit: int = 25) -> str:
     more = f" And {len(missing) - shown} more." if len(missing) > shown else ""
     return (" ".join(parts) + more + " Build or fix each to match the request, or add a requirement line that "
             "quotes its heading (saying why, if it is out of scope or differs on purpose); then run close again.")
+
+def advisory(missing: list[dict], limit: int = 25) -> str:
+    """The `close` note, never a refusal, that lists the sections of a long request the work has not built and
+    no requirement line quotes. heldout2: as a refusal it drove about 11 of 24 builds to replace working code,
+    build modules the request does not list and write requirement lines only to quote headings."""
+    groups = [("code", "These sections name code the work has not built in this goal: "),
+              ("prose", "No requirement line quotes these sections: ")]
+    parts, shown = [], 0
+    for kind, lead in groups:
+        items = [m for m in missing if m.get("kind", "code") == kind][:max(0, limit - shown)]
+        if not items:
+            continue
+        shown += len(items)
+        parts.append(lead + "; ".join(f'"{m["heading"]}" ({Path(m["file"]).name} line {m["line"]})'
+                                      for m in items) + ".")
+    if not parts:
+        return ""
+    more = f" And {len(missing) - shown} more." if len(missing) > shown else ""
+    return ("Advisory, close does not need these: " + " ".join(parts) + more + " Build any part the request "
+            "needs that is missing; never replace working code, add files the request's own layout does not "
+            "list, or write requirement lines only to clear this list.")

@@ -110,11 +110,11 @@ def test_close_lists_the_sections_of_a_long_input_no_requirement_line_cites(proj
     p, cli, _ = project
     slug, gates, out = _start(p, cli, 'R1 [gate] "Parsing: parse() reads a line"\n')
     code, out = cli("close", slug)
-    assert code == 1 and not out["complete"], out
-    text = " ".join(out["missing"])
+    # heldout2: the list is advisory; close completes and lists them
+    assert code == 0 and out["complete"], out
+    text = out["sections_advisory"]
     assert "DESIGN.md" in text and "Project Layout" in text and "Output Format" in text
     assert '"Parsing"' not in text
-    assert not out.get("review_brief"), out  # no reviewer is sent while the requirements leave parts out
 
 
 def test_start_does_not_list_the_sections_so_the_first_session_builds(project):
@@ -213,11 +213,12 @@ def test_only_named_markdown_files_are_checked_and_not_ones_the_goal_changes(pro
     slug, gates, out = _start(p, cli, 'R1 [gate] "parse works"\n',
                               request="Fix the crash in src/app.py and add an entry to CHANGELOG.md\n")
     code, out = cli("close", slug)
-    text = " ".join(out["missing"])
+    text = out.get("sections_advisory", "")
     assert "1.0.0 (2024-01-01)" in text and "Copyright" not in text and "helpers" not in text  # no .py comments
+    cli("reopen", slug, "--reason", "check the changed CHANGELOG too")
     (p / "CHANGELOG.md").write_text("# Changelog\n" + FILLER + "## 1.0.1\n- fix\n\n## 1.0.0 (2024-01-01)\n- first\n")
     code, out = cli("close", slug)
-    assert not any("cite" in m for m in out["missing"]), out  # a file the goal writes is not an input
+    assert "1.0.0" not in out.get("sections_advisory", ""), out  # a file the goal writes is not an input
 
 
 def test_only_requirement_lines_cite_and_by_whole_words():
@@ -306,14 +307,14 @@ def test_close_counts_a_section_the_work_defines_as_covered(project):
     (p / "pkg" / "_vendor" / "__init__.py").write_text("")
     (p / "src" / "store.py").write_text("class Store:\n    pass\n")
     code, out = cli("close", slug)
-    text = " ".join(out["missing"])
-    assert code == 1 and "render_table" in text, out
+    text = out["sections_advisory"]
+    assert "render_table" in text, out
     assert "Store" not in text and "_vendor" not in text
-    assert "Build or fix each" in text
-    assert not out.get("review_brief"), out
+    assert "never replace working code" in text
+    cli("reopen", slug, "--reason", "build render_table too")
     (p / "src" / "table.py").write_text("def render_table(rows):\n    return rows\n")
     code, out = cli("close", slug)
-    assert not any("render_table" in m for m in out["missing"]), out
+    assert "render_table" not in out.get("sections_advisory", ""), out
 
 
 def test_a_section_the_project_defined_before_the_goal_still_needs_a_line(project):
@@ -323,7 +324,7 @@ def test_a_section_the_project_defined_before_the_goal_still_needs_a_line(projec
     (p / "DESIGN.md").write_text(CODE_SPEC)  # the fixture's src/tool.py already defines parse
     slug, gates, out = _start(p, cli, 'R1 [gate] "Overview: what it is"\n')
     code, out = cli("close", slug)
-    assert "`parse()` Function" in " ".join(out["missing"]), out
+    assert "`parse()` Function" in out["sections_advisory"], out
 
 
 def test_a_path_heading_needs_that_path_and_a_dotted_name_each_part(tmp_path):

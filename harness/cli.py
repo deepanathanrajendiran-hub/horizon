@@ -189,7 +189,9 @@ def goal_rows(exclude: str | None = None) -> list[dict]:
 
 
 
-def _review_handoff(report: dict, state: dict, digest: str) -> None:
+def _review_handoff(report: dict, state: dict, digest: str, issue: bool = False) -> None:
+    """Hand out the review brief. With `issue` (from `close`), the round counts as handed out: if it never comes
+    back, the next `close` completes without it."""
     review_file = reviewing.next_review_file(
         state["slug"], digest, len(state.get("reviews") or []) + 1,
         watch_paths=state.get("watch_paths") or [state["cwd"]])
@@ -216,6 +218,10 @@ def _review_handoff(report: dict, state: dict, digest: str) -> None:
         report["review_spent"] = ("This goal has had its review round; close completes on a passing gate without "
                                   "another, listing what went unreviewed.")
         return
+    if issue and len(state.get("review_issued") or []) >= reviewing.rounds_per_goal():
+        report["review_pending"] = ("A reviewer is still writing its reply for this goal. Keep building; record "
+                                    "its reply with `review` when it ends, and never wait for it.")
+        return
     # Lines an earlier reviewer of this same checkpoint passed before it was cut off.
     carried, carried_from = reviewing.carried(state["slug"], digest, requirements, review_file)
     rounds = reviewing.round_count(state["slug"], digest, review_file, since)
@@ -236,6 +242,8 @@ def _review_handoff(report: dict, state: dict, digest: str) -> None:
     report["review_brief"] = reviewing.brief_for(
         state, digest, report["review_file"], str(paths.harness_root()),
         carried=report["review_carried"], scope=report["review_scope"])
+    if issue:
+        goal.issue_review(state["slug"], digest, review_file)
 
 
 def check(args) -> tuple[dict, int]:
@@ -449,8 +457,8 @@ def dispatch(args) -> tuple[dict, int]:
                 digest, needs_review = None, False
             # A reviewer is sent only once the requirement lines cover the request.
             if (needs_review and evidence.passing_record(state, digest)
-                    and not goal.uncited_sections(state)):
-                _review_handoff(result, state, digest)
+                    and not goal.differing_sections(state)):
+                _review_handoff(result, state, digest, issue=True)
             _with_examples(result, state)
         return result, 0 if result["complete"] else 1
     if args.action == "approve-test-change":

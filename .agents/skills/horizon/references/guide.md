@@ -37,7 +37,9 @@ never a reading plan, and no session numbers. Update it after each write.
 same call, record it at once with `note SLUG --finding "..."`: findings are
 shown at every session start until `note SLUG --clear-findings`. Record an
 environment problem that is not a code bug (a broken system library, a
-sandbox limit) once with `--fact`, and do not diagnose it again. When the
+sandbox limit) once with `--fact`, and do not diagnose it again. Record the exact
+command that worked, interpreter path included, the same way, and copy it from
+the session-start message instead of retyping it. When the
 session-start message says the next action may already be done, check that
 file once and go on to the next unbuilt part; it also lists the files changed
 since the next action was recorded and the placeholders still to build.
@@ -168,6 +170,11 @@ over the example. Save the returned slug. State belongs to this runtime's projec
 
 ### Building
 
+Make the deliverable usable first. In the first session, create the entry point a user calls (the package,
+module or command the request names) and every module it imports, so that importing or running it works before
+its parts are filled in, and make that the gate's first check. A part that cannot be imported scores as nothing
+built, however complete it is.
+
 Write straight into the real files, never into scratch parts to join later: a session can end at any call, and
 parts not yet joined are lost. A long file goes in as several appends to the file itself. Keep the work runnable
 after every write, and run what you wrote in the same session, the way a user would: code never run is a guess.
@@ -290,9 +297,10 @@ python3 "$HARNESS" --runtime codex --project "$PROJECT" close "$SLUG"
   the fresh reviewer with it, record the verdict with `review`, then run `close`
   again. If it prints `review_failed_lines` or `review_paused` instead, follow
   Independent review.
-- If it says a baseline test file changed, stop and ask the user (or a fresh
-  reviewer) whether the change is legitimate. Only then run
-  `approve-test-change`, naming who approved it and why. Never approve a
+- If it says a baseline test file changed, restore the file and fix the code
+  instead, unless a person (or a fresh reviewer) is there to approve the change.
+  Only with that approval run `approve-test-change`, naming who approved it and
+  why. Never approve a
   changed test on your own judgment.
 
 ```bash
@@ -316,16 +324,25 @@ the gate directory and Horizon's own state has changed since the FAIL, `close`
 refuses. If a FAIL line is wrong, record why with
 `note --finding "Disputed Rk: <reason>"`. So dispatch that round once, as the first
 action of a session, when every part of the request is built, never in a
-session's last calls; `review_spent` means it has run.
+session's last calls; `review_spent` means it has run. Once `close` has handed
+out the brief, that is the round: if the reviewer is cut off, or its reply holds
+only its header, never send it again; the next `close` completes on a passing
+gate. A reviewer still appending verdicts holds the goal until it ends or has
+been quiet for 15 minutes. If it runs in the background, keep building while it
+runs and never wait or search for its reply. A reply whose only open lines are
+UNVERIFIED (a check the environment cannot run) does not block `close`: those
+lines go to `unreviewed` and the final report.
 
 For a long request, or a Markdown file it names (200 lines or more), `close` also
 lists each section heading that no requirement line quotes and whose function, class
-or path the work does not define, and sends no reviewer while any remain. Build each, or add a requirement line that quotes
-the heading (saying why, if it is out of scope). A section that gives Python code
+or path the work does not define, as advice (`sections_advisory`) that never
+stops `close`. Build the parts the request needs, but never replace working code,
+add files the request's own layout does not list, or write requirement lines
+only to quote headings (one line saying why, if it is out of scope, is enough). A section that gives Python code
 counts as built only when the work's definition matches the code the request gives:
 a class needs every base class it gives, a function every parameter it names.
-`close` lists those first, with both versions, then sections that name code the work
-has not built, then prose sections.
+Those do stop `close`, and no reviewer is sent while any remain; `close` lists
+them with both versions.
 
 Build first, review last. Dispatch a reviewer only when you believe every part
 of the request is built and your gate checks it. While parts of the request are
@@ -385,9 +402,9 @@ every requirement line is PASS, or NOT REVIEWED on a line tagged
 `[unverifiable]`. The brief ends with a `VERDICTS` block that the reviewer fills
 in. The CLI refuses a pass when that block is missing, incomplete or holds a
 FAIL or UNVERIFIED, when the reply has a `Rk: FAIL` line or a FAIL headline
-elsewhere, or when it does not echo the checkpoint hash; record `fail` instead. A FAIL or UNVERIFIED line is not a pass:
-spend the next increment on those lines while budget remains, or stop and report
-them as unverified. A reviewer's expectation ("should handle", "by design",
+elsewhere, or when it does not echo the checkpoint hash; record `fail` instead. A FAIL line is not a pass: fix
+it in the work while budget remains. An UNVERIFIED line (a check the environment
+cannot run) needs no fix: report it as unverified. A reviewer's expectation ("should handle", "by design",
 "harmless") is not evidence. Use the real reviewer handle and the hash the
 reviewer was given and echoed. Never record a review against a later checkpoint
 or another goal. If anything changed after the reviewer saw it, run `close` for

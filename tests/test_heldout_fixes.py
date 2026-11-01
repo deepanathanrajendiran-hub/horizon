@@ -338,7 +338,10 @@ def test_a_fail_headline_in_the_round_file_blocks_close_without_rk_lines(project
 
 
 def test_an_empty_file_with_a_round_name_does_not_spend_the_review(project):
+    # heldout2: a round handed out by close counts once handed out; with more rounds allowed, an empty file
+    # with a round's name is still not a finished round.
     p, cli, _, _, review_dir = project
+    cli.env["HORIZON_REVIEW_ROUNDS_PER_GOAL"] = "2"
     slug, digest, review_file = _brief(p, cli)
     (review_dir / f"horizon-review-{slug}-000000000000-1.md").write_text("")
     code, out = cli("close", slug)
