@@ -117,11 +117,12 @@ def test_close_lists_the_sections_of_a_long_input_no_requirement_line_cites(proj
     assert not out.get("review_brief"), out  # no reviewer is sent while the requirements leave parts out
 
 
-def test_start_reports_the_uncited_sections_so_the_requirements_can_be_fixed_first(project):
+def test_start_does_not_list_the_sections_so_the_first_session_builds(project):
+    # genericfix: listing 181 sections at start made More-Itertools' session 1 write 193 requirement lines and
+    # build nothing; only close checks the sections now.
     p, cli, _ = project
     slug, gates, out = _start(p, cli, 'R1 [gate] "Parsing: parse() reads a line"\n')
-    assert [s["heading"] for s in out["uncited_sections"]] == ["Project Layout", "Output Format"]
-    assert out["uncited_sections"][0]["file"].endswith("DESIGN.md")
+    assert "uncited_sections" not in out
 
 
 def test_citing_every_section_or_marking_it_out_of_scope_lets_close_finish(project):
@@ -136,7 +137,6 @@ def test_citing_every_section_or_marking_it_out_of_scope_lets_close_finish(proje
 def test_a_short_request_with_no_named_input_is_not_checked(project):
     p, cli, _ = project
     slug, gates, out = _start(p, cli, 'R1 [gate] "parse works"\n', request="Make parse() strip spaces\n")
-    assert out["uncited_sections"] == []
     code, out = cli("close", slug)
     assert not any("cite" in m for m in out["missing"]), out
 
@@ -194,10 +194,11 @@ def test_a_documentation_only_session_does_not_clear_the_plateau(project):
 # --- the skill says so ---------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("folder", [".claude", ".agents"])
-def test_the_skill_says_requirement_lines_cite_every_section_of_a_long_input(folder):
+def test_the_skill_says_close_lists_the_sections_neither_cited_nor_built(folder):
     core = " ".join((ROOT / folder / "skills/horizon/SKILL.md").read_text().split())
-    assert "cite every section heading" in core
-    assert "uncited_sections" in core
+    assert "cite every section heading" not in core  # no citing up front
+    assert "`close` lists each section heading" in core
+    assert "the work does not define" in core
     assert "Disputed Rk:" in core
 
 
@@ -209,7 +210,9 @@ def test_only_named_markdown_files_are_checked_and_not_ones_the_goal_changes(pro
     (p / "CHANGELOG.md").write_text("# Changelog\n" + FILLER + "## 1.0.0 (2024-01-01)\n- first\n")
     slug, gates, out = _start(p, cli, 'R1 [gate] "parse works"\n',
                               request="Fix the crash in src/app.py and add an entry to CHANGELOG.md\n")
-    assert [s["heading"] for s in out["uncited_sections"]] == ["1.0.0 (2024-01-01)"]  # no .py comments
+    code, out = cli("close", slug)
+    text = " ".join(out["missing"])
+    assert "1.0.0 (2024-01-01)" in text and "Copyright" not in text and "helpers" not in text  # no .py comments
     (p / "CHANGELOG.md").write_text("# Changelog\n" + FILLER + "## 1.0.1\n- fix\n\n## 1.0.0 (2024-01-01)\n- first\n")
     code, out = cli("close", slug)
     assert not any("cite" in m for m in out["missing"]), out  # a file the goal writes is not an input
@@ -245,3 +248,66 @@ def test_a_requirements_txt_edit_clears_the_plateau(project):
     start_message()
     (p / "requirements.txt").write_text("requests\n")
     assert "Plateau" not in start_message()
+
+# --- genericfix (0519b6e): a section the work defines is covered ------------------------------------------
+# More-Itertools' 181 sections were mostly one function each; citing each one in a requirement line cost a
+# session and a 193-line requirements file re-read every session after.
+
+CODE_SPEC = ("# Lib\n\n" + FILLER + "\n## `parse()` Function\n\nReads a line.\n\n## `render_table()` Function\n\n"
+             "Prints rows.\n\n## `Store` Class\n\nKeeps rows.\n\n## `pkg/_vendor` Layout\n\nThe vendored copy.\n\n"
+             "## Overview\n\nWhat it is.\n")
+
+
+def test_a_section_whose_code_name_the_work_defines_needs_no_citing():
+    import sections
+    reqs = 'R1 [gate] "Overview: what it is"\n'
+    assert [h for _, h in sections.uncited(CODE_SPEC, reqs)] == [
+        "`parse()` Function", "`render_table()` Function", "`Store` Class", "`pkg/_vendor` Layout"]
+    defined = {"parse", "Store", "pkg/_vendor", "Overview"}
+    assert [h for _, h in sections.uncited(CODE_SPEC, reqs, defined)] == ["`render_table()` Function"]
+    # a heading with no code name still needs its words in a requirement line
+    assert [h for _, h in sections.uncited(CODE_SPEC, 'R1 [gate] "works"\n', defined)] == [
+        "`render_table()` Function", "Overview"]
+    # a dotted name is covered by its last part
+    text = "# T\n" + FILLER + "## `more_itertools.chunked`\nx\n"
+    assert sections.uncited(text, "R1 x\n", {"chunked"}) == []
+
+
+def test_the_work_defines_what_its_source_defines_and_the_paths_it_has(tmp_path):
+    import sections
+    p = tmp_path / "w "
+    (p / "pkg" / "_vendor" / "lib").mkdir(parents=True)
+    (p / "pkg" / "_vendor" / "lib" / "__init__.py").write_text("")
+    (p / "pkg" / "core.py").write_text("import os\n\nMAX_ROWS = 3\n\nclass Store:\n    def render(self):\n"
+                                       "        return chunked(1)\n\nasync def fetch():\n    pass\n")
+    (p / "web.js").write_text("export function mountRoutes(app) {}\nconst helperFn = () => 1;\n")
+    (p / "tests").mkdir()
+    (p / "tests" / "test_core.py").write_text("def only_in_tests():\n    pass\n")
+    (p / "docs").mkdir()
+    (p / "docs" / "notes.md").write_text("def only_in_docs():\n")
+    (p / "gate").mkdir()
+    (p / "gate" / "check.py").write_text("def only_in_gate():\n    pass\n")
+    _git(p, "init", "-q")
+    names = sections.defined_names(p, skip=[p / "gate"])
+    assert {"MAX_ROWS", "Store", "render", "fetch", "mountRoutes", "helperFn"} <= names
+    assert {"pkg/_vendor", "pkg/_vendor/lib", "pkg/core.py", "core.py", "_vendor", "pkg.core",
+            "pkg._vendor.lib"} <= names
+    assert not {"chunked", "only_in_tests", "only_in_docs", "only_in_gate", "os"} & names
+
+
+def test_close_counts_a_section_the_work_defines_as_covered(project):
+    p, cli, _ = project
+    (p / "DESIGN.md").write_text(CODE_SPEC)
+    (p / "pkg" / "_vendor").mkdir(parents=True)
+    (p / "pkg" / "_vendor" / "__init__.py").write_text("")
+    (p / "src" / "store.py").write_text("class Store:\n    pass\n")
+    slug, gates, out = _start(p, cli, 'R1 [gate] "Overview: what it is"\n')
+    code, out = cli("close", slug)
+    text = " ".join(out["missing"])
+    assert code == 1 and "render_table" in text, out
+    assert "parse()" not in text and "Store" not in text and "_vendor" not in text
+    assert "Build each" in text
+    assert not out.get("review_brief"), out
+    (p / "src" / "table.py").write_text("def render_table(rows):\n    return rows\n")
+    code, out = cli("close", slug)
+    assert not any("render_table" in m for m in out["missing"]), out

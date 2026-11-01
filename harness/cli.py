@@ -397,7 +397,6 @@ def dispatch(args) -> tuple[dict, int]:
         report = status(state)
         report["observation"] = goal.latest_observation(state)
         report["other_goals"] = goal_rows(exclude=state["slug"])
-        report["uncited_sections"] = goal.uncited_sections(state)
         report.update(installed)
         if getattr(args, "spec_examples", None) is not None:
             report["spec_examples"] = args.spec_examples

@@ -667,8 +667,9 @@ passing review.
 
 When the goal's `request.md`, or a Markdown file in the project it names, is 200 lines or more, every section
 heading of it (a heading outside code with no sub-heading under it) must be cited by some requirement line, by
-its words or by a code name it carries (`chunked()`, `BaseUserManager`). `start` prints the rest as
-`uncited_sections`; `close` refuses while any remain and sends no reviewer. A named file the work changes after
+its words or by a code name it carries (`chunked()`, `BaseUserManager`), or the work must define that code name:
+a function, class or constant its source files (not tests or docs) define, or a file, folder or dotted module
+path it has. `close` lists the rest and refuses while any remain, and sends no reviewer; `start` does not check. A named file the work changes after
 the baseline (a CHANGELOG the request says to extend) is an output and is not checked.
 After a failed review round, `close` refuses while the work (every project file, hidden files and tests
 included, outside the gate directory and Horizon's own state) is unchanged since the round, unless a

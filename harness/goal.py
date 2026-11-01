@@ -603,9 +603,10 @@ def _work_digest(state: dict) -> str | None:
                                    skip=[p for p in [state.get("gate_path"), str(paths.harness_root())] if p])
 
 def uncited_sections(state: dict) -> list[dict]:
-    """Sections of a long request, or of a Markdown file it names, that no requirement line cites; a named file
-    the work has changed since the baseline is an output, not part of the request."""
-    return sections.uncited_in_goal(state.get("gate_path"), state["cwd"], state.get("request_inputs"))
+    """Sections of a long request, or of a Markdown file it names, that no requirement line cites and whose code
+    name the work does not define; a named file the work has changed since the baseline is an output."""
+    return sections.uncited_in_goal(state.get("gate_path"), state["cwd"], state.get("request_inputs"),
+                                    skip=[p for p in [state.get("gate_path"), str(paths.harness_root())] if p])
 
 
 def _unfixed_fail_lines(state: dict) -> list[str]:

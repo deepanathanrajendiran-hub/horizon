@@ -3,12 +3,16 @@
 NL2Repo generic check: the agent's requirement lines covered part of a long request (20 lines for a 776-line
 spec), so a layout one section listed, and a reference section that described about 50 classes one by one, were
 never built or compared. A section is a Markdown heading with no sub-heading under it; a requirement line cites
-it by the heading's words, ignoring case, numbering and Markdown marks."""
+it by the heading's words, ignoring case, numbering and Markdown marks.
+
+genericfix: a section is also covered when the work defines the function, class or path its heading names,
+so a spec of one section per function needs no requirement line per function; `close` checks, not `start`."""
 import hashlib
 import re
 from pathlib import Path
 
 import reviewing
+import tree_hash
 
 LONG_INPUT_LINES = 200  # shorter inputs are read whole and need no section check
 _HEADING = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$")
@@ -17,6 +21,13 @@ INPUT_SUFFIXES = (".md", ".markdown")  # a named .py or .yaml file's `#` comment
 MAX_INPUT_BYTES = 5_000_000
 _NUMBER = re.compile(r"^\d+(\.\d+)*[.):]*\s+")  # "2. ", "10.1. ", "8.: ", "10: "
 _NAME = re.compile(r"[\w./-]+\.\w+")
+
+# A name the work defines: def/class/function/fn/struct/... NAME in common languages, or a top-level NAME = ...
+_DEFINITION = re.compile(
+    r"^[ \t]*(?:export[ \t]+(?:default[ \t]+)?)?(?:pub(?:\([^)\n]*\))?[ \t]+)?(?:async[ \t]+)?"
+    r"(?:def|class|function\*?|func(?:[ \t]*\([^)\n]*\))?|fn|struct|enum|interface|trait|type|const|let|var"
+    r"|module)[ \t]+([A-Za-z_$][\w$]*)", re.M)
+_ASSIGNED = re.compile(r"^([A-Za-z_$][\w$]*)[ \t]*(?::[^=\n]*)?=(?!=)", re.M)
 
 
 def leaf_headings(text: str) -> list[tuple[int, str]]:
@@ -60,13 +71,52 @@ def _is_cited(heading: str, lines: list[str]) -> bool:
     patterns = [re.compile(r"(?<![\w.])" + re.escape(name) + r"(?![\w])") for name in names if name]
     return any(p.search(line) for p in patterns for line in lines)
 
-def uncited(text: str, requirements: str) -> list[tuple[int, str]]:
+def _raw_names(heading: str) -> list[str]:
+    """The code names a heading carries as written, for looking up in the work: the leading name of backticked
+    text, `name()` calls, snake_case and CamelCase words."""
+    names = [m.group(1) for text in re.findall(r"`([^`]+)`", heading) if (m := re.match(r"\s*([\w$./-]+)", text))]
+    names += re.findall(r"\b([A-Za-z_][\w.]*)\(\)", heading)
+    names += [w for w in re.findall(r"\b[A-Za-z_][\w.]*\b", heading)
+              if "_" in w.strip("_") or re.search(r"[a-z][A-Z]|[A-Z]{2,}[a-z]", w)]
+    return [n for n in dict.fromkeys(n.removeprefix("./").rstrip("/.") for n in names) if len(n) >= 3]
+
+
+def _defined_by_work(heading: str, defined) -> bool:
+    """Whether the work defines a code name the heading carries, or the last part of a dotted or path name."""
+    return any(n in defined or (re.search(r"[./]", n) and re.split(r"[./]", n)[-1] in defined)
+               for n in _raw_names(heading))
+
+
+def defined_names(root, skip=()) -> set[str]:
+    """What the work defines: the names its source files define (not tests or docs), and the paths it has, as
+    files, folders, their base names and dotted module names. `skip` names folders to leave out."""
+    out = set()
+    for name in tree_hash.source_files(root, docs=True, tests=True, skip=skip) or []:
+        parts = name.split("/")
+        out.update("/".join(parts[:i]) for i in range(1, len(parts) + 1))
+        out.update(parts)
+        module = parts[:-1] + [parts[-1].rsplit(".", 1)[0]]
+        out.add(".".join(module))
+        if module[-1] == "__init__":
+            out.add(".".join(module[:-1]))
+        if tree_hash.is_test(name) or tree_hash.is_doc(name):
+            continue
+        text = _read(Path(root) / name)
+        if text:
+            out.update(_DEFINITION.findall(text))
+            out.update(_ASSIGNED.findall(text))
+    out.discard("")
+    return out
+
+def uncited(text: str, requirements: str, defined=frozenset()) -> list[tuple[int, str]]:
     """The leaf headings of a long input that no requirement line (R1, R2, ...) cites, by the heading's words or
-    by a code name it carries (`chunked()`, BaseUserManager); none for a short input."""
+    by a code name it carries (`chunked()`, BaseUserManager), and whose code name is not in `defined` (what the
+    work defines); none for a short input."""
     if len(text.splitlines()) < LONG_INPUT_LINES:
         return []
     lines = [_words(line) for line in requirements.splitlines() if reviewing._REQUIREMENT.match(line)]
-    return [(number, heading) for number, heading in leaf_headings(text) if not _is_cited(heading, lines)]
+    return [(number, heading) for number, heading in leaf_headings(text)
+            if not _is_cited(heading, lines) and not _defined_by_work(heading, defined)]
 
 
 def inputs(request: str, root: Path) -> list[Path]:
@@ -108,9 +158,10 @@ def input_hashes(gate_path: str | None, root: str) -> dict[str, str]:
             if (text := _read(path)) is not None}
 
 
-def uncited_in_goal(gate_path: str | None, root: str, at_start: dict | None = None) -> list[dict]:
-    """Uncited sections of the goal's request.md and of each Markdown file it names, as {file, line, heading};
-    a named file that changed since `at_start` recorded it is an output of the work and is left out."""
+def uncited_in_goal(gate_path: str | None, root: str, at_start: dict | None = None, skip=()) -> list[dict]:
+    """Sections of the goal's request.md and of each Markdown file it names, as {file, line, heading}, that no
+    requirement line cites and whose code name the work does not define; `skip` names folders that are not the
+    work. A named file that changed since `at_start` recorded it is an output of the work and is left out."""
     if not gate_path:
         return []
     directory = Path(gate_path)
@@ -131,13 +182,17 @@ def uncited_in_goal(gate_path: str | None, root: str, at_start: dict | None = No
             continue
         out += [{"file": str(path), "line": number, "heading": heading}
                 for number, heading in uncited(text, requirements)]
+    if out:
+        defined = defined_names(root, skip=skip)
+        out = [m for m in out if not _defined_by_work(m["heading"], defined)]
     return out
 
 
 def message(missing: list[dict], limit: int = 25) -> str:
-    """The `close` refusal that lists the uncited sections."""
+    """The `close` refusal that lists the sections neither cited nor built."""
     shown = "; ".join(f'"{m["heading"]}" ({Path(m["file"]).name} line {m["line"]})' for m in missing[:limit])
     more = f"; and {len(missing) - limit} more" if len(missing) > limit else ""
-    return ("The requirement lines cite no part of these sections of the request: " + shown + more
-            + ". Add a requirement line that quotes each heading, or a line that quotes it and says why it is "
-            "out of scope; then run check.")
+    return ("No requirement line quotes these sections of the request, and the work does not define the "
+            "function, class or path they name: " + shown + more
+            + ". Build each, or add a requirement line that quotes its heading (saying why, if it is out of "
+            "scope); then run close again.")

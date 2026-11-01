@@ -69,9 +69,7 @@ python3 "$HARNESS" --runtime codex --project "$PROJECT" start "Requested outcome
   request's words, keeping qualifiers such as "exact", "all" and "unchanged". Tag `[gate]` a line a command can
   check, `[review]` a line a reviewer can judge by running the work, and `[unverifiable]` a line that states no
   checkable behaviour. Add `[judgment]` to a line with more than one reasonable reading, and record the reading
-  you chose. When the request or a Markdown file it names is long (200 lines or more), cite every section
-  heading of it in some requirement line, quoting the heading or the code name it carries; a section you
-  will not build gets a line that quotes it and says why. `start` prints the `uncited_sections`, and `close` will not finish while any remain.
+  you chose.
 - **The gate:** checks of the `[gate]` lines, called the way existing callers and tests call the code. Take
   expected values from the request and its inputs, never from your own code. When the request says existing
   behaviour must stay the same, capture the current outputs now and compare against them.
@@ -103,7 +101,10 @@ python3 "$HARNESS" --runtime codex --project "$PROJECT" observe "$SLUG"
 ## Review and close
 
 When every part is built, run `close`. It completes the goal if a passing gate covers the current files and
-nothing else is missing; otherwise it lists what is.
+nothing else is missing; otherwise it lists what is. For a long request, or a Markdown file it names (200
+lines or more), `close` lists each section heading that no requirement line quotes and whose function, class
+or path the work does not define: build each, or add a requirement line that quotes the heading and says why
+it is out of scope.
 
 A goal gets one review round. Dispatch it once, as the first action of a session, never in a session's last
 calls: when `close` prints a `review_brief`, send it unchanged to a fresh reviewer with the available Codex

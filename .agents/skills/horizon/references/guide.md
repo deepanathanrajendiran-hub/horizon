@@ -109,11 +109,8 @@ is a short label for this request that no directory there already uses.
    requirement, reported symptom, deliverable and constraint in the request, quoted
    in the request's words. Keep qualifiers such as "exact", "all" and "unchanged",
    and keep stated limits. When the request names a class ("all X", "every Y"),
-   list each member. For a long request or Markdown input (200 lines or more),
-   cite every section heading (a heading with no sub-heading under it) in some
-   requirement line, by its words or the code name it carries; a section you
-   will not build gets a line that quotes it and says why. `start` prints the
-   `uncited_sections`, and `close` refuses while any remain. Tag each line `[gate]`, `[review]` or `[unverifiable]`;
+   list each member. You need not cite every
+   section of a long input: `close` lists the ones neither quoted nor built (see Independent review). Tag each line `[gate]`, `[review]` or `[unverifiable]`;
    tag `[review]` only a line a reviewer can judge by running the work, and tag lines
    that state no checkable behaviour
    ("the functions cooperate") `[unverifiable]`. If a
@@ -320,6 +317,11 @@ refuses. If a FAIL line is wrong, record why with
 `note --finding "Disputed Rk: <reason>"`. So dispatch that round once, as the first
 action of a session, when every part of the request is built, never in a
 session's last calls; `review_spent` means it has run.
+
+For a long request, or a Markdown file it names (200 lines or more), `close` also
+lists each section heading that no requirement line quotes and whose function, class
+or path the work does not define, and sends no reviewer while any remain. Build each,
+or add a requirement line that quotes the heading and says why it is out of scope.
 
 Build first, review last. Dispatch a reviewer only when you believe every part
 of the request is built and your gate checks it. While parts of the request are

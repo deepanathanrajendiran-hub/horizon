@@ -157,12 +157,22 @@ DOC_SUFFIXES = (".md", ".rst", ".adoc")  # not .txt: requirements.txt and CMakeL
 LARGE_FILE_BYTES = 20_000_000
 
 
-def source_digest(root, docs: bool = True, skip=(), hidden: bool = False, tests: bool = False) -> str | None:
-    """A fingerprint of the project's work: every tracked or new file outside build folders, in any language.
-    By default it also leaves out tests and hidden folders and files; `hidden=True` and `tests=True` keep them.
-    `docs=False` leaves out documentation (doc folders and .md/.rst/.adoc files), so a README-only session is no
-    progress for Plateau. `skip` names folders to leave out, such as the gate directory. A file over
-    LARGE_FILE_BYTES counts by its size and modification time. None when the project is not a Git repository."""
+def is_test(name: str) -> bool:
+    """Whether a project-relative path is a test: under tests/ or test/, test_*, or conftest.py."""
+    parts = name.split("/")
+    return (any(p in ("tests", "test") for p in parts[:-1]) or parts[-1].startswith("test_")
+            or parts[-1] == "conftest.py")
+
+
+def is_doc(name: str) -> bool:
+    """Whether a project-relative path is documentation: under docs/ or doc/, or a .md/.rst/.adoc file."""
+    parts = name.split("/")
+    return parts[-1].lower().endswith(DOC_SUFFIXES) or any(p in ("docs", "doc") for p in parts[:-1])
+
+
+def source_files(root, docs: bool = True, skip=(), hidden: bool = False, tests: bool = False) -> list[str] | None:
+    """The project's tracked or new files outside build folders, as sorted paths relative to `root`, filtered as
+    `source_digest` says. None when the project is not a Git repository."""
     root = Path(root)
     try:
         out = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
@@ -177,20 +187,31 @@ def source_digest(root, docs: bool = True, skip=(), hidden: bool = False, tests:
             skipped.append(Path(folder).resolve().relative_to(root.resolve()).as_posix().rstrip("/") + "/")
         except (OSError, ValueError):
             continue
-    digest = hashlib.sha256()
+    names = []
     for name in sorted(set(n for n in out.stdout.decode(errors="replace").split("\0") if n)):
         parts = name.split("/")
         if any(p in NOT_SOURCE for p in parts[:-1]) or any(name.startswith(s) for s in skipped):
             continue
         if not hidden and (any(p.startswith(".") for p in parts[:-1]) or parts[-1].startswith(".")):
             continue
-        if not tests and (any(p in ("tests", "test") for p in parts[:-1])
-                          or parts[-1].startswith("test_") or parts[-1] == "conftest.py"):
+        if (not tests and is_test(name)) or (not docs and is_doc(name)):
             continue
-        if not docs and (parts[-1].lower().endswith(DOC_SUFFIXES)
-                         or any(p in ("docs", "doc") for p in parts[:-1])):
-            continue
-        path = root / name
+        names.append(name)
+    return names
+
+
+def source_digest(root, docs: bool = True, skip=(), hidden: bool = False, tests: bool = False) -> str | None:
+    """A fingerprint of the project's work: every tracked or new file outside build folders, in any language.
+    By default it also leaves out tests and hidden folders and files; `hidden=True` and `tests=True` keep them.
+    `docs=False` leaves out documentation (doc folders and .md/.rst/.adoc files), so a README-only session is no
+    progress for Plateau. `skip` names folders to leave out, such as the gate directory. A file over
+    LARGE_FILE_BYTES counts by its size and modification time. None when the project is not a Git repository."""
+    names = source_files(root, docs=docs, skip=skip, hidden=hidden, tests=tests)
+    if names is None:
+        return None
+    digest = hashlib.sha256()
+    for name in names:
+        path = Path(root) / name
         try:
             info = path.stat()
             data = (f"{info.st_size}:{info.st_mtime_ns}".encode() if info.st_size > LARGE_FILE_BYTES
