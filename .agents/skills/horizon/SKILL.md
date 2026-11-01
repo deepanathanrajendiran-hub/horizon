@@ -24,8 +24,9 @@ python3 "$HARNESS" --runtime codex --project "$PROJECT" doctor
 
 Run `status SLUG` once and read its `next_action`, `last_observation` and `notes_file`; if files changed since
 `last_observation`, run `observe` for a current result. Do not re-read the request or the requirements unless the
-next action needs a part of it. Make your first edit within your first few tool calls; never spend a session only
-reading. If two sessions in a row changed no source file, build this session: do not run `close` or start a
+next action needs a part of it. Make your first edit within your first 5 tool calls; never spend a session only reading. If
+5 calls pass with no change to the work, Horizon reminds you with the next action. The message also lists any
+section whose Python code the work defines differently; fix those first. If two sessions in a row changed no source file, build this session: do not run `close` or start a
 review; run what you wrote the way a user would, fix what differs from the request, and build the largest unbuilt
 part.
 

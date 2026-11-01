@@ -471,10 +471,17 @@ def _examples_line(state: dict) -> str:
 
 
 PLATEAU = ("Plateau: no source file changed in the last 2 sessions while this goal is open. LEAD "
-           "(1) Run the work the way a user would, on the request's own examples and inputs, and fix what differs "
-           "from what the request asks. (2) Build the largest part of the request that is still unbuilt or a "
-           "placeholder. (3) Re-read a part of the request you have not read in the last three sessions and "
-           "compare it with the work.")
+           "Make your first tool call this session an edit to the work, and read only what that edit needs. "
+           "(1) Start with the next action: NEXT. (2) Build the largest part of the request that is still unbuilt "
+           "or a placeholder. (3) Run the work the way a user would, on the request's own examples and inputs, and "
+           "fix what differs from what the request asks.")
+
+# NL2Repo given fix: resumed sessions re-read the request, the gate and their own code until the 15-call cap
+RESUME = (" Resume from the next action and the notes: change a file of the work within your first 5 tool calls "
+          "this session, and read only what that change needs.")
+REMIND_AT = (6, 11)  # tool calls into a resumed session at which an unchanged work gets a reminder
+REMINDER = ("Horizon: {calls} tool calls this session and no file of the work has changed. Write now{next}; read "
+            "only what that edit needs.")
 
 
 def _plateau_line(state: dict) -> str:
@@ -504,7 +511,79 @@ def _plateau_line(state: dict) -> str:
         passing = False
     lead = ("The gate passes on these files: if every part of the request is built, run `close` now. "
             "Otherwise, build this session." if passing else "Build this session; do not start a review.")
-    return " " + PLATEAU.replace("SLUG", state["slug"]).replace("LEAD", lead)
+    next_action = goal.row(state)["next_action"] or "the part of the request you would write first"
+    return " " + PLATEAU.replace("SLUG", state["slug"]).replace("LEAD", lead).replace("NEXT", next_action)
+
+def _work_fingerprint(state: dict) -> str | None:
+    """The work's fingerprint as Plateau takes it: source files, not docs, the gate directory or Horizon's state."""
+    return tree_hash.source_digest(paths.project_root(), docs=False,
+                                   skip=[p for p in [state.get("gate_path")] if p])
+
+
+def _progress_path() -> Path:
+    path = paths.harness_root() / "notes" / "session-progress.json"  # bookkeeping: never hashed
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _mark_session(session: str | None, states: list[dict]) -> None:
+    """At a session's start, the work's fingerprint for each goal it resumes, so PostToolUse can tell when the
+    session has changed no file of the work. A session that starts no goal (session 1) gets no mark."""
+    if not session or not states:
+        return
+    try:
+        old = json.loads(_progress_path().read_text())
+    except (OSError, ValueError):
+        old = {}
+    if old.get("session") == session:
+        return  # a resumed or compacted session keeps its count
+    record = {"session": session, "calls": 0, "changed": False,
+              "digests": {s["slug"]: _work_fingerprint(s) for s in states}}
+    try:
+        _progress_path().write_text(json.dumps(record))
+    except OSError:
+        pass
+
+
+def _reading_reminder(session: str | None) -> str:
+    """After REMIND_AT tool calls in a resumed session that has changed no file of the work, a reminder that
+    names the next action."""
+    try:
+        record = json.loads(_progress_path().read_text())
+    except (OSError, ValueError):
+        return ""
+    if not session or record.get("session") != session or record.get("changed"):
+        return ""
+    record["calls"] = record.get("calls", 0) + 1
+    out = ""
+    if record["calls"] in REMIND_AT:
+        states = {s["slug"]: s for s in _active_goals()}
+        for slug, digest in (record.get("digests") or {}).items():
+            state = states.get(slug)
+            if state is None:
+                continue
+            if _work_fingerprint(state) != digest:
+                record["changed"] = True
+                out = ""
+                break
+            next_action = goal.row(state)["next_action"]
+            out = REMINDER.format(calls=record["calls"], next=f": {next_action}" if next_action else "")
+    try:
+        _progress_path().write_text(json.dumps(record))
+    except OSError:
+        pass
+    return out
+
+
+def _differs_line(state: dict) -> str:
+    """Sections of a long request whose Python code the work defines differently, so a session sees them before
+    `close` (NL2Repo given fix: 3 of 5 builds never ran close)."""
+    found = [m for m in goal.uncited_sections(state) if m.get("kind") == "differs"]
+    if not found:
+        return ""
+    return (" The work defines differently the code these sections of the request give; fix these first: "
+            + "; ".join(f'"{m["heading"]}" ({Path(m["file"]).name} line {m["line"]}): {m["detail"]}'
+                        for m in found[:10]) + ".")
 
 
 def _paths_line() -> str:
@@ -541,7 +620,13 @@ def _session_start(session: str | None, source: str | None = None) -> dict | Non
     startup = source in (None, "startup")
     deadline = time.monotonic() + _gate_budget()
     known = []
-    for state in _active_goals():
+    active = _active_goals()
+    if startup:
+        try:
+            _mark_session(session, active)
+        except Exception:
+            pass
+    for state in active:
         try:
             note = ""
             attempt = (state.get("execution") or {}).get("active_attempt")
@@ -568,9 +653,13 @@ def _session_start(session: str | None, source: str | None = None) -> dict | Non
             except Exception:
                 pass
             plateau = _plateau_line(state) if startup else ""
+            try:
+                differ = _differs_line(state)
+            except Exception:
+                differ = ""
             known += [f["text"] for f in state.get("facts") or []]
-            lines.append(f"{line}{plateau}{note}{_notes_line(state['slug'])} Run `close {state['slug']}` "
-                         "when you think it is done.")
+            lines.append(f"{line}{plateau}{differ}{RESUME}{note}{_notes_line(state['slug'])} Run "
+                         f"`close {state['slug']}` when you think it is done.")
         except Exception:
             continue
     if not lines:
@@ -646,6 +735,12 @@ def run(event: str, payload: dict) -> dict | None:
         return _session_start(session, source if isinstance(source, str) else None)
     if event == "PostToolUse":
         _post_tool_use(session)
+        try:
+            reminder = _reading_reminder(session)
+        except Exception:
+            reminder = ""
+        if reminder:
+            return {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": reminder}}
     elif event == "Stop":
         return _stop(isinstance(payload, dict) and payload.get("stop_hook_active") is True)
     return None

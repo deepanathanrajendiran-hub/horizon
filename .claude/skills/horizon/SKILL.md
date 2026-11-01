@@ -26,7 +26,9 @@ python3 "$HARNESS" --runtime claude --project "$PROJECT" doctor
 The session-start message shows the next action, the gate's latest result with the failing checks by name, the
 notes, the files the last commit changed and every file with its line count. Do not run `status`, `ls` or `wc`
 to get these again, and do not re-read the request or the requirements unless the next action needs a part of
-it. Make your first edit within your first few tool calls; never spend a session only reading. When the message
+it. Make your first edit within your first 5 tool calls; never spend a session only reading. If
+5 calls pass with no change to the work, Horizon reminds you with the next action. The message also lists any
+section whose Python code the work defines differently; fix those first. When the message
 says `Plateau`, do what it says in that session.
 
 Keep the next action current with `note` after each write: one concrete edit, naming the file and what it needs,

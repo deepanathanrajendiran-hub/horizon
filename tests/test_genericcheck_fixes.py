@@ -509,3 +509,64 @@ def test_setters_and_positional_only_names_and_syntax_warnings(tmp_path):
         warnings.simplefilter("always")
         assert sections.uncited_in_goal(str(gates), str(p), skip=[str(gates)]) == []
     assert not [w for w in caught if issubclass(w.category, SyntaxWarning)]
+
+# --- givenfix (d1edab3): resumed sessions read until the call cap --------------------------------------------
+# fastapi-users sessions 7-10 (cover fix and given fix) and More-Itertools sessions 3-6 (generic fix) spent every
+# call re-reading the spec, the gate and their own code; Plateau fired and the loop went on, and 3 of 5 given-fix
+# builds never ran close, so a check that lives only in close never fired.
+
+def _hook(p, event, payload):
+    done = subprocess.run([sys.executable, ENTRY, "--runtime", "claude", "--project", str(p), "hook", event],
+                          input=json.dumps(payload), cwd=p, capture_output=True, text=True, timeout=120)
+    out = done.stdout.strip()
+    return json.loads(out)["hookSpecificOutput"].get("additionalContext", "") if out else ""
+
+
+def test_a_resumed_session_is_told_to_change_a_file_within_its_first_calls(project):
+    p, cli, start_message = project
+    code, out = cli("start", "Build the tool", "--gate", "true")
+    cli("note", out["slug"], "--next", "write src/extra.py with render()")
+    text = start_message()
+    assert "within your first 5 tool calls" in text and "write src/extra.py with render()" in text
+
+
+def test_reading_calls_with_no_change_to_the_work_get_a_reminder(project):
+    p, cli, _ = project
+    code, out = cli("start", "Build the tool", "--gate", "true")
+    cli("note", out["slug"], "--next", "write src/extra.py with render()")
+    _hook(p, "SessionStart", {"session_id": "s1", "source": "startup"})
+    said = [_hook(p, "PostToolUse", {"session_id": "s1", "tool_name": "Read"}) for _ in range(6)]
+    assert not any(said[:5]) and "no file of the work has changed" in said[5], said
+    assert "write src/extra.py with render()" in said[5]
+    _hook(p, "SessionStart", {"session_id": "s2", "source": "startup"})
+    (p / "src" / "extra.py").write_text("def render():\n    return ''\n")
+    said = [_hook(p, "PostToolUse", {"session_id": "s2", "tool_name": "Read"}) for _ in range(12)]
+    assert not any(said), said  # the work changed this session
+
+
+def test_a_session_that_starts_the_goal_gets_no_reminder(project):
+    p, cli, _ = project
+    _hook(p, "SessionStart", {"session_id": "s1", "source": "startup"})
+    cli("start", "Build the tool", "--gate", "true")
+    said = [_hook(p, "PostToolUse", {"session_id": "s1", "tool_name": "Read"}) for _ in range(12)]
+    assert not any(said), said  # session 1 reads the request first
+
+
+def test_plateau_names_the_next_action_and_does_not_ask_for_more_reading(project):
+    p, cli, start_message = project
+    code, out = cli("start", "Build the tool", "--gate", "true")
+    cli("note", out["slug"], "--next", "write src/extra.py with render()")
+    start_message()
+    start_message()
+    text = start_message()
+    plateau = text[text.index("Plateau"):]
+    assert "Re-read" not in plateau and "write src/extra.py with render()" in plateau, plateau
+
+
+def test_session_start_lists_sections_whose_given_code_the_work_defines_differently(project):
+    p, cli, start_message = project
+    (p / "DESIGN.md").write_text(_one_section("Strategy Class", "class Strategy(Protocol, Generic[UP, ID]): ..."))
+    slug, gates, _ = _start(p, cli, 'R1 [gate] "Notes: prose"\n')
+    (p / "src" / "strategy.py").write_text("from abc import ABC\n\nclass Strategy(ABC):\n    pass\n")
+    text = start_message()
+    assert "defines differently" in text and "Strategy Class" in text and "lacks base" in text, text

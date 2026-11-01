@@ -677,7 +677,13 @@ class the request gives (directly, through the work's own classes, or as the sta
 `ValueError` is an `Exception` and `Protocol[T]` is generic), and every parameter it names (not positional-only
 ones), unless the work takes *args or **kwargs. Otherwise `close` lists the section with both signatures and what
 is missing. `close` refuses while any section remains, and sends no reviewer; it lists differing code first, then
-code the work has not built, then prose sections. `start` does not check. A named file the work changes after
+code the work has not built, then prose sections. `start` does not check. At session start, the hook lists the sections whose code differs, so a session sees them
+before `close`.
+
+In a session that resumes a goal, the session-start message asks for a change to the work within
+the first 5 tool calls. If the 6th or the 11th call comes with no file of the work changed (source files, not docs,
+the gate directory or Horizon's state), the PostToolUse hook adds a reminder that names the next action. A
+session that starts its goal gets no reminder. A named file the work changes after
 the baseline (a CHANGELOG the request says to extend) is an output and is not checked.
 After a failed review round, `close` refuses while the work (every project file, hidden files and tests
 included, outside the gate directory and Horizon's own state) is unchanged since the round, unless a
