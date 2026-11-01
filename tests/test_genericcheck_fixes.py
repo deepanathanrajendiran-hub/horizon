@@ -200,6 +200,7 @@ def test_the_skill_says_close_lists_the_sections_neither_cited_nor_built(folder)
     assert "`close` lists each section heading" in core
     assert "the work does not define" in core
     assert "saying why, if it is out of scope" in core  # a prose section is cited, not ruled out
+    assert "matches the code the request gives" in core
     assert "Disputed Rk:" in core
 
 
@@ -308,7 +309,7 @@ def test_close_counts_a_section_the_work_defines_as_covered(project):
     text = " ".join(out["missing"])
     assert code == 1 and "render_table" in text, out
     assert "Store" not in text and "_vendor" not in text
-    assert "Build each" in text
+    assert "Build or fix each" in text
     assert not out.get("review_brief"), out
     (p / "src" / "table.py").write_text("def render_table(rows):\n    return rows\n")
     code, out = cli("close", slug)
@@ -360,3 +361,83 @@ def test_definitions_are_read_in_other_languages_and_not_from_config(tmp_path):
     names = sections.defined_names(p)
     assert {"Store", "mountRoutes", "Router", "render", "Api", "fetchAll", "limit", "Row", "lib_pkg.core"} <= names
     assert not {"fn", "name", "version", "public"} & names
+
+# --- coverfix (ee28273): "Name Class" headings, and code the request gives ----------------------------------
+# fastapi-users: close listed "Strategy Class" six sessions running, because "Strategy" read as a plain word; the
+# spec gives `class Strategy(Protocol, Generic[...])` and the build had `class Strategy(ABC)`, so the official
+# tests' setup failed. About half the listed headings were prose, which buried the ones that name code.
+
+def test_a_name_before_class_or_function_in_a_heading_is_a_code_name():
+    import sections
+    text = ("# T\n" + FILLER + "## Authenticator Class\nx\n## Supported Transport Methods\ny\n"
+            "## The Class Hierarchy\nz\n## JWT Strategy Function\nw\n")
+    assert [h for _, h in sections.uncited(text, "R1 x\n", {"Authenticator", "Strategy"})] == [
+        "Supported Transport Methods", "The Class Hierarchy"]
+    # the name finds the work's code, but citing still needs the heading's words: "strategy" is a common word
+    assert [h for _, h in sections.uncited(text, 'R1 [gate] "Authenticator handles login"\n')] == [
+        "Authenticator Class", "Supported Transport Methods", "The Class Hierarchy", "JWT Strategy Function"]
+    assert [h for _, h in sections.uncited(text, 'R1 [gate] "Authenticator class: handles login"\n')] == [
+        "Supported Transport Methods", "The Class Hierarchy", "JWT Strategy Function"]
+
+
+GIVEN_SPEC = ("# Lib\n\n" + FILLER + "\n## Strategy Class\n\nThe protocol.\n\n```python\n"
+              "class Strategy(Protocol, Generic[UP, ID]):\n    async def read_token(self, token, user_manager): ...\n"
+              "```\n\n## JWTStrategy Class\n\n```python\nclass JWTStrategy(Strategy[UP, ID], Generic[UP, ID]):\n"
+              "    def __init__(self, secret, lifetime_seconds, token_audience=None): ...\n```\n\n"
+              "## `chunked()` Function\n\n```python\ndef chunked(iterable, n, strict=False): ...\n```\n\n"
+              "## `build()` Function\n\n```python\ndef build(name, *, verbose=False): ...\n```\n\n"
+              "## Notes\n\nProse.\n")
+
+
+def _given_project(tmp_path, work, spec=GIVEN_SPEC):
+    p = tmp_path / "w "
+    (p / "pkg").mkdir(parents=True)
+    (p / "pkg" / "core.py").write_text(work)
+    (p / "SPEC.md").write_text(spec)
+    gates = p / ".claude" / "gates" / "g"
+    gates.mkdir(parents=True)
+    (gates / "request.md").write_text("Build what SPEC.md describes\n")
+    (gates / "requirements.md").write_text('R1 [review] "Notes: prose"\n')
+    _git(p, "init", "-q")
+    return p, gates
+
+
+def test_a_section_whose_given_code_the_work_defines_differently_is_listed_with_both(tmp_path):
+    import sections
+    p, gates = _given_project(tmp_path, "from abc import ABC\nfrom typing import Generic\n\n"
+                                        "class Strategy(ABC):\n    pass\n\n"
+                                        "class JWTStrategy(Strategy, Generic[UP, ID]):\n"
+                                        "    def __init__(self, secret, lifetime_seconds, token_audience=None):\n"
+                                        "        pass\n\n"
+                                        "def chunked(iterable, n):\n    pass\n\n"
+                                        "def build(name, **options):\n    pass\n")
+    found = {m["heading"]: m for m in sections.uncited_in_goal(str(gates), str(p), skip=[str(gates)])}
+    assert set(found) == {"Strategy Class", "`chunked()` Function"}  # JWTStrategy and build() agree
+    assert found["Strategy Class"]["kind"] == "differs"
+    assert "Protocol" in found["Strategy Class"]["detail"] and "ABC" in found["Strategy Class"]["detail"]
+    assert "strict" in found["`chunked()` Function"]["detail"]
+    text = sections.message(list(found.values()))
+    assert text.index("defines differently") < text.index("chunked")
+    assert "Build or fix each" in text
+
+
+def test_sections_are_listed_as_differing_code_then_missing_code_then_prose():
+    import sections
+    missing = [{"file": "S.md", "line": 3, "heading": "Notes", "kind": "prose"},
+               {"file": "S.md", "line": 2, "heading": "`render()` Function", "kind": "code"},
+               {"file": "S.md", "line": 1, "heading": "Strategy Class", "kind": "differs",
+                "detail": "the request has `class Strategy(Protocol)`, the work `class Strategy(ABC)`"}]
+    text = sections.message(missing)
+    assert text.index("Strategy Class") < text.index("render()") < text.index("Notes")
+
+
+def test_a_base_the_work_inherits_through_its_own_class_agrees_and_a_method_shown_alone_is_a_method(tmp_path):
+    # dry run on the coverfix builds: the work's own exception base, and a spec showing `def parse(self, url)`
+    # outside its class, were reported as differing
+    import sections
+    spec = ("# Lib\n\n" + FILLER + "\n## `LibError` Exception\n\n```python\nclass LibError(Exception): ...\n```\n\n"
+            "## `parse()` Method\n\n```python\ndef parse(self, url: str) -> str: ...\n```\n")
+    p, gates = _given_project(tmp_path, "class Base(Exception):\n    pass\n\nclass LibError(Base):\n    pass\n\n"
+                                        "def parse(file_path):\n    pass\n\n"
+                                        "class UrlParser:\n    def parse(self, url):\n        pass\n", spec)
+    assert sections.uncited_in_goal(str(gates), str(p), skip=[str(gates)]) == []

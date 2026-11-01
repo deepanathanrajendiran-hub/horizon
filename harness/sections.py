@@ -13,6 +13,8 @@ from pathlib import Path
 
 import reviewing
 import tree_hash
+import ast
+import textwrap
 
 LONG_INPUT_LINES = 200  # shorter inputs are read whole and need no section check
 _HEADING = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$")
@@ -34,12 +36,21 @@ _NOT_NAMES = {"def", "class", "function", "func", "fun", "fn", "struct", "enum",
               "object", "record", "protocol", "const", "let", "var", "val", "module"}
 CONFIG_SUFFIXES = (".toml", ".cfg", ".ini", ".yaml", ".yml", ".json", ".lock", ".txt", ".env")  # keys are not code
 
+# "Authenticator Class", "JWT Strategy Function": the word before a kind word names code; "The Class ..." does not
+_KIND = re.compile(r"\b([A-Za-z_][\w.]*)[ \t]+(?:class|function|method|protocol|decorator|exception|enum|interface"
+                   r"|struct|trait)\b", re.I)
+_NOT_KIND_NAMES = {"the", "a", "an", "base", "abstract", "main", "core", "helper", "helpers", "utility", "custom",
+                   "new", "this", "each", "every", "data", "python", "public", "private", "generic", "parent", "child",
+                   "test", "top", "key", "other", "user-defined", "built-in"}
+_GIVEN_LANGUAGES = ("python", "py", "python3", "")  # a fenced block the request gives as Python code
 
-def leaf_headings(text: str) -> list[tuple[int, str]]:
-    """(line number, heading) for each Markdown heading outside code fences that has no deeper heading under it.
-    A fence closes only on the same character, at least as long, as CommonMark has it."""
-    found, fence = [], None
-    for number, line in enumerate(text.splitlines(), 1):
+
+def leaf_sections(text: str) -> list[tuple[int, str, str]]:
+    """(line number, heading, body) for each Markdown heading outside code fences that has no deeper heading
+    under it; the body is the text up to the next heading. A fence closes only on the same character, at least as
+    long, as CommonMark has it."""
+    lines, found, fence = text.splitlines(), [], None
+    for number, line in enumerate(lines, 1):
         opened = _FENCE.match(line)
         if fence:
             if opened and opened.group(1)[0] == fence[0] and len(opened.group(1)) >= len(fence) \
@@ -52,8 +63,20 @@ def leaf_headings(text: str) -> list[tuple[int, str]]:
         match = _HEADING.match(line)
         if match:
             found.append((len(match.group(1)), number, match.group(2).strip()))
-    return [(number, heading) for i, (level, number, heading) in enumerate(found)
+    ends = [number - 1 for _, number, _ in found[1:]] + [len(lines)]
+    return [(number, heading, "\n".join(lines[number:end]))
+            for i, ((level, number, heading), end) in enumerate(zip(found, ends))
             if i + 1 == len(found) or found[i + 1][0] <= level]
+
+
+def leaf_headings(text: str) -> list[tuple[int, str]]:
+    """(line number, heading) for each leaf section (see leaf_sections)."""
+    return [(number, heading) for number, heading, _ in leaf_sections(text)]
+
+
+def _kind_names(heading: str) -> list[str]:
+    """The word before a kind word ("Authenticator Class"), unless it is a plain word such as "The"."""
+    return [n for n in _KIND.findall(heading) if n.lower() not in _NOT_KIND_NAMES]
 
 
 def _words(text: str) -> str:
@@ -62,7 +85,8 @@ def _words(text: str) -> str:
 
 
 def _code_names(heading: str) -> list[str]:
-    """The code names a heading carries: backticked text, `name()` calls, snake_case and CamelCase words."""
+    """The code names a heading carries, for citing: backticked text, `name()` calls, snake_case and CamelCase
+    words. The word before a kind word ("Strategy Class") is not one: it is often a common word."""
     names = re.findall(r"`([^`]+)`", heading)
     names += re.findall(r"\b[A-Za-z_][\w.]*\(\)", heading)
     names += [w for w in re.findall(r"\b[A-Za-z_][\w.]*\b", heading)
@@ -78,7 +102,8 @@ def _is_cited(heading: str, lines: list[str]) -> bool:
 
 def _raw_names(heading: str) -> list[str]:
     """The code names a heading carries as written, for looking up in the work: the leading name of backticked
-    text, and outside backticks each path, `name()` call, snake_case or CamelCase word. A path stays whole: its
+    text, and outside backticks each path, `name()` call, snake_case or CamelCase word, and the word before a
+    kind word ("Strategy Class"). A path stays whole: its
     folder names are not names of their own."""
     names = [m.group(1) for text in re.findall(r"`([^`]+)`", heading) if (m := re.match(r"\s*([\w$./-]+)", text))]
     for token in re.findall(r"[\w$./-]+(?:\(\))?", re.sub(r"`[^`]*`", " ", heading)):
@@ -86,6 +111,7 @@ def _raw_names(heading: str) -> list[str]:
         if ("/" in word or token.endswith("()") or "_" in word.strip("_")
                 or re.search(r"[a-z][A-Z]|[A-Z]{2,}[a-z]", word)):
             names.append(word)
+    names += _kind_names(re.sub(r"`[^`]*`", " ", heading))
     return [n for n in dict.fromkeys(n.removeprefix("./").rstrip("/.") for n in names) if len(n) >= 3]
 
 
@@ -125,15 +151,132 @@ def defined_names(root, skip=()) -> set[str]:
             out.update(_ASSIGNED.findall(text))
     return out - _NOT_NAMES - {""}
 
+def _base_name(node) -> str:
+    """`Generic[UP, ID]` -> Generic, `abc.ABC` -> ABC."""
+    while isinstance(node, (ast.Subscript, ast.Call)):
+        node = node.value if isinstance(node, ast.Subscript) else node.func
+    return node.attr if isinstance(node, ast.Attribute) else getattr(node, "id", "")
+
+
+def _python_definitions(source: str) -> dict[str, list[tuple]]:
+    """Top-level classes and functions, and the methods of top-level classes (`Class.method`), of Python source:
+    {name: [(kind, info, line)]}, where info is a class's base names, or a function's parameter names, whether
+    it takes *args or **kwargs, and whether its first parameter is self or cls; empty for text that is not Python."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return {}
+    lines, out = source.splitlines(), {}
+
+    def add(key, node):
+        line = lines[node.lineno - 1].strip() if node.lineno <= len(lines) else ""
+        if isinstance(node, ast.ClassDef):
+            info = tuple(n for n in (_base_name(b) for b in node.bases) if n and n != "object")
+            out.setdefault(key, []).append(("class", info, line))
+        else:
+            a = node.args
+            every = [p.arg for p in a.posonlyargs + a.args + a.kwonlyargs]
+            names = [n for n in every if n not in ("self", "cls")]
+            method = bool(every) and every[0] in ("self", "cls")
+            out.setdefault(key, []).append(("def", (tuple(names), bool(a.vararg or a.kwarg), method), line))
+
+    for node in tree.body:
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            add(node.name, node)
+        if isinstance(node, ast.ClassDef):
+            for item in node.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    add(f"{node.name}.{item.name}", item)
+    return out
+
+
+def given_definitions(body: str) -> dict[str, list[tuple]]:
+    """The Python definitions in a section's fenced code blocks (untagged or tagged python)."""
+    out, block, fence, language = {}, [], None, ""
+    for line in body.splitlines():
+        opened = _FENCE.match(line)
+        if fence:
+            if opened and opened.group(1)[0] == fence[0] and len(opened.group(1)) >= len(fence) \
+                    and not line[opened.end():].strip():
+                if language in _GIVEN_LANGUAGES:
+                    for key, found in _python_definitions(textwrap.dedent("\n".join(block))).items():
+                        out.setdefault(key, []).extend(found)
+                fence, block = None, []
+            else:
+                block.append(line)
+        elif opened:
+            fence, language = opened.group(1), line[opened.end():].strip().lower().split(" ")[0]
+    return out
+
+
+def work_definitions(root, skip=()) -> dict[str, list[tuple]]:
+    """The Python definitions of the work's source files (not tests or docs), each with its file and line."""
+    out = {}
+    for name in tree_hash.source_files(root, docs=True, tests=True, skip=skip) or []:
+        if not name.endswith(".py") or tree_hash.is_test(name) or tree_hash.is_doc(name):
+            continue
+        text = _read(Path(root) / name)
+        for key, found in (_python_definitions(text) if text else {}).items():
+            out.setdefault(key, []).extend((kind, info, f"{line}` ({name})") for kind, info, line in found)
+    return out
+
+
+def _ancestors(bases: tuple, work: dict, seen=None) -> set[str]:
+    """The base names of a work class and, through the work's own classes, of their bases."""
+    seen = set() if seen is None else seen
+    out = set(bases)
+    for base in bases:
+        if base in seen:
+            continue
+        seen.add(base)
+        for kind, info, _ in work.get(base, []):
+            if kind == "class":
+                out |= _ancestors(info, work, seen)
+    return out
+
+
+def _agrees(given: tuple, found: tuple, work: dict) -> bool:
+    """A class agrees when it has every base the request gives, directly or through the work's own classes; a
+    function when it takes every parameter the request names, or takes *args or **kwargs."""
+    if given[0] != found[0]:
+        return False
+    if given[0] == "class":
+        return set(given[1]) <= _ancestors(found[1], work)
+    return set(given[1][0]) <= set(found[1][0]) or found[1][1]
+
+
+def differs(heading: str, body: str, work: dict) -> str | None:
+    """How the work defines the code a section gives differently, for the definitions the heading names (and
+    their methods); None when every one the work defines agrees. A function the section shows alone with a
+    `self` parameter is a method, and any method of that name may agree."""
+    names = set(_raw_names(heading))
+    names |= {n.split(".")[-1] for n in names}
+    for key, given in given_definitions(body).items():
+        if key.split(".")[0] not in names:
+            continue
+        for g in given:
+            keys = [key] + ([k for k in work if k.endswith("." + key)] if g[0] == "def" and g[1][2] else [])
+            found = [f for k in keys for f in work.get(k, [])]
+            if found and not any(_agrees(g, f, work) for f in found):
+                return f"the request has `{g[2]}`, the work `{found[0][2]}"
+    return None
+
+def _not_quoted(text: str, requirements: str) -> list[tuple[int, str, str]]:
+    """(line, heading, body) of each leaf section of a long input that no requirement line cites; none for a
+    short input."""
+    if len(text.splitlines()) < LONG_INPUT_LINES:
+        return []
+    lines = [_words(line) for line in requirements.splitlines() if reviewing._REQUIREMENT.match(line)]
+    return [(number, heading, body) for number, heading, body in leaf_sections(text)
+            if not _is_cited(heading, lines)]
+
+
 def uncited(text: str, requirements: str, defined=frozenset()) -> list[tuple[int, str]]:
     """The leaf headings of a long input that no requirement line (R1, R2, ...) cites, by the heading's words or
     by a code name it carries (`chunked()`, BaseUserManager), and whose code name is not in `defined` (what the
     work defines); none for a short input."""
-    if len(text.splitlines()) < LONG_INPUT_LINES:
-        return []
-    lines = [_words(line) for line in requirements.splitlines() if reviewing._REQUIREMENT.match(line)]
-    return [(number, heading) for number, heading in leaf_headings(text)
-            if not _is_cited(heading, lines) and not _defined_by_work(heading, defined)]
+    return [(number, heading) for number, heading, _ in _not_quoted(text, requirements)
+            if not _defined_by_work(heading, defined)]
 
 
 def inputs(request: str, root: Path) -> list[Path]:
@@ -213,27 +356,48 @@ def defined_sections(gate_path: str | None, root: str, skip=()) -> list[str]:
 
 def uncited_in_goal(gate_path: str | None, root: str, at_start: dict | None = None, skip=(),
                     predefined=()) -> list[dict]:
-    """Sections of the goal's request.md and of each Markdown file it names, as {file, line, heading}, that no
-    requirement line cites and whose code name the work does not define; `skip` names folders that are not the
-    work, and a heading in `predefined` (defined before the goal started) is not covered by a definition. A named
-    file that changed since `at_start` recorded it is an output of the work and is left out."""
+    """Sections of the goal's request.md and of each Markdown file it names, as {file, line, heading, kind}, that
+    no requirement line cites and the work has not built: kind "differs" (with a `detail`) when the work defines
+    the code the section names but not as the Python code the section gives; "code" when the section names code the
+    work does not define; "prose" when it names none. `skip` names folders that are not the work; a heading in
+    `predefined` (defined before the goal started) is not covered by a definition. A named file that changed since
+    `at_start` recorded it is an output of the work and is left out."""
     requirements = _read(Path(gate_path) / "requirements.md") if gate_path else None
     if requirements is None:
         return []
-    out = [{"file": str(path), "line": number, "heading": heading}
-           for path, text in _goal_inputs(gate_path, root, at_start)
-           for number, heading in uncited(text, requirements)]
-    if out:
-        defined, before = defined_names(root, skip=skip), set(predefined)
-        out = [m for m in out if m["heading"] in before or not _defined_by_work(m["heading"], defined)]
+    candidates = [(path, number, heading, body) for path, text in _goal_inputs(gate_path, root, at_start)
+                  for number, heading, body in _not_quoted(text, requirements)]
+    if not candidates:
+        return []
+    defined, before, work, out = defined_names(root, skip=skip), set(predefined), None, []
+    for path, number, heading, body in candidates:
+        item = {"file": str(path), "line": number, "heading": heading}
+        if heading not in before and _defined_by_work(heading, defined):
+            work = work_definitions(root, skip=skip) if work is None else work
+            detail = differs(heading, body, work)
+            if detail is None:
+                continue
+            item.update(kind="differs", detail=detail)
+        else:
+            item["kind"] = "code" if _raw_names(heading) else "prose"
+        out.append(item)
     return out
 
 
 def message(missing: list[dict], limit: int = 25) -> str:
-    """The `close` refusal that lists the sections neither cited nor built."""
-    shown = "; ".join(f'"{m["heading"]}" ({Path(m["file"]).name} line {m["line"]})' for m in missing[:limit])
-    more = f"; and {len(missing) - limit} more" if len(missing) > limit else ""
-    return ("No requirement line quotes these sections of the request, and the work does not define the "
-            "function, class or path they name: " + shown + more
-            + ". Build each, or add a requirement line that quotes its heading (saying why, if it is out of "
-            "scope); then run close again.")
+    """The `close` refusal that lists the sections neither cited nor built: code the work defines differently
+    first, then code it does not define, then prose sections."""
+    groups = [("differs", "These sections give code the work defines differently: "),
+              ("code", "These sections name code the work has not built in this goal: "),
+              ("prose", "No requirement line quotes these sections: ")]
+    parts, shown = [], 0
+    for kind, lead in groups:
+        items = [m for m in missing if m.get("kind", "code") == kind][:max(0, limit - shown)]
+        if not items:
+            continue
+        shown += len(items)
+        parts.append(lead + "; ".join(f'"{m["heading"]}" ({Path(m["file"]).name} line {m["line"]})'
+                                      + (f': {m["detail"]}' if m.get("detail") else "") for m in items) + ".")
+    more = f" And {len(missing) - shown} more." if len(missing) > shown else ""
+    return (" ".join(parts) + more + " Build or fix each to match the request, or add a requirement line that "
+            "quotes its heading (saying why, if it is out of scope or differs on purpose); then run close again.")
