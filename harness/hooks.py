@@ -722,7 +722,10 @@ def _unattended() -> bool:
 
 
 def _stop_block_allowed(session: str | None) -> bool:
-    """Count one more unattended block for this session; False once it has had UNATTENDED_STOP_BLOCKS."""
+    """Count one more unattended block for this session; False once it has had UNATTENDED_STOP_BLOCKS. Counts are
+    kept per session, so sessions of one project that stop in turn do not reset each other. When the count cannot
+    be kept, the stop goes through, as without HORIZON_UNATTENDED: an uncounted block could loop."""
+    key = session or "unknown"
     path = paths.harness_root() / "notes" / "stop-blocks.json"  # bookkeeping: never hashed
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -731,15 +734,16 @@ def _stop_block_allowed(session: str | None) -> bool:
                 record = json.loads(path.read_text())
             except (OSError, ValueError):
                 record = {}
-            if record.get("session") != session:
-                record = {"session": session, "blocks": 0}
-            if record["blocks"] >= UNATTENDED_STOP_BLOCKS:
+            counts = record.get("sessions") if isinstance(record, dict) else None
+            counts = {k: v for k, v in counts.items() if isinstance(v, int)} if isinstance(counts, dict) else {}
+            blocks = counts.pop(key, 0)
+            if blocks >= UNATTENDED_STOP_BLOCKS:
                 return False
-            record["blocks"] += 1
-            path.write_text(json.dumps(record))
+            counts[key] = blocks + 1
+            path.write_text(json.dumps({"sessions": dict(list(counts.items())[-50:])}))
             return True
-    except OSError:
-        return True
+    except Exception:
+        return False
 
 
 def _stop(again: bool = False, session: str | None = None) -> dict | None:
@@ -771,7 +775,8 @@ def _stop(again: bool = False, session: str | None = None) -> dict | None:
                            "to wait for a person or a reviewer. Keep building: do the next action now and keep "
                            "`note --next` current. If you need a decision, make it and record it with `note "
                            "--fact`; if the environment blocks a check, record that with `note --fact`, take "
-                           "the check out of the gate, and go on. Stop only once `close` completes the goal.")}
+                           "the check out of the gate, retag its line `[review]`, and go on. Stop only once "
+                           "`close` completes the goal.")}
     return {"decision": "block",
             "reason": ("Horizon goal still active with budget left: " + "; ".join(open_goals) + ". A session's "
                        "length is not the goal's deadline, and your work is committed whenever the session is "

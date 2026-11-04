@@ -296,7 +296,13 @@ def check(args) -> tuple[dict, int]:
             and bool(evidence.review_reasons(state, goal._requirements(state))))
     )
     if report["review_required"]:
-        _review_handoff(report, state, digest)
+        # As in `close`: no reviewer while a [gate] line has no check naming it (a reply would spend the round on
+        # a gate that is about to change).
+        unchecked = goal.unchecked_gate_lines(state)
+        if unchecked:
+            report["unchecked_gate_lines"] = unchecked
+        else:
+            _review_handoff(report, state, digest)
     if error:
         report["error"] = error
     _with_examples(report, state)

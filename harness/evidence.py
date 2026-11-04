@@ -8,6 +8,7 @@ apart from goal.py so the rules are tested once, without the lifecycle.
 import hashlib
 import os
 import re
+import stat
 from pathlib import Path
 
 import tree_hash
@@ -96,27 +97,41 @@ def _command_files(cwd: str, command: str):
                     yield rel, path
 
 
-def _command_dirs(cwd: str, command: str):
-    """Project directories below the root that the gate command names, such as `tests` in `pytest tests`."""
-    root = Path(cwd).resolve()
+def _named_parts(command: str):
+    """Paths a gate command may name: each shell word, a whole word that holds spaces, the value after `=`, and the
+    file of a pytest node id (`tests/test_x.py::test_r3`)."""
     try:
         tokens = shlex.split(command)
     except ValueError:
         tokens = command.split()
+    seen = set()
     for token in tokens:
-        for word in token.split():
+        for word in [token, *token.split()]:
             for part in (word, word.partition("=")[2]):
-                if not part:
-                    continue
-                try:
-                    path = (root / part).resolve()
-                    rel = path.relative_to(root).as_posix()
-                    if not path.is_dir() or path == root:
-                        continue
-                except (OSError, ValueError):
-                    continue
-                if not _is_harness_state(rel):
-                    yield path
+                part = part.split("::", 1)[0]
+                if part and part not in seen:
+                    seen.add(part)
+                    yield part
+
+
+def _command_paths(cwd: str, command: str) -> tuple[list[Path], list[Path]]:
+    """(files, directories) of the project, below its root and outside Horizon's state, that the gate command
+    names, such as `tests` in `pytest tests`."""
+    root = Path(cwd).resolve()
+    files, dirs = [], []
+    for part in _named_parts(command):
+        try:
+            path = (root / part).resolve()
+            rel = path.relative_to(root).as_posix()
+            if path == root or _is_harness_state(rel):
+                continue
+            if path.is_dir():
+                dirs.append(path)
+            elif path.is_file():
+                files.append(path)
+        except Exception:  # OSError, ValueError, and RuntimeError for a symlink loop before Python 3.13
+            continue
+    return files, dirs
 
 
 def _walk(directory: Path):
@@ -126,36 +141,53 @@ def _walk(directory: Path):
             yield Path(dirpath) / name
 
 
+GATE_TEXT_TOTAL = 20_000_000  # bytes read across all files, per call
+
+
 def gate_texts(state: dict, max_bytes: int = 2_000_000) -> list[str]:
     """The text of every file the gate can run: the gate directory's files other than prose (request.md,
     requirements.md and any other .md, .txt or .rst file), and the project files the gate command names, with the
-    test files in the directories it names."""
+    test files in the directories it names. Only regular text files are read (no FIFO, device or binary file), each
+    up to max_bytes and GATE_TEXT_TOTAL in all; a path that cannot be read is skipped, never raised."""
     files = []
     gate_path = state.get("gate_path")
-    if gate_path and os.path.isdir(gate_path):
-        top = Path(gate_path).resolve()
-        files += [p for p in _walk(top) if p.suffix.lower() not in (".md", ".txt", ".rst")]
+    if gate_path:
+        try:
+            top = Path(gate_path).resolve()
+            if top.is_dir():
+                files += [p for p in _walk(top) if p.suffix.lower() not in (".md", ".txt", ".rst")]
+        except Exception:
+            pass
     if state["gate"]["kind"] == "command":
         root = Path(state["cwd"]).resolve()
-        files += [path for _, path in _command_files(state["cwd"], state["gate"]["value"])]
-        for directory in _command_dirs(state["cwd"], state["gate"]["value"]):
+        named, dirs = _command_paths(state["cwd"], state["gate"]["value"])
+        files += named
+        for directory in dirs:
             for path in _walk(directory):
                 try:
                     rel = path.resolve().relative_to(root).as_posix()
-                except (OSError, ValueError):
+                except Exception:
                     continue
                 if _is_test(rel):
                     files.append(path)
-    texts, seen = [], set()
+    texts, seen, total = [], set(), 0
     for path in files:
         try:
             key = path.resolve()
-            if key in seen or key.stat().st_size > max_bytes:
+            if key in seen:
                 continue
             seen.add(key)
-            texts.append(key.read_text(errors="replace"))
-        except (OSError, ValueError):
+            info = key.stat()
+            if (not stat.S_ISREG(info.st_mode) or info.st_size > max_bytes
+                    or total + info.st_size > GATE_TEXT_TOTAL):
+                continue
+            data = key.read_bytes()
+        except Exception:
             continue
+        if b"\0" in data[:8192]:
+            continue  # a binary fixture names nothing
+        total += len(data)
+        texts.append(data.decode("utf-8", errors="replace"))
     return texts
 
 

@@ -61,3 +61,10 @@ def state_client(tmp_path, request):
         return proc.returncode, json.loads(proc.stdout or proc.stderr)
 
     return project, runtime, run
+
+
+@pytest.fixture(autouse=True)
+def _attended_by_default(monkeypatch):
+    """HORIZON_UNATTENDED in the shell running the suite would change the Stop hook under every test; the tests of
+    unattended runs set it themselves."""
+    monkeypatch.delenv("HORIZON_UNATTENDED", raising=False)

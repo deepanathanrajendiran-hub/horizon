@@ -248,7 +248,7 @@ def test_attended_stop_still_lets_the_second_stop_through(project):
 # --- the skill carries the rules -----------------------------------------------------------------------
 
 E2ESWE_RULES = (
-    "at most twice per goal",
+    "out once more",
     "`review_unavailable`",
     "keep building and editing",
     "`close` refuses while a `[gate]` line has no check naming it",
@@ -257,6 +257,7 @@ E2ESWE_RULES = (
     "Baseline tests are the project's own tests from before the goal",
     "the checks in the gate directory are yours",
     "Take a check the environment blocks",
+    "retag its line `[review]`",
 )
 E2ESWE_GONE = (
     "Once handed out, it counts as the round",
@@ -302,3 +303,102 @@ def test_two_answered_rounds_close_and_name_both_rounds(project):
     cli.new_session("s3")
     code, out = cli("close", slug)
     assert code == 0 and out["complete"] and "2 review rounds" in out["unreviewed"], out
+
+
+# --- review of 632fbb8 -----------------------------------------------------------------------------------
+
+def _named_gate(p, cli, test_files, gate_tail, requirements=REQUIREMENTS + 'R3 [gate] "parse() strips spaces"\n'):
+    cli.new_session("s1")
+    (p / "tests").mkdir(exist_ok=True)
+    for name, body in test_files.items():
+        (p / "tests" / name).write_text(body)
+    gates = p / ".claude" / "gates" / "g"
+    command = f"{shlex.quote(sys.executable)} -m pytest -q -p no:cacheprovider {shlex.quote(str(gates))} {gate_tail}"
+    return _start(p, cli, requirements=requirements, gate=command)
+
+
+def test_a_symlink_loop_in_a_named_directory_does_not_crash_close(project):
+    # Python 3.10-3.12 raise RuntimeError from resolve() on a symlink loop; close crashed and never finalized.
+    p, cli = project
+    slug, gates = _named_gate(p, cli, {"test_tool.py": "def test_r3_strips():\n    assert True\n"}, "tests")
+    os.symlink("loop", p / "tests" / "loop")
+    (p / "src" / "extra.py").write_text("X = 1\n")
+    code, out = cli("close", slug)
+    assert code in (0, 1) and isinstance(out, dict), out
+    assert "unchecked_gate_lines" not in out, out
+
+
+def test_a_fifo_in_a_named_directory_does_not_hang_close(project):
+    p, cli = project
+    slug, gates = _named_gate(p, cli, {"test_tool.py": "def test_r3_strips():\n    assert True\n"}, "tests")
+    os.mkfifo(p / "tests" / "test_pipe.py")
+    (p / "src" / "extra.py").write_text("X = 1\n")
+    code, out = cli("close", slug)  # cli's own timeout fails the test on a hang
+    assert isinstance(out, dict) and "unchecked_gate_lines" not in out, out
+
+
+def test_a_pytest_node_id_and_an_absolute_path_with_a_space_name_their_files(project):
+    p, cli = project
+    tail = f"tests/test_node.py::test_r3_strips {shlex.quote(str(p / 'tests' / 'test_abs.py'))}"
+    slug, gates = _named_gate(p, cli, {"test_node.py": "def test_r3_strips():\n    assert True\n",
+                                       "test_abs.py": "def test_r4_keeps():\n    assert True\n"}, tail,
+                              requirements=REQUIREMENTS + 'R3 [gate] "strips"\nR4 [gate] "keeps"\n')
+    (p / "src" / "extra.py").write_text("X = 1\n")
+    code, out = cli("close", slug)
+    assert "unchecked_gate_lines" not in out, out
+
+
+def test_a_variable_or_a_binary_file_does_not_name_a_line(project):
+    p, cli = project
+    test = GATE_TEST + "def test_parse():\n    r3 = 'x'\n    assert r3\n"
+    (p / ".claude" / "gates" / "g").mkdir(parents=True)
+    (p / ".claude" / "gates" / "g" / "blob.bin").write_bytes(b"\0R3 test_r3_x")
+    cli.new_session("s1")
+    slug, gates = _start(p, cli, requirements=REQUIREMENTS + 'R3 [gate] "parse() strips spaces"\n', gate_test=test)
+    (p / "src" / "extra.py").write_text("X = 1\n")
+    code, out = cli("close", slug)
+    assert out.get("unchecked_gate_lines") == ["R3"], out
+
+
+def test_a_dotted_line_is_suggested_as_a_valid_name_and_named_by_it(project):
+    p, cli = project
+    cli.new_session("s1")
+    slug, gates = _start(p, cli, requirements=REQUIREMENTS + 'R3.1 [gate] "strips"\n')
+    (p / "src" / "extra.py").write_text("X = 1\n")
+    code, out = cli("close", slug)
+    assert out.get("unchecked_gate_lines") == ["R3.1"] and any("test_r3_1_" in m for m in out["missing"]), out
+    (gates / "test_request.py").write_text(GATE_TEST + "def test_r3_1_strips():\n    assert True\n")
+    code, out = cli("close", slug)
+    assert "unchecked_gate_lines" not in out, out
+
+
+def test_check_hands_out_no_brief_while_a_gate_line_is_unchecked(project):
+    p, cli = project
+    cli.new_session("s1")
+    slug, gates = _start(p, cli, requirements=REQUIREMENTS + 'R3 [gate] "parse() strips spaces"\n')
+    (p / "src" / "extra.py").write_text("X = 1\n")
+    code, out = cli("check", slug, "--did", "Added extra.py", "--next", "Name R3 in the gate")
+    assert out.get("unchecked_gate_lines") == ["R3"] and not out.get("review_brief"), out
+
+
+def test_unattended_stop_without_a_session_id_still_blocks_and_is_bounded(project):
+    import hooks
+    p, cli = project
+    cli.env["HORIZON_UNATTENDED"] = "1"
+    cli.new_session("s1")
+    slug, gates = _start(p, cli)
+    blocks = [cli.hook("Stop", {"stop_hook_active": True}) for _ in range(hooks.UNATTENDED_STOP_BLOCKS + 1)]
+    assert all(b and b["decision"] == "block" for b in blocks[:-1]) and blocks[-1] is None, blocks
+
+
+def test_unattended_sessions_that_stop_in_turn_keep_their_own_counts(project):
+    import hooks
+    p, cli = project
+    cli.env["HORIZON_UNATTENDED"] = "1"
+    cli.new_session("s1")
+    slug, gates = _start(p, cli)
+    for _ in range(hooks.UNATTENDED_STOP_BLOCKS):
+        assert cli.hook("Stop", {"session_id": "a", "stop_hook_active": True})["decision"] == "block"
+        assert cli.hook("Stop", {"session_id": "b", "stop_hook_active": True})["decision"] == "block"
+    assert cli.hook("Stop", {"session_id": "a", "stop_hook_active": True}) is None
+    assert cli.hook("Stop", {"session_id": "b", "stop_hook_active": True}) is None

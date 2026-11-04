@@ -350,8 +350,8 @@ session's last calls; `review_spent` means it has run, and only a reply that cam
 back (a finished round file or a recorded `review`) spends it. Send each brief
 once: if the reviewer is cut off, or its reply holds only its header, do not send
 it again yourself. `close` prints `review_pending` until a later session starts
-(or 15 quiet minutes pass); in a later session it hands the round out again, at
-most twice per goal, and once no reviewer has answered either brief it prints
+(or 15 quiet minutes pass); after that it hands the round out once more (two
+hand-outs per goal), and once no reviewer has answered either brief it prints
 `review_unavailable` and sends no more. A round that never came back never lets
 `close` complete: the goal then completes only on a passing review, or is
 finalized when its budget is spent. With `review_pending` or `review_unavailable`,
@@ -487,7 +487,8 @@ In an unattended run no one will answer or approve anything. When the runner
 sets `HORIZON_UNATTENDED=1`, the Stop hook sends an active goal with budget left
 back to work up to five times a session, so do not stop to wait for a person or a
 reviewer. Take a check the environment blocks (a write outside the project, the
-network, a port) out of the gate, record it with `note --fact`, and keep building.
+network, a port) out of the gate, retag its line `[review]`, record it with
+`note --fact`, and keep building.
 
 Disk checkpoints survive interruption; they do not wake the application.
 Only when the user requests scheduled continuation, use `/loop` for an open

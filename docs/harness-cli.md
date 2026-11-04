@@ -108,12 +108,17 @@ finalizes). Otherwise it returns `missing`, with `observation`. Rules:
   with `review`, then run `close` again.
 - A changed baseline test file blocks completion until `approve-test-change`.
 - A goal with a gate directory and a command gate completes only when every
-  requirement line tagged `[gate]` is named by a check: its id (`R3`, `test_r3_...`,
-  `# R3`; `R1` does not name `R10`) appears in a file of the gate directory other
-  than `.md`, `.txt` or `.rst` files, in a project file the gate command names, or
-  in a test file under a project directory it names. Otherwise `missing` says so
-  and `unchecked_gate_lines` lists the ids, and no reviewer is sent while any
-  remain. A line no command can check is a `[review]` line.
+  requirement line tagged `[gate]` is named by a check: its id as written (`R3`,
+  `R03`, `R1.2`, `# R3`) or inside an identifier after an underscore
+  (`test_r3_...`, `test_r1_2_...`) appears in a file of the gate directory other
+  than `.md`, `.txt` or `.rst` files, in a project file the gate command names (a
+  pytest node id counts for its file), or in a test file under a project directory
+  it names. A bare `r3` (a variable) does not count, and `R1` is not named by
+  `R10`, `R1a`, `R1.2` or `test_r1_2`. Only regular text files are read (no FIFO,
+  device or binary file; 2 MB each, 20 MB in all), and an unreadable path is
+  skipped. Otherwise `missing` says so and `unchecked_gate_lines` lists the ids,
+  and neither `close` nor `check` hands out a review brief while any remain. A
+  line no command can check is a `[review]` line.
 - When the budget is spent and the goal cannot complete, `close` records
   `finalized: {reason: "budget_exhausted", ...}` for the current tree.
 

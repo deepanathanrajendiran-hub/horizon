@@ -634,16 +634,32 @@ def unchecked_gate_lines(state: dict) -> list[str]:
     ids = [rid for rid, tags in requirements.items() if "gate" in tags]
     if not ids:
         return []
-    text = "\n".join(evidence.gate_texts(state))
-    return [rid for rid in ids
-            if not re.search(rf"(?<![A-Za-z0-9]){re.escape(rid)}(?![A-Za-z0-9]|\.\d)", text, re.I)]
+    try:
+        text = "\n".join(evidence.gate_texts(state))
+    except Exception:  # the check never stops `close` on a read error of its own
+        return []
+    return [rid for rid in ids if not _names_line(rid, text)]
+
+
+def _names_line(rid: str, text: str) -> bool:
+    """Whether text names requirement `rid`: as written (`R3`, `R03`, `R1.2`, in a comment or a string), or inside an
+    identifier after an underscore (`test_r3_...`, `test_r1_2_...`). A bare `r3` (a variable) does not count, nor
+    does R1 inside R10, R1a, R1.2 or `test_r1_2`."""
+    match = re.fullmatch(r"R(\d+)(.*)", rid)
+    digits, rest = (match.group(1).lstrip("0") or "0", match.group(2)) if match else ("", rid)
+    written = (rf"(?<![A-Za-z0-9])R0*{digits}{re.escape(rest)}(?![A-Za-z0-9]|\.\d)" if match
+               else rf"(?<![A-Za-z0-9]){re.escape(rid)}(?![A-Za-z0-9]|\.\d)")
+    ident = re.escape(rest.replace(".", "_"))
+    in_name = (rf"(?<=_)[rR]0*{digits}{ident}(?![A-Za-z0-9]|_\d)" if match
+               else rf"(?<=_){re.escape(rid.replace('.', '_'))}(?![A-Za-z0-9]|_\d)")
+    return bool(re.search(written, text) or re.search(in_name, text))
 
 
 def unchecked_message(unchecked: list[str]) -> str:
     return ("Requirement lines tagged [gate] that no check of the gate names: " + ", ".join(unchecked)
-            + ". Write a check for each, naming its line (as in `test_" + unchecked[0].lower() + "_...`), in the "
-            "gate directory or a test file the gate command runs. A line no command can check is a [review] line: "
-            "retag it and say why.")
+            + ". Write a check for each, naming its line (as in `test_" + unchecked[0].lower().replace(".", "_")
+            + "_...`), in the gate directory or a test file the gate command runs. A line no command can check "
+            "is a [review] line: retag it and say why.")
 
 
 def advisory_sections(state: dict) -> str:
