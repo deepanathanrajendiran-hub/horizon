@@ -671,7 +671,7 @@ is finished. A file is finished when its reply ends in `END VERDICTS`, or when i
 for 15 minutes (a reviewer still running keeps writing). A recorded `review` also ends a round. A round that `close`
 handed out (it records the session it went to) and that never came back does not count: a reviewer cut off after
 its header, or one that never replied. Until the E2E-SWE paper run it counted once a later session had started,
-and 57 goals closed on the agent's own gate that way, 44 of them below 100% on the hidden tests. Now `close` hands
+and 79 goals closed on the agent's own gate that way, 57 of them below 100% on the hidden tests. Now `close` hands
 such a round out again in a later session, up to one hand-out more than the rounds (two by default). While the last
 hand-out can still come back (no later session has started and it or its reply file changed in the last 15
 minutes, or a reviewer is still writing for the goal: a reply with decided lines, no `END VERDICTS`, changed in the

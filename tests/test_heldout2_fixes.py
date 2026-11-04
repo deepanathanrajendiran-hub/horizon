@@ -92,7 +92,7 @@ def _brief(p, cli):
 # --- fix 1: the review round survives a cut-off reviewer ----------------------------------------------
 
 def test_a_reviewer_cut_off_after_its_header_gets_its_round_handed_out_again(project):
-    # E2E-SWE paper run: counting this round as spent closed 57 goals on the agent's own gate, so the round is now
+    # E2E-SWE paper run: counting this round as spent closed 79 goals on the agent's own gate, so the round is now
     # handed out once more (tests/test_e2eswe_fixes.py).
     p, cli = project
     slug, digest, review_file = _brief(p, cli)

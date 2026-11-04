@@ -521,7 +521,7 @@ def review_spent(state: dict) -> bool:
     """Whether this goal has had its review round(s): finished rounds on this goal's own checkpoints or recorded
     reviews. A round handed out and never answered (heldout2: a reviewer cut off by the call cap after its header,
     or a background one gone with its session) used to count once a later session started; on the E2E-SWE paper
-    run that closed 57 goals on the agent's own gate, 44 of them below 100% on the hidden tests. It no longer
+    run that closed 79 goals on the agent's own gate, 57 of them below 100% on the hidden tests. It no longer
     counts: `close` hands the round out again, up to `handouts_per_goal()`."""
     return _answered(state) >= rounds_per_goal()
 

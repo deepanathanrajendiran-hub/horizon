@@ -4,11 +4,11 @@ lost (mean d -1.70) because it ended builds while the hidden tests still failed:
 
 - The review almost never ran. Of 65 reviewer dispatches, 46 came back only as "Async agent launched" and 11 were
   cut off by the call cap; 8 returned verdicts. A round handed out and never answered counted as spent once a later
-  session started, so 57 goals closed on the agent's own gate with only an `unreviewed` note, 44 of them below 100%
+  session started, so 79 goals closed on the agent's own gate with only an `unreviewed` note, 57 of them below 100%
   on the hidden tests (reader 5 of 94, pysmt 0 of 27).
 - Nothing checked that the gate checked the requirement lines: pysmt's gate named R1-R4, R13 and R14 of 19.
 - With the goal still active, sessions stopped to wait for a person: the Stop hook lets the second stop through,
-  and django_cqrs, pytermgui, monkeytype and websockets ended capped sessions asking for help."""
+  and django_cqrs, pytermgui, monkeytype and websockets ended sessions under the cap asking for help."""
 import json
 import os
 import shlex

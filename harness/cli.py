@@ -193,7 +193,7 @@ def _review_handoff(report: dict, state: dict, digest: str, issue: bool = False)
     """Hand out the review brief. With `issue` (from `close`), the round counts as handed out: if it never comes
     back, a later session's `close` hands it out again, up to `reviewing.handouts_per_goal()`; after that `close`
     sends no more and completes only on a passing review (E2E-SWE paper run: an unanswered round counted as spent
-    closed 57 goals on the agent's own gate)."""
+    closed 79 goals on the agent's own gate)."""
     review_file = reviewing.next_review_file(
         state["slug"], digest, len(state.get("reviews") or []) + 1,
         watch_paths=state.get("watch_paths") or [state["cwd"]])
