@@ -91,6 +91,12 @@ versions. [Codex skills](https://learn.chatgpt.com/docs/build-skills),
   [Claude scheduling](https://code.claude.com/docs/en/scheduled-tasks).
 - **Verification covers only the watched files and the given criterion.** External
   state needs a deliberate rerun (`check --force`).
+- **A goal that asks for review completes only once a reviewer answers.** A review
+  brief that never comes back is handed out once more in a later session; after
+  that the goal stays open until a passing review or until its budget is spent.
+- **Unattended runs set `HORIZON_UNATTENDED=1`.** Claude Code's Stop hook then sends
+  an active goal back to work up to five times a session instead of letting the
+  second stop through for a person.
 - **Review handles and approval flags record what the calling agent asserts.** They
   are not identity verification or a security sandbox.
 - **State mode can't tell whether a worker is still running.** If a session is

@@ -410,6 +410,13 @@ def rounds_per_goal() -> int:
         return REVIEW_ROUNDS_PER_GOAL
 
 
+def handouts_per_goal() -> int:
+    """How many review briefs `close` may hand out per goal: one more than its rounds, so a round whose reviewer
+    never answered goes out once more, and no further (E2E-SWE paper run: of 65 reviewers, 46 came back only as
+    "Async agent launched" and 11 were cut off by the call cap)."""
+    return rounds_per_goal() + 1
+
+
 def review_dir(watch_paths=()) -> str:
     """The directory round files are written to."""
     return os.path.dirname(review_file("goal", "0" * 64, 1, watch_paths))
@@ -505,25 +512,40 @@ def issue_expired(entry: dict, now: float | None = None) -> bool:
     return (time.time() if now is None else now) - latest >= ROUND_QUIET_S
 
 
+def _answered(state: dict) -> int:
+    """How many of this goal's rounds came back: finished round files on its own checkpoints, or recorded reviews."""
+    return max(len(goal_rounds(state)), len(state.get("reviews") or []))
+
+
 def review_spent(state: dict) -> bool:
     """Whether this goal has had its review round(s): finished rounds on this goal's own checkpoints or recorded
-    reviews, or every round handed out by `close` gone past coming back with no reviewer still writing. A round
-    handed out and never answered (heldout2: a reviewer cut off by the call cap after its header, or a
-    background one gone with its session) counts once a later session starts."""
-    needed = rounds_per_goal()
-    if max(len(goal_rounds(state)), len(state.get("reviews") or [])) >= needed:
-        return True
-    issued = state.get("review_issued") or []
-    if len(issued) < needed or not issue_expired(issued[-1]):
-        return False
-    import time
-    now = time.time()
-    return not any(_writing(_text(p), now - _mtime(p)) for p in _goal_round_paths(state))
+    reviews. A round handed out and never answered (heldout2: a reviewer cut off by the call cap after its header,
+    or a background one gone with its session) used to count once a later session started; on the E2E-SWE paper
+    run that closed 57 goals on the agent's own gate, 44 of them below 100% on the hidden tests. It no longer
+    counts: `close` hands the round out again, up to `handouts_per_goal()`."""
+    return _answered(state) >= rounds_per_goal()
 
 
 def review_pending(state: dict) -> bool:
-    """Every round handed out, and the last one may still come back: keep building, send no other reviewer."""
-    return len(state.get("review_issued") or []) >= rounds_per_goal() and not review_spent(state)
+    """Every round handed out, and the last one has not come back and still may: it went out in this session (or
+    less than ROUND_QUIET_S ago, for a runtime without hooks), or a reviewer is still writing. Keep building, send
+    no other reviewer."""
+    issued = state.get("review_issued") or []
+    if len(issued) < rounds_per_goal() or review_spent(state) or _answered(state) >= len(issued):
+        return False
+    if not issue_expired(issued[-1]):
+        return True
+    import time
+    now = time.time()
+    return any(_writing(_text(p), now - _mtime(p)) for p in _goal_round_paths(state))
+
+
+def review_unavailable(state: dict) -> bool:
+    """Every brief this goal may hand out went out, none of its rounds is still to come back, and too few came back:
+    no reviewer will answer, so `close` sends no more and completes only on a passing review."""
+    issued = state.get("review_issued") or []
+    return (len(issued) >= handouts_per_goal() and not review_spent(state)
+            and not review_pending(state))
 
 
 def _fail_lines(text: str) -> list[str]:

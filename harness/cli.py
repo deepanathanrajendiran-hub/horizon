@@ -191,7 +191,9 @@ def goal_rows(exclude: str | None = None) -> list[dict]:
 
 def _review_handoff(report: dict, state: dict, digest: str, issue: bool = False) -> None:
     """Hand out the review brief. With `issue` (from `close`), the round counts as handed out: if it never comes
-    back, the next `close` completes without it."""
+    back, a later session's `close` hands it out again, up to `reviewing.handouts_per_goal()`; after that `close`
+    sends no more and completes only on a passing review (E2E-SWE paper run: an unanswered round counted as spent
+    closed 57 goals on the agent's own gate)."""
     review_file = reviewing.next_review_file(
         state["slug"], digest, len(state.get("reviews") or []) + 1,
         watch_paths=state.get("watch_paths") or [state["cwd"]])
@@ -219,8 +221,19 @@ def _review_handoff(report: dict, state: dict, digest: str, issue: bool = False)
                                   "another, listing what went unreviewed.")
         return
     if reviewing.review_pending(state):
-        report["review_pending"] = ("A reviewer is still writing its reply for this goal. Keep building; record "
-                                    "its reply with `review` when it ends, and never wait for it.")
+        # E2E-SWE paper run, pytermgui: told a reviewer was still writing, the agent left the work unchanged for two
+        # sessions so as not to move "the snapshot the reviewer is judging".
+        report["review_pending"] = ("A reviewer may still be writing its reply for this goal. Keep building and "
+                                    "edit the work as it needs: never leave it unchanged for the reviewer, and "
+                                    "never wait for it. Record its reply with `review` if it arrives; its FAIL "
+                                    "lines still apply to the files it judged.")
+        return
+    if reviewing.review_unavailable(state):
+        report["review_unavailable"] = (
+            "No reviewer answered this goal's review briefs, and close hands out no more. It will not complete "
+            "this goal without a passing review: keep building and extend the gate toward what the request still "
+            "lacks. When the budget is spent, close records the current files as the deliverable.")
+        report.setdefault("missing", []).append(report["review_unavailable"])
         return
     # Lines an earlier reviewer of this same checkpoint passed before it was cut off.
     carried, carried_from = reviewing.carried(state["slug"], digest, requirements, review_file)
@@ -455,9 +468,10 @@ def dispatch(args) -> tuple[dict, int]:
                 # Unfingerprintable files or unreadable requirements: `missing`
                 # already says so, and there is no snapshot to hand a reviewer.
                 digest, needs_review = None, False
-            # A reviewer is sent only once the requirement lines cover the request.
+            # A reviewer is sent only once the requirement lines cover the request, and the gate checks every
+            # [gate] line (E2E-SWE paper run: a brief spent on a gate that lacks checks is a hand-out lost).
             if (needs_review and evidence.passing_record(state, digest)
-                    and not goal.differing_sections(state)):
+                    and not goal.differing_sections(state) and not goal.unchecked_gate_lines(state)):
                 _review_handoff(result, state, digest, issue=True)
             _with_examples(result, state)
         return result, 0 if result["complete"] else 1

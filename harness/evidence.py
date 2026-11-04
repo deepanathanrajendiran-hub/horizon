@@ -96,6 +96,69 @@ def _command_files(cwd: str, command: str):
                     yield rel, path
 
 
+def _command_dirs(cwd: str, command: str):
+    """Project directories below the root that the gate command names, such as `tests` in `pytest tests`."""
+    root = Path(cwd).resolve()
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = command.split()
+    for token in tokens:
+        for word in token.split():
+            for part in (word, word.partition("=")[2]):
+                if not part:
+                    continue
+                try:
+                    path = (root / part).resolve()
+                    rel = path.relative_to(root).as_posix()
+                    if not path.is_dir() or path == root:
+                        continue
+                except (OSError, ValueError):
+                    continue
+                if not _is_harness_state(rel):
+                    yield path
+
+
+def _walk(directory: Path):
+    for dirpath, dirnames, filenames in os.walk(directory):
+        dirnames[:] = [d for d in dirnames if d not in tree_hash.EXCLUDED_DIRS]
+        for name in filenames:
+            yield Path(dirpath) / name
+
+
+def gate_texts(state: dict, max_bytes: int = 2_000_000) -> list[str]:
+    """The text of every file the gate can run: the gate directory's files other than prose (request.md,
+    requirements.md and any other .md, .txt or .rst file), and the project files the gate command names, with the
+    test files in the directories it names."""
+    files = []
+    gate_path = state.get("gate_path")
+    if gate_path and os.path.isdir(gate_path):
+        top = Path(gate_path).resolve()
+        files += [p for p in _walk(top) if p.suffix.lower() not in (".md", ".txt", ".rst")]
+    if state["gate"]["kind"] == "command":
+        root = Path(state["cwd"]).resolve()
+        files += [path for _, path in _command_files(state["cwd"], state["gate"]["value"])]
+        for directory in _command_dirs(state["cwd"], state["gate"]["value"]):
+            for path in _walk(directory):
+                try:
+                    rel = path.resolve().relative_to(root).as_posix()
+                except (OSError, ValueError):
+                    continue
+                if _is_test(rel):
+                    files.append(path)
+    texts, seen = [], set()
+    for path in files:
+        try:
+            key = path.resolve()
+            if key in seen or key.stat().st_size > max_bytes:
+                continue
+            seen.add(key)
+            texts.append(key.read_text(errors="replace"))
+        except (OSError, ValueError):
+            continue
+    return texts
+
+
 def gate_manifest(cwd: str, command: str, watch_paths: list[str] | None) -> dict[str, str]:
     """sha256 of the files that decide what the gate runs: files its command names,
     and conftest.py, pytest.ini and tox.ini in the watched paths."""

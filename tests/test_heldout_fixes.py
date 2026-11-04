@@ -78,7 +78,8 @@ def _start_spec_goal(p, cli, review=True):
     gates.mkdir(parents=True)
     (gates / "request.md").write_text("Build pkg from SPEC.md\n")
     (gates / "requirements.md").write_text('R1 [gate] "double doubles"\n')
-    (gates / "test_ok.py").write_text("def test_ok():\n    assert True\n")
+    (gates / "test_ok.py").write_text("def test_ok():  # checks R1 (E2E-SWE: close needs every [gate] line named)\n"
+                                      "    assert True\n")
     args = ["start", "Build pkg", "--gate", f"{shlex.quote(sys.executable)} -m pytest -q -p no:cacheprovider "
             f"{shlex.quote(str(gates))}",
             "--gate-path", str(gates), "--surface-spec", str(p / "SPEC.md"), "--package", "pkg"]
@@ -466,7 +467,9 @@ def slim_missing(text: str) -> list[str]:
 def test_the_slim_skill_holds_the_core_rules_and_stays_small(folder):
     text = (ROOT / folder / "skills/horizon/SKILL.md").read_text()
     assert slim_missing(text) == []
-    assert len(text.splitlines()) <= 160 and len(text.split()) <= 1600
+    # E2E-SWE paper run: the foreground reviewer, the re-handed round, the named [gate] checks, the install check
+    # and the baseline-test and blocked-check rules took the slim skill from 1,598 words to about 1,740.
+    assert len(text.splitlines()) <= 170 and len(text.split()) <= 1750
 
 # --- the skill is task-neutral (2026-10-31) -------------------------------------------------------------
 # The rules tuned on NL2Repo (recall the real library over the spec, package first, docs last, the spec-build

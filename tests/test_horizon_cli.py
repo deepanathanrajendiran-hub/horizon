@@ -170,6 +170,8 @@ def _gate_dir(run, project, runtime, name="ready"):
     gates.mkdir(parents=True)
     (gates / "request.md").write_text("Make ready.txt say ready.\n")
     (gates / "requirements.md").write_text('R1 [gate] "ready.txt says ready"\n')
+    # E2E-SWE paper run: close needs a check that names every [gate] line; the tests' gate is `true`.
+    (gates / "test_lines.py").write_text("# checks R1 R2 R3 R4 R5 R6 R7\n")
     return gates
 
 

@@ -173,7 +173,10 @@ over the example. Save the returned slug. State belongs to this runtime's projec
 Make the deliverable usable first. In the first session, create the entry point a user calls (the package,
 module or command the request names) and every module it imports, so that importing or running it works before
 its parts are filled in, and make that the gate's first check. A part that cannot be imported scores as nothing
-built, however complete it is.
+built, however complete it is. When the request says how the work is installed or run (an install script, a
+package install, a command), that first check does it that way, in a clean copy, never through `PYTHONPATH` or the
+source tree: a gate that imports from the source tree passes a project nobody can install. If no command can run
+at all, write the code anyway and record that with `note --fact`.
 
 Write straight into the real files, never into scratch parts to join later: a session can end at any call, and
 parts not yet joined are lost. A long file goes in as several appends to the file itself. Keep the work runnable
@@ -182,7 +185,9 @@ after every write, and run what you wrote in the same session, the way a user wo
 Build before you verify. While any part of the request is unbuilt or a placeholder, the next action is building
 it, not new checks or a review. Take the largest part still unbuilt next, not the next one in the order you read
 it, and give no part more than about a session while others are placeholders. Grow the gate with the work: add
-checks for the part you just built, from the request and its own examples. A check that passes the first time it
+checks for the part you just built, from the request and its own examples, each naming the requirement line it
+checks (`test_r3_...`). `close` refuses while a `[gate]` line has no check naming it; a line no command can check
+is a `[review]` line, so retag it and say why. A check that passes the first time it
 runs is not progress. A check from an example in the request asserts the example's literal result: when your
 code disagrees with it, change the code, not the check. An example can be wrong: drop such a check only when the
 rest of the request contradicts it, and record why with `note --fact`. When two sessions in a row changed no
@@ -301,7 +306,9 @@ python3 "$HARNESS" --runtime codex --project "$PROJECT" close "$SLUG"
   instead, unless a person (or a fresh reviewer) is there to approve the change.
   Only with that approval run `approve-test-change`, naming who approved it and
   why. Never approve a
-  changed test on your own judgment.
+  changed test on your own judgment. Baseline tests are the project's own tests
+  from before the goal; the checks in the gate directory are yours, so fix a
+  wrong one yourself, with no approval.
 
 ```bash
 python3 "$HARNESS" --runtime codex --project "$PROJECT" approve-test-change "$SLUG" \
@@ -324,12 +331,18 @@ the gate directory and Horizon's own state has changed since the FAIL, `close`
 refuses. If a FAIL line is wrong, record why with
 `note --finding "Disputed Rk: <reason>"`. So dispatch that round once, as the first
 action of a session, when every part of the request is built, never in a
-session's last calls; `review_spent` means it has run. Once `close` has handed
-out the brief, that is the round: if the reviewer is cut off, or its reply holds
-only its header, never send it again; `close` prints `review_pending` until a
-later session starts (or 15 quiet minutes pass), then completes on a passing
-gate. A reviewer still appending verdicts holds the goal until it ends or has
-been quiet for 15 minutes. If it runs in the background, keep building while it
+session's last calls; `review_spent` means it has run, and only a reply that came
+back (a finished round file or a recorded `review`) spends it. Send each brief
+once: if the reviewer is cut off, or its reply holds only its header, do not send
+it again yourself. `close` prints `review_pending` until a later session starts
+(or 15 quiet minutes pass); in a later session it hands the round out again, at
+most twice per goal, and once no reviewer has answered either brief it prints
+`review_unavailable` and sends no more. A round that never came back never lets
+`close` complete: the goal then completes only on a passing review, or is
+finalized when its budget is spent. With `review_pending` or `review_unavailable`,
+keep building and editing the work; never leave it unchanged for a reviewer. A
+reviewer still appending verdicts holds the goal until it ends or has been quiet
+for 15 minutes. If a reviewer runs in the background anyway, keep building while it
 runs and never wait or search for its reply. A reply that would pass but for its
 UNVERIFIED lines (checks the environment cannot run) does not block `close`: those
 lines go to `unreviewed` and the final report.
@@ -454,6 +467,11 @@ python3 "$HARNESS" --runtime codex --project "$PROJECT" observe "$SLUG"
 
 Read [the CLI reference](commands.md) for watch paths, lifecycle
 commands, the review brief, and upgrade rules.
+
+In an unattended run no one will answer or approve anything, so do not stop to
+wait for a person or a reviewer. Take a check the environment blocks (a write
+outside the project, the network, a port) out of the gate, record it with
+`note --fact`, and keep building.
 
 Disk checkpoints survive interruption; they do not wake the application.
 Only when the user requests scheduled continuation, use the available Codex

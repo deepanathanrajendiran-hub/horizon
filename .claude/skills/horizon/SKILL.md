@@ -74,7 +74,8 @@ python3 "$HARNESS" --runtime claude --project "$PROJECT" start "Requested outcom
   you chose.
 - **The gate:** checks of the `[gate]` lines, called the way existing callers and tests call the code. Take
   expected values from the request and its inputs, never from your own code. When the request says existing
-  behaviour must stay the same, capture the current outputs now and compare against them.
+  behaviour must stay the same, capture the current outputs now and compare against them. Each check names its
+  line (`test_r3_...`): `close` refuses while a `[gate]` line has no check naming it.
 - **The baseline:** `start` runs the gate once and prints the baseline `observation`; read it, and do not run
   `check` for it. Checks of behaviour the request calls broken or missing must fail there.
 
@@ -82,7 +83,10 @@ python3 "$HARNESS" --runtime claude --project "$PROJECT" start "Requested outcom
 
 1. **Make the deliverable usable first.** In the first session, create the entry point a user calls (the package,
    module or command the request names) and every module it imports, so that importing or running it works before
-   its parts are filled in; the gate's first check does exactly that.
+   its parts are filled in; the gate's first check does exactly that. When the request says how the work is
+   installed or run (an install script, a package install, a command), that check does it that way, in a clean
+   copy, never through `PYTHONPATH` or the source tree. If no command can run at all, write the code anyway and
+   record that with `note --fact`.
 2. **Write straight into the real files,** never into scratch parts to join later, and keep the work runnable
    after every write: a session can end at any call.
 3. **Run what you wrote, in the same session.** Before the session can end, run the changed code the way a user
@@ -114,14 +118,15 @@ enough. A section that gives Python code counts as built only when the work's de
 request gives (its base classes and parameter names); `close` waits for that.
 
 A goal gets one review round. Dispatch it once, as the first action of a session, never in a session's last calls:
-when `close` prints a `review_brief`, send it unchanged to a fresh reviewer with Claude Code's `Agent` tool
-(`subagent_type: "general-purpose"`, in the foreground), replacing only `<<ARTIFACTS>>` and `<<HOW_TO_RUN>>`. Once
-handed out, it counts as the round: never send it again, even if the reviewer is cut off; run `close`. If it runs
-in the background, keep building while it runs; never wait for its reply. Record its reply file with `review`
-(`--result fail` only when it has a FAIL line; UNVERIFIED lines go to the final report), fix the FAIL lines in the
-work, and run `close` again: after the round it completes on a passing gate and lists what went unreviewed. It will
-not complete while the work is unchanged since a FAIL. If a FAIL line is wrong, record why with `note --finding
-"Disputed Rk: <reason>"`.
+when `close` prints a `review_brief`, send it unchanged to a fresh reviewer with Claude Code's `Agent` tool, passing
+`subagent_type: "general-purpose"` and `run_in_background: false` so its reply comes back in that call, and
+replacing only `<<ARTIFACTS>>` and `<<HOW_TO_RUN>>`. Send each brief once; if the reviewer is cut off, run `close`:
+a round that never came back is handed out again in a later session, at most twice per goal, and `close` never
+completes on it. With `review_pending` or `review_unavailable`, keep building and editing; never wait for a
+reviewer. Record its reply file with `review` (`--result fail` only when it has a FAIL line; UNVERIFIED lines go to
+the final report), fix the FAIL lines in the work, and run `close` again: after the round it completes on a passing
+gate and lists what went unreviewed. It will not complete while the work is unchanged since a FAIL. If a FAIL line
+is wrong, record why with `note --finding "Disputed Rk: <reason>"`.
 
 ```bash
 python3 "$HARNESS" --runtime claude --project "$PROJECT" close "$SLUG"
@@ -132,6 +137,8 @@ python3 "$HARNESS" --runtime claude --project "$PROJECT" review "$SLUG" \
 
 If `close` says a baseline test file changed, restore it and fix the code instead, unless a person is there
 to approve the change; record it only with their approval. Never approve a changed test on your own judgment.
+Baseline tests are the project's own tests from before the goal; the checks in the gate directory are yours, so
+fix a wrong one yourself, with no approval.
 
 ```bash
 python3 "$HARNESS" --runtime claude --project "$PROJECT" approve-test-change "$SLUG" \
@@ -141,7 +148,8 @@ python3 "$HARNESS" --runtime claude --project "$PROJECT" approve-test-change "$S
 A session's length is not the goal's deadline: never end a session to hand off while the goal is active and budget
 remains. Your work is committed whenever the session is cut off. In an unattended run no one will answer a
 question, so never stop to ask: record your decision, or a check the environment blocks, with `note --fact` and
-keep building. If `status` shows an attempt you did not start, run `step-reclaim` as the guide describes.
+keep building. Take a check the environment blocks (a write outside the project, the network, a port) out of the
+gate. If `status` shows an attempt you did not start, run `step-reclaim` as the guide describes.
 
 ```bash
 python3 "$HARNESS" --runtime claude --project "$PROJECT" step-reclaim "$SLUG" --attempt "$ATTEMPT" --expected-revision 2

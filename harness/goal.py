@@ -620,6 +620,32 @@ def differing_sections(state: dict) -> list[dict]:
     return [m for m in uncited_sections(state) if m.get("kind") == "differs"]
 
 
+def unchecked_gate_lines(state: dict) -> list[str]:
+    """`[gate]` requirement lines that no file the gate runs names by id (`R3`, `test_r3_...`, `# R3`).
+
+    E2E-SWE paper run, pysmt: the gate named R1-R4, R13 and R14 of 19 lines, and `close` completed while the agent's
+    own report said R5-R12 and R15-R19 were unbuilt and untested (0 of 27 hidden tests)."""
+    if not state.get("gate_path") or state["gate"]["kind"] != "command":
+        return []
+    try:
+        requirements = _requirements(state) or {}
+    except EvidenceInsufficient:
+        return []
+    ids = [rid for rid, tags in requirements.items() if "gate" in tags]
+    if not ids:
+        return []
+    text = "\n".join(evidence.gate_texts(state))
+    return [rid for rid in ids
+            if not re.search(rf"(?<![A-Za-z0-9]){re.escape(rid)}(?![A-Za-z0-9]|\.\d)", text, re.I)]
+
+
+def unchecked_message(unchecked: list[str]) -> str:
+    return ("Requirement lines tagged [gate] that no check of the gate names: " + ", ".join(unchecked)
+            + ". Write a check for each, naming its line (as in `test_" + unchecked[0].lower() + "_...`), in the "
+            "gate directory or a test file the gate command runs. A line no command can check is a [review] line: "
+            "retag it and say why.")
+
+
 def advisory_sections(state: dict) -> str:
     """The `close` note listing unbuilt or unquoted sections, or "" when there are none or they cannot be read."""
     try:
@@ -718,7 +744,8 @@ def issue_review(slug: str, digest: str, review_file: str) -> None:
     rounds have all been handed out and the last can no longer come back (`reviewing.issue_expired`), a round that
     never came back (a reviewer cut off by a call cap, or a background one that died with its session) no longer
     holds the goal open: heldout2 lost about 70 of 193 sessions re-sending one review. The same file handed out
-    again in a later session is another round."""
+    again in a later session is another round. Since the E2E-SWE paper run such a round is handed out at most
+    `reviewing.handouts_per_goal()` times and never lets the goal complete unreviewed."""
     with filelock.goal_locked(_path(slug)):
         state = load(slug)
         if execution_mode(state) == "state" or state["status"] != "active":
@@ -814,6 +841,9 @@ def close(slug: str, *, run_gate: bool = True, timeout: int = gate.DEFAULT_TIMEO
               "finalized": state.get("finalized"), "observation": latest_observation(state)}
     if advisory:
         result["sections_advisory"] = advisory
+    unchecked = unchecked_gate_lines(state)
+    if unchecked:
+        result["unchecked_gate_lines"] = unchecked
     return result
 
 
@@ -972,6 +1002,9 @@ def _apply_completion(state: dict, observed_hash: str, gate_output: str, allow_u
     differing = differing_sections(state)
     if differing:
         raise GateNotPassed(sections.message(differing))
+    unchecked = unchecked_gate_lines(state)
+    if unchecked:
+        raise GateNotPassed(unchecked_message(unchecked))
     reasons = evidence.review_reasons(state, _requirements(state))
     if reasons:
         criterion = state["gate"]["review_criterion"]

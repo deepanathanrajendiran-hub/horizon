@@ -107,6 +107,13 @@ finalizes). Otherwise it returns `missing`, with `observation`. Rules:
   tree, the report includes `review_file` and `review_brief`; record the verdict
   with `review`, then run `close` again.
 - A changed baseline test file blocks completion until `approve-test-change`.
+- A goal with a gate directory and a command gate completes only when every
+  requirement line tagged `[gate]` is named by a check: its id (`R3`, `test_r3_...`,
+  `# R3`; `R1` does not name `R10`) appears in a file of the gate directory other
+  than `.md`, `.txt` or `.rst` files, in a project file the gate command names, or
+  in a test file under a project directory it names. Otherwise `missing` says so
+  and `unchecked_gate_lines` lists the ids, and no reviewer is sent while any
+  remain. A line no command can check is a `[review]` line.
 - When the budget is spent and the goal cannot complete, `close` records
   `finalized: {reason: "budget_exhausted", ...}` for the current tree.
 
@@ -179,6 +186,10 @@ the event JSON on stdin and always exits 0, so a hook never blocks a session.
   active with budget left, it blocks the stop once and names each such goal's
   next action: a session's length is not the goal's deadline. The next stop in a
   row (`stop_hook_active`) always goes through, so a person can still be answered.
+  With `HORIZON_UNATTENDED=1` (a run with no person, set by the runner in the
+  environment Claude Code starts with), the next stop in a row is blocked too,
+  with a message that no one will answer or approve, up to
+  `UNATTENDED_STOP_BLOCKS` (5) blocks per session; after that a stop goes through.
 
 Claude Code loads hooks when a session starts, so hooks installed by `start` take
 effect from the next session.
@@ -653,14 +664,18 @@ A goal gets one review round, on any checkpoint (`HORIZON_REVIEW_ROUNDS_PER_GOAL
 **What counts as a round:** a round file named for one of the goal's own checkpoints that repeats its hash, and
 is finished. A file is finished when its reply ends in `END VERDICTS`, or when it decided a line and has been quiet
 for 15 minutes (a reviewer still running keeps writing). A recorded `review` also ends a round. A round that `close`
-handed out (it records the session it went to) counts once it can no longer come back, that is once a later
-session has started, or once neither the hand-out nor its reply file has changed for 15 minutes, and no reviewer
-is still writing for the goal (a reply with decided lines, no `END VERDICTS`, changed in the last 15 minutes). So
-a reviewer cut off after its header, or one that never replied, does not hold the goal open past its session.
-Until then `check` and `close` print `review_pending` instead of another brief. The same file handed out again in
-a later session is another round. A brief that `check` prints does not count until its reply is finished.
+handed out (it records the session it went to) and that never came back does not count: a reviewer cut off after
+its header, or one that never replied. Until the E2E-SWE paper run it counted once a later session had started,
+and 57 goals closed on the agent's own gate that way, 44 of them below 100% on the hidden tests. Now `close` hands
+such a round out again in a later session, up to one hand-out more than the rounds (two by default). While the last
+hand-out can still come back (no later session has started and it or its reply file changed in the last 15
+minutes, or a reviewer is still writing for the goal: a reply with decided lines, no `END VERDICTS`, changed in the
+last 15 minutes), `check` and `close` print `review_pending` instead of another brief. Once every hand-out has gone
+out and none of them still can come back, they print `review_unavailable` and send no more: `close` then completes
+only on a passing review, or finalizes the goal when its budget is spent. The same file handed out again in a later
+session is another hand-out. A brief that `check` prints does not count until its reply is finished.
 
-**After the round,** an explicit `close` completes on a passing gate without a passing review. It reports
+**After a round that came back,** an explicit `close` completes on a passing gate without a passing review. It reports
 `unreviewed`: why a review was required, plus the FAIL lines the round found that were fixed but not re-checked.
 `check` and `close` then print `review_spent` instead of a brief.
 

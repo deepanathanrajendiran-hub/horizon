@@ -68,7 +68,9 @@ def _start(p, cli, requirements='R1 [gate] "Parsing, Project Layout, Output Form
     gates.mkdir(parents=True, exist_ok=True)
     (gates / "request.md").write_text("Build the tool described in DESIGN.md\n")
     (gates / "requirements.md").write_text(requirements)
-    (gates / "test_ok.py").write_text("def test_ok():\n    assert True\n")
+    # E2E-SWE paper run: close needs a check that names every [gate] line.
+    named = " ".join(w for w in requirements.split() if w[:1] == "R" and w[1:2].isdigit())
+    (gates / "test_ok.py").write_text(f"def test_ok():  # checks {named}\n    assert True\n")
     args = ["start", "Build the tool", "--gate-path", str(gates), "--gate",
             f"{shlex.quote(sys.executable)} -m pytest -q -p no:cacheprovider {shlex.quote(str(gates))}"]
     if review:
@@ -89,14 +91,16 @@ def _brief(p, cli):
 
 # --- fix 1: the review round survives a cut-off reviewer ----------------------------------------------
 
-def test_a_reviewer_cut_off_after_its_header_does_not_hold_the_goal_open(project):
+def test_a_reviewer_cut_off_after_its_header_gets_its_round_handed_out_again(project):
+    # E2E-SWE paper run: counting this round as spent closed 57 goals on the agent's own gate, so the round is now
+    # handed out once more (tests/test_e2eswe_fixes.py).
     p, cli = project
     slug, digest, review_file = _brief(p, cli)
     review_file.write_text(f"Reviewed checkpoint: {digest}\n")
     cli.new_session("s2")  # the capped session ended with its reviewer
     code, out = cli("close", slug)
-    assert code == 0 and out["complete"], out
-    assert "unreviewed" in out and not out.get("review_brief"), out
+    assert code == 1 and not out["complete"], out
+    assert "unreviewed" not in out and out.get("review_brief"), out
 
 
 def test_a_second_close_in_the_same_session_waits_for_the_reviewer(project):
@@ -112,12 +116,18 @@ def test_a_second_close_in_the_same_session_waits_for_the_reviewer(project):
     assert not out.get("review_brief"), out
 
 
-def test_a_review_handed_out_and_never_answered_does_not_hold_the_goal_open(project):
+def test_a_review_handed_out_and_never_answered_goes_out_once_more_and_then_no_more(project):
+    # E2E-SWE paper run: no longer completes the goal; the hand-outs are bounded instead, so the review cannot
+    # loop as it did on heldout2.
     p, cli = project
     slug, digest, review_file = _brief(p, cli)
     cli.new_session("s2")
     code, out = cli("close", slug)
-    assert code == 0 and out["complete"], out
+    assert code == 1 and not out["complete"] and out.get("review_brief"), out
+    cli.new_session("s3")
+    code, out = cli("close", slug)
+    assert code == 1 and not out["complete"], out
+    assert out.get("review_unavailable") and not out.get("review_brief"), out
 
 
 def test_a_brief_from_check_does_not_spend_the_review(project):
@@ -161,8 +171,12 @@ def test_with_more_rounds_a_reviewer_that_never_writes_does_not_loop(project):
     assert code == 1 and out.get("review_brief"), out
     cli.new_session("s3")
     code, out = cli("close", slug)
-    assert code == 0 and out["complete"], out
-    assert "2 review rounds" in out["unreviewed"], out
+    # E2E-SWE paper run: two rounds allow three hand-outs, then close sends no more and does not complete.
+    assert code == 1 and out.get("review_brief"), out
+    cli.new_session("s4")
+    code, out = cli("close", slug)
+    assert code == 1 and not out["complete"], out
+    assert out.get("review_unavailable") and not out.get("review_brief"), out
 
 
 def test_an_unverified_only_reply_recorded_as_fail_does_not_block_close(project):
@@ -249,8 +263,9 @@ def test_imported_names_count_as_defined(tmp_path):
 # --- fixes 1, 3, 4, 5: the skill says so -------------------------------------------------------------
 
 RULES = (
-    "keep building while it runs",
-    "it counts as the round",
+    # E2E-SWE paper run: "keep building while it runs" and "it counts as the round" became these.
+    "keep building and editing",
+    "Send each brief once",
     "only when it has a FAIL line",
     "never replace working code",
     "never stop to ask",

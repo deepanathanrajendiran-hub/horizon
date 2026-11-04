@@ -709,13 +709,47 @@ def _post_tool_use(session: str | None) -> None:
             continue
 
 
-def _stop(again: bool = False) -> dict | None:
+UNATTENDED_ENV = "HORIZON_UNATTENDED"
+# E2E-SWE paper run: with the goal active, django_cqrs, pytermgui, monkeytype and websockets ended capped sessions
+# asking for a person ("blocked on you", "I need your help") in a run with no person, because the second stop in a
+# row always went through. With HORIZON_UNATTENDED set, the Stop hook sends an active goal back to work this many
+# times a session; the bound keeps a run with no call cap from looping.
+UNATTENDED_STOP_BLOCKS = 5
+
+
+def _unattended() -> bool:
+    return os.environ.get(UNATTENDED_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _stop_block_allowed(session: str | None) -> bool:
+    """Count one more unattended block for this session; False once it has had UNATTENDED_STOP_BLOCKS."""
+    path = paths.harness_root() / "notes" / "stop-blocks.json"  # bookkeeping: never hashed
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with filelock.locked(path):
+            try:
+                record = json.loads(path.read_text())
+            except (OSError, ValueError):
+                record = {}
+            if record.get("session") != session:
+                record = {"session": session, "blocks": 0}
+            if record["blocks"] >= UNATTENDED_STOP_BLOCKS:
+                return False
+            record["blocks"] += 1
+            path.write_text(json.dumps(record))
+            return True
+    except OSError:
+        return True
+
+
+def _stop(again: bool = False, session: str | None = None) -> dict | None:
     for state in _active_goals():
         try:
             goal.close(state["slug"], run_gate=False)
         except Exception:
             continue
-    if again:
+    unattended = _unattended()
+    if again and not unattended:
         # The second stop in a row always goes through, so a person can still be answered.
         return None
     # NL2Repo bench6: Haiku ended capped sessions itself to hand off, and an unattended run reads that as done.
@@ -728,6 +762,16 @@ def _stop(again: bool = False) -> dict | None:
             continue
     if not open_goals:
         return None
+    if unattended:
+        if not _stop_block_allowed(session):
+            return None
+        return {"decision": "block",
+                "reason": ("Horizon goal still active with budget left: " + "; ".join(open_goals) + ". This run "
+                           "is unattended: no one will answer a question or approve anything, so do not stop "
+                           "to wait for a person or a reviewer. Keep building: do the next action now and keep "
+                           "`note --next` current. If you need a decision, make it and record it with `note "
+                           "--fact`; if the environment blocks a check, record that with `note --fact`, take "
+                           "the check out of the gate, and go on. Stop only once `close` completes the goal.")}
     return {"decision": "block",
             "reason": ("Horizon goal still active with budget left: " + "; ".join(open_goals) + ". A session's "
                        "length is not the goal's deadline, and your work is committed whenever the session is "
@@ -753,5 +797,5 @@ def run(event: str, payload: dict) -> dict | None:
         if reminder:
             return {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": reminder}}
     elif event == "Stop":
-        return _stop(isinstance(payload, dict) and payload.get("stop_hook_active") is True)
+        return _stop(isinstance(payload, dict) and payload.get("stop_hook_active") is True, session)
     return None

@@ -65,7 +65,9 @@ def _start(p, cli, requirements, request="Build the tool described in DESIGN.md\
     gates.mkdir(parents=True, exist_ok=True)
     (gates / "request.md").write_text(request)
     (gates / "requirements.md").write_text(requirements)
-    (gates / "test_ok.py").write_text("def test_ok():\n    assert True\n")
+    # E2E-SWE paper run: close needs a check that names every [gate] line.
+    named = " ".join(w for w in requirements.split() if w[:1] == "R" and w[1:2].isdigit())
+    (gates / "test_ok.py").write_text(f"def test_ok():  # checks {named}\n    assert True\n")
     args = ["start", "Build the tool", "--gate-path", str(gates), "--gate",
             f"{shlex.quote(sys.executable)} -m pytest -q -p no:cacheprovider {shlex.quote(str(gates))}"]
     if review:
