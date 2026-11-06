@@ -21,6 +21,7 @@ import hooks
 from datetime import datetime
 import surface
 import examples
+import install_gate
 
 
 def parser() -> argparse.ArgumentParser:
@@ -168,10 +169,17 @@ def _with_examples(report: dict, state: dict) -> dict:
         key = tree_hash.compute(state["cwd"], state.get("watch_paths"))
         found = goal.surface_check(goal.load(state["slug"]), key)
     except Exception:
-        found = None
+        key, found = None, None
     if found and found["failed"] and "surface_advisory" not in report:
         report["surface_missing"] = (surface.listing(found["failed"]) + ". `close` waits for these: a test that "
                                      "imports a missing one fails, whatever else works.")
+    try:
+        installed = goal.install_check(goal.load(state["slug"]), key)
+    except Exception:
+        installed = None
+    if installed and not installed.get("ok") and not installed.get("error") and "install_advisory" not in report:
+        report["install_problem"] = (install_gate.problem(installed) + ". `close` waits for it: until the package "
+                                     "installs, every test that imports it fails.")
     return report
 
 

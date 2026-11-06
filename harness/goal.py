@@ -25,6 +25,7 @@ import evidence as evidence_rules  # _apply_review has a parameter named evidenc
 import sections
 import subprocess
 import surface
+import install_gate
 
 MAX_GATE_OUTPUT = 4000
 
@@ -671,6 +672,15 @@ def surface_check(state: dict, observed_hash: str | None) -> dict | None:
     except Exception:
         return None
 
+def install_check(state: dict, observed_hash: str | None) -> dict | None:
+    """The goal's install check (the package installs with pip, offline, from a clean copy and imports from another
+    folder), when its request gives a Python package and says it gets installed; None otherwise. It never raises
+    (E2E-SWE paper run: builds that did not install scored 0, plain's h2, rpyc, transitions and mpmath among them)."""
+    try:
+        return install_gate.check(state, None if observed_hash in (None, gate.UNKNOWN_HASH) else observed_hash)
+    except Exception:
+        return None
+
 
 def advisory_sections(state: dict) -> str:
     """The `close` note listing unbuilt or unquoted sections, or "" when there are none or they cannot be read."""
@@ -847,6 +857,9 @@ def close(slug: str, *, run_gate: bool = True, timeout: int = gate.DEFAULT_TIMEO
             result["surface_advisory"] = (surface.listing(found["failed"]) + ". These did not import with "
                                           f"{found['python']}, not the project's own Python (the gate command "
                                           "names none): run the surface gate with it.")
+        found = install_check(done, observed)
+        if found and not found.get("ok") and not found.get("blocking"):
+            result["install_advisory"] = install_gate.problem(found) or found.get("error") or ""
         return result
     except (GateNotPassed, AttemptOpen, RevisionConflict) as exc:
         missing = [str(exc)]
@@ -1040,6 +1053,9 @@ def _apply_completion(state: dict, observed_hash: str, gate_output: str, allow_u
     found = surface_check(state, observed_hash)
     if found and found["blocking"] and found["failed"]:
         raise GateNotPassed(surface.message(found))
+    found = install_check(state, observed_hash)
+    if found and found.get("blocking") and not found.get("ok"):
+        raise GateNotPassed(install_gate.message(found))
     reasons = evidence.review_reasons(state, _requirements(state))
     if reasons:
         criterion = state["gate"]["review_criterion"]

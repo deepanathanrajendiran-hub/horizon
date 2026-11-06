@@ -126,10 +126,12 @@ def test_close_refuses_while_a_module_the_spec_names_does_not_import(project):
 
 
 def test_close_completes_once_every_name_imports(project):
+    from installable_project import installable  # the spec says it installs: exp/install-gate holds that too
     p, cli = project
     cli.new_session("s1")
     _begin(p, cli)
     _build(p)
+    installable(p)
     code, out = cli("close", "build-the-tool")
     assert code == 0 and out["complete"], out
 

@@ -182,6 +182,7 @@ def spec_files(text: str) -> list[str]:
     return sorted({p for depth, p in _tree_paths(text) if depth == 0 and _PACKAGING_FILE.match(p)})
 
 def refs(text: str, package: str) -> list[str]:
+    text = _unalias(text, package)
     pkg = re.escape(package)
     modules = _module_refs(text, package)
     text = _URL.sub(" ", text)
@@ -362,11 +363,38 @@ _IMPORT_LINE = re.compile(r"^\s*(?:>>>\s*)?(?:from\s+([A-Za-z_]\w*)[\w.]*\s+impo
 _DOTTED = re.compile(r"(?<![\w.])([A-Za-z_]\w*)\.[A-Za-z_]\w*")
 
 
+_ALIAS_LINE = re.compile(r"^\s*(?:>>>\s*)?import\s+([A-Za-z_][\w.]*)\s+as\s+([A-Za-z_]\w*)", re.M)
+_FROM_NAMES = re.compile(r"^\s*(?:>>>\s*)?from\s+[\w.]+\s+import\s+\(?([^)\n#]+)", re.M)
+
+
+def _aliases(text: str) -> tuple[dict, set]:
+    """`import fiddle as fdl` makes `fdl` a second name for `fiddle` ({alias: module}); `from mpmath import mp` makes
+    `mp` a name taken from a module, not a package (E2E-SWE fiddle and mpmath: the surface gate was written for `fdl`
+    and `mp`, which no build has)."""
+    aliases = {alias: module for module, alias in _ALIAS_LINE.findall(text) if alias != module.split(".")[0]}
+    bound = set()
+    for names in _FROM_NAMES.findall(text):
+        for part in names.split(","):
+            m = re.match(r"\s*([A-Za-z_]\w*)(?:\s+as\s+([A-Za-z_]\w*))?\s*$", part)
+            if m:
+                bound.add(m.group(2) or m.group(1))
+    return aliases, bound
+
+
+def _unalias(text: str, package: str) -> str:
+    """The spec's text with each alias of the package written out (`fdl.Config` becomes `fiddle.Config`)."""
+    for alias, module in _aliases(text)[0].items():
+        if module.split(".")[0] == package:
+            text = re.sub(rf"(?<![\w.]){re.escape(alias)}\.", module + ".", text)
+    return text
+
 def guess_package(text: str) -> str | None:
     """The import name a spec builds: the name it imports from most, and whose dotted names it gives most in code
-    spans, the title counting extra; never a standard module, and never a name whose dotted references are all
-    files (`setup.sh`). None when nothing qualifies (a prose request for no Python package)."""
+    spans, the title counting extra; never a standard module, never a name whose dotted references are all files
+    (`setup.sh`), and never an alias or a name taken from a module: an alias's spans count for its module. None when
+    nothing qualifies (a prose request for no Python package)."""
     counts, imported = collections.Counter(), set()
+    aliases, bound = _aliases(text)
     for a, b in _IMPORT_LINE.findall(text):
         counts[a or b] += 3
         imported.add(a or b)
@@ -374,12 +402,17 @@ def guess_package(text: str) -> str | None:
     title = next((line for line in lines if line.strip()), "")
     for span in re.findall(r"`([^`\n]+)`", text):
         for first in _DOTTED.findall(span):
-            counts[first] += 1
+            if first in aliases:
+                counts[aliases[first].split(".")[0]] += 1
+            elif first not in bound or first in imported:
+                counts[first] += 1
     for span in re.findall(r"`([A-Za-z_]\w*)`", title):
         if span in counts:
             counts[span] += 5
     for name, _ in counts.most_common():
         if name in _NOT_PACKAGES or (name[:1].isupper() and name not in imported):
+            continue
+        if name in aliases and name not in imported:
             continue
         if [r for r in refs(text, name) if r.split(".")[-1] not in _FILE_SUFFIXES]:
             return name

@@ -25,6 +25,7 @@ import re
 import examples
 import filelock
 import surface
+import install_gate
 
 MARK = "horizon-hook"
 _EVENTS = {"SessionStart": None, "PostToolUse": "*", "Stop": None}
@@ -481,6 +482,13 @@ def _surface_line(state: dict) -> str:
     return (f" Names the request gives that did not import at the last check ({len(last['failed'])}): "
             f"{surface.listing(last['failed'], limit=8)}; `close` waits for them.")
 
+def _install_line(state: dict) -> str:
+    """What the goal's last install check found wrong (from its saved result; the hook runs nothing more)."""
+    last = install_gate.last(state["slug"])
+    if not last or last.get("ok") or last.get("error"):
+        return ""
+    return f" The package does not install the way the request says: {install_gate.problem(last)}; `close` waits for it."
+
 
 
 
@@ -667,7 +675,7 @@ def _session_start(session: str | None, source: str | None = None) -> dict | Non
             if ran and ran != "ran":
                 line += f" The gate on the current files {ran}; run `observe` for a result."
             try:
-                line += _examples_line(state) + _surface_line(state)
+                line += _examples_line(state) + _surface_line(state) + _install_line(state)
             except Exception:
                 pass
             plateau = _plateau_line(state) if startup else ""

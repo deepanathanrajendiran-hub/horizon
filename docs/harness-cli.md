@@ -604,6 +604,26 @@ never silently migrated between Codex and Claude.
   without stopping `close`.
 - **An `__all__` block** belongs to the module the nearest heading above names in code (`## Admin (`pkg.admin`)`),
   else to the package when an `__init__` (not a constructor `__init__(`) is mentioned within 30 lines before it.
+- **Aliases:** `import fiddle as fdl` makes `fdl.Config` a reference to `fiddle.Config`, and a name taken from a
+  module (`from mpmath import mp`) is never the package.
+
+## Install check
+
+**Held by `close` (exp/install-gate) when the spec that gives the package also says it gets installed** (an install
+command, a packaging file, a setup script, or the word install):
+
+- **What it does:** copies the project (without `.git`, `.claude` and caches) to a temporary folder and makes a
+  throwaway environment with the project's Python (`python -m venv`). That environment reads the project
+  interpreter's own packages through a path file. It runs `pip install -e . --no-build-isolation --use-pep517`
+  there with no index, then `python -I -c "import PACKAGE"` from another folder.
+- **What it never does:** run the project's own scripts (a setup script can name, and write to, the real
+  environment), or write to the project interpreter's environment.
+- **It fails when:** a setup script the spec names (`setup.sh`) is missing, there is no `pyproject.toml`, pip fails
+  (its error lines are reported), or the import fails.
+- **How it is held:** `close` does not complete on a failure, and `check` reports it as `install_problem`. The
+  SessionStart message repeats the last one. Results are cached per snapshot in `notes/install-SLUG.json`.
+- **When it cannot run:** with no project Python named, the venv module missing, a project over 300 MB, or a
+  timeout, the result is reported as `install_advisory` and never stops `close`.
 
 `surface --spec SPEC.md --package NAME --out $GATES/test_surface.py` reads a spec
 and writes one pytest test per public name it gives for the package:
