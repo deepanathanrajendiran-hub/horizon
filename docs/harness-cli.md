@@ -589,6 +589,22 @@ never silently migrated between Codex and Claude.
 
 ## Public-surface gate
 
+**Written and held by `start` and `close` (exp/surface-check):**
+
+- **Where it comes from:** with no `--surface-spec`, `start` takes the longest of `request.md` and the Markdown files
+  it names that gives a Python package's names. The package is the one the spec imports from most and gives most
+  dotted names of in code spans, with the title's name counting extra; never a standard module or a file
+  (`setup.sh`).
+- **What it writes:** `$GATES/test_surface.py`, reported as `surface_gate`. A file already there is kept.
+- **How it is held:** `close` runs the file with the Python the gate command names, or one a script the command
+  runs names, and does not complete while a name fails to import. The result is cached per snapshot in
+  `notes/surface-SLUG.json`.
+- **Where misses show early:** `check` reports them as `surface_missing`, and the SessionStart message lists them.
+- **No Python named:** the file runs with Horizon's own Python, and what fails is reported as `surface_advisory`
+  without stopping `close`.
+- **An `__all__` block** belongs to the module the nearest heading above names in code (`## Admin (`pkg.admin`)`),
+  else to the package when an `__init__` (not a constructor `__init__(`) is mentioned within 30 lines before it.
+
 `surface --spec SPEC.md --package NAME --out $GATES/test_surface.py` reads a spec
 and writes one pytest test per public name it gives for the package:
 `NAME.mod.Name` references, `from NAME.mod import a, b` anywhere in a line (code,

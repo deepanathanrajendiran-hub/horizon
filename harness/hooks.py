@@ -24,6 +24,7 @@ import tree_hash
 import re
 import examples
 import filelock
+import surface
 
 MARK = "horizon-hook"
 _EVENTS = {"SessionStart": None, "PostToolUse": "*", "Stop": None}
@@ -472,6 +473,14 @@ def _examples_line(state: dict) -> str:
     line = examples.summary_line(examples.last(goal.notes_path(state["slug"]).with_suffix(".examples.json")))
     return f" {line}" if line else ""
 
+def _surface_line(state: dict) -> str:
+    """The names the goal's surface gate last found missing (from its saved result; the hook runs nothing more)."""
+    last = surface._last(surface.record_path(state["slug"]))
+    if not last or not last.get("failed"):
+        return ""
+    return (f" Names the request gives that did not import at the last check ({len(last['failed'])}): "
+            f"{surface.listing(last['failed'], limit=8)}; `close` waits for them.")
+
 
 
 
@@ -658,7 +667,7 @@ def _session_start(session: str | None, source: str | None = None) -> dict | Non
             if ran and ran != "ran":
                 line += f" The gate on the current files {ran}; run `observe` for a result."
             try:
-                line += _examples_line(state)
+                line += _examples_line(state) + _surface_line(state)
             except Exception:
                 pass
             plateau = _plateau_line(state) if startup else ""

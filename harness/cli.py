@@ -156,13 +156,22 @@ def _run_examples(state: dict, timeout: int = 60) -> dict | None:
 
 
 def _with_examples(report: dict, state: dict) -> dict:
-    """Add the spec-example summary to a check or close report. Advisory: never changes the outcome."""
+    """Add the spec-example summary, and the names the surface gate finds missing, to a check or close report. Both
+    are reported here; only `close` acts on the surface gate."""
     try:
         line = examples.summary_line(_run_examples(state))
     except Exception:
         line = ""
     if line:
         report["spec_examples"] = line
+    try:
+        key = tree_hash.compute(state["cwd"], state.get("watch_paths"))
+        found = goal.surface_check(goal.load(state["slug"]), key)
+    except Exception:
+        found = None
+    if found and found["failed"] and "surface_advisory" not in report:
+        report["surface_missing"] = (surface.listing(found["failed"]) + ". `close` waits for these: a test that "
+                                     "imports a missing one fails, whatever else works.")
     return report
 
 
@@ -427,6 +436,10 @@ def dispatch(args) -> tuple[dict, int]:
         report.update(installed)
         if getattr(args, "spec_examples", None) is not None:
             report["spec_examples"] = args.spec_examples
+        if getattr(args, "surface_gate", None):
+            report["surface_gate"] = {**args.surface_gate, "note": (
+                "Horizon wrote this file from the spec: one test per module and public name it gives. `close` runs "
+                "it with your gate's Python and completes only once every name imports.")}
         return report, 0
     if args.action == "examples":
         result = _run_examples(goal.load(args.slug), timeout=args.timeout)
@@ -494,8 +507,23 @@ def dispatch(args) -> tuple[dict, int]:
 
 
 def _start_surface(args) -> None:
-    """`start --surface-spec`: write the surface gate into the gate directory before the baseline runs."""
-    if args.action != "start" or args.surface_spec is None:
+    """`start`: write the surface gate into the gate directory before the baseline runs. With `--surface-spec`, from
+    that spec; otherwise from the spec the request names, when it gives a Python package's names (exp/surface-check:
+    no build passed the flag, and two scored 0 on a module their spec named). A file already there is kept."""
+    if args.action != "start":
+        return
+    if args.surface_spec is None:
+        if not args.gate_path:
+            return
+        target = Path(args.gate_path) / surface.FILE
+        try:  # a request that names no spec, or a spec for no Python package, gets no surface gate
+            found = None if target.exists() else surface.find_spec(args.gate_path, paths.project_root())
+            if found:
+                spec, package = found
+                count = surface.write_gate(spec, package, target)
+                args.surface_gate = {"spec": str(spec), "package": package, "names": count, "file": str(target)}
+        except Exception:
+            pass
         return
     if not args.gate_path or not args.package:
         raise ValueError("--surface-spec needs --gate-path and --package")

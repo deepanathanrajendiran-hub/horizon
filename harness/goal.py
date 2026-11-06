@@ -24,6 +24,7 @@ import gate
 import evidence as evidence_rules  # _apply_review has a parameter named evidence
 import sections
 import subprocess
+import surface
 
 MAX_GATE_OUTPUT = 4000
 
@@ -661,6 +662,15 @@ def unchecked_message(unchecked: list[str]) -> str:
             + "_...`), in the gate directory or a test file the gate command runs. A line no command can check "
             "is a [review] line: retag it and say why.")
 
+def surface_check(state: dict, observed_hash: str | None) -> dict | None:
+    """The goal's surface gate (every module and public name the request gives imports), run with the project's own
+    interpreter whatever the gate command runs, or None without one. It never raises: a check that cannot run
+    reports why and does not block (E2E-SWE spectester: two builds scored 0 on a module their spec named)."""
+    try:
+        return surface.check(state, None if observed_hash in (None, gate.UNKNOWN_HASH) else observed_hash)
+    except Exception:
+        return None
+
 
 def advisory_sections(state: dict) -> str:
     """The `close` note listing unbuilt or unquoted sections, or "" when there are none or they cannot be read."""
@@ -831,6 +841,12 @@ def close(slug: str, *, run_gate: bool = True, timeout: int = gate.DEFAULT_TIMEO
             result["unchanged_since_baseline"] = True
         if advisory:
             result["sections_advisory"] = advisory
+        found = surface_check(done, observed)
+        if found and found["failed"]:
+            # only a check run with another Python than the project's reaches here: it could not block
+            result["surface_advisory"] = (surface.listing(found["failed"]) + ". These did not import with "
+                                          f"{found['python']}, not the project's own Python (the gate command "
+                                          "names none): run the surface gate with it.")
         return result
     except (GateNotPassed, AttemptOpen, RevisionConflict) as exc:
         missing = [str(exc)]
@@ -1021,6 +1037,9 @@ def _apply_completion(state: dict, observed_hash: str, gate_output: str, allow_u
     unchecked = unchecked_gate_lines(state)
     if unchecked:
         raise GateNotPassed(unchecked_message(unchecked))
+    found = surface_check(state, observed_hash)
+    if found and found["blocking"] and found["failed"]:
+        raise GateNotPassed(surface.message(found))
     reasons = evidence.review_reasons(state, _requirements(state))
     if reasons:
         criterion = state["gate"]["review_criterion"]

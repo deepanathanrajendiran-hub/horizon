@@ -215,6 +215,12 @@ one test per public name the spec gives. It fails when a package directory lacks
 directory still imports. Delete a name from it only when the spec says it must not exist, or when it is a file
 name, a URL or a local variable in an example. It checks names only, so grow the gate with checks of behaviour.
 
+Without the flag, `start` writes the same file whenever the request names a spec for a Python package (`start`
+reports it as `surface_gate`). `close` runs it with the Python your gate command or gate script names, whatever
+the gate runs, and completes only once every name imports: one missing module fails every test that imports it.
+`check` and the session-start message list what is still missing. When your gate names no Python, the result is
+reported but never stops `close`.
+
 `--surface-spec` also writes `$GATES/spec_examples.py`: the spec's own runnable examples and the signatures it
 lists. It is advisory, not part of the gate, because specs are often wrong. `examples SLUG` runs it. For each
 disagreement, fix the code when the spec's prose agrees with the example; otherwise run `waive-example SLUG ID

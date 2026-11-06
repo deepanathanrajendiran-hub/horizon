@@ -2,9 +2,22 @@
 
 A spec build can import every module and still miss the names its users call (NL2Repo structlog: the
 top-level `PrintLoggerFactory` was missing, and every official test errored in setup). This reads the
-names from the spec, not from the code, so it can be written before the code exists."""
+names from the spec, not from the code, so it can be written before the code exists.
+
+exp/surface-check (2026-11-06): `start` writes the gate itself whenever the request names a spec for a Python package,
+and `close` runs it with the project's own interpreter, whatever the gate command runs. E2E-SWE spectester: the
+hidden tests of dnachisel and mapillary_tools stopped at collection in all 10 sessions on a module or name the build
+lacked (mapillary_tools: three modules its spec names), and no build had passed `start --surface-spec`."""
+import collections
+import json
 import keyword
+import os
 import re
+import shlex
+import subprocess
+import sys
+import tempfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 _URL = re.compile(r"(?:https?://|www\.)\S+")
@@ -79,13 +92,31 @@ def _from_imports(lines: list[str], package: str, pkg: str) -> set[str]:
 
 
 def _init_all(lines: list[str], package: str) -> set[str]:
-    """The names in an `__all__` the spec gives for the package's `__init__.py` (within 30 lines after a
-    mention of `__init__`)."""
+    """The names in an `__all__` the spec gives: a submodule's when the nearest heading above names one in code
+    (`## Admin API (`pkg.admin`)`), else the package's own when `__init__` (not a constructor `__init__(`) is
+    mentioned within 30 lines before it. E2E-SWE keepworking, kafka-python: an `__all__` under a `kafka.admin`
+    heading, after a constructor's `__init__`, was read as the top-level package's."""
     found = set()
+    owner_of_section, fence = None, None
+    pkg = re.escape(package)
     for i, line in enumerate(lines):
+        opened = re.match(r"^\s{0,3}(`{3,}|~{3,})", line)
+        if opened:
+            fence = None if fence and opened.group(1)[0] == fence[0] else (fence or opened.group(1))
+            continue
+        heading = None if fence else re.match(r"^\s{0,3}#{1,6}\s+(.*)$", line)
+        if heading:
+            named = re.findall(rf"`({pkg}(?:\.[A-Za-z_]\w*)*)`", heading.group(1))
+            owner_of_section = named[-1].removesuffix(".__init__") if named else None
+            continue
         if not re.match(r"\s*__all__\s*(?::[^=]*)?=\s*[\[(]", line):
             continue
-        if not any("__init__" in near for near in lines[max(0, i - 30):i]):
+        if owner_of_section and owner_of_section != package:
+            owner = owner_of_section
+        elif owner_of_section == package or any(re.search(r"__init__(?!\s*\()", near)
+                                                 for near in lines[max(0, i - 30):i]):
+            owner = package
+        else:
             continue
         block = line
         j = i + 1
@@ -94,7 +125,7 @@ def _init_all(lines: list[str], package: str) -> set[str]:
             j += 1
         for name in re.findall(r"['\"]([A-Za-z_]\w*)['\"]", block):
             if not keyword.iskeyword(name) and not _is_test(name):
-                found.add(f"{package}.{name}")
+                found.add(f"{owner}.{name}")
     return found
 
 # A directory-tree line: `│   ├── core.py   # comment`; the branch's column gives the depth.
@@ -163,7 +194,7 @@ def refs(text: str, package: str) -> list[str]:
             continue
         kept |= _line_refs(line, package, pkg)
     kept |= _from_imports(lines, package, pkg)
-    kept |= _init_all(lines, package)
+    kept |= _init_all(text.splitlines(), package)  # with its backticks: headings name the module in code
     # A private module's public names are reached through the package (NL2Repo structlog: the spec gave
     # `from structlog._config import reset_defaults`, and callers used `structlog.reset_defaults`).
     for ref in list(kept):
@@ -321,3 +352,178 @@ def write_gate(spec: Path, package: str, out: Path) -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(gate)
     return len(names)
+
+FILE = "test_surface.py"
+RUN_TIMEOUT_S = 120
+# A name whose dotted references all end in one of these is a file (setup.sh, pyproject.toml), not a package.
+_FILE_SUFFIXES = _NOT_REFS | {"sh", "bat", "ps1", "lock", "json", "csv", "xml", "gz", "zip", "in", "log", "lst"}
+_NOT_PACKAGES = set(getattr(sys, "stdlib_module_names", ())) | {"pytest", "__future__", "self", "cls"}
+_IMPORT_LINE = re.compile(r"^\s*(?:>>>\s*)?(?:from\s+([A-Za-z_]\w*)[\w.]*\s+import\b|import\s+([A-Za-z_]\w*))", re.M)
+_DOTTED = re.compile(r"(?<![\w.])([A-Za-z_]\w*)\.[A-Za-z_]\w*")
+
+
+def guess_package(text: str) -> str | None:
+    """The import name a spec builds: the name it imports from most, and whose dotted names it gives most in code
+    spans, the title counting extra; never a standard module, and never a name whose dotted references are all
+    files (`setup.sh`). None when nothing qualifies (a prose request for no Python package)."""
+    counts, imported = collections.Counter(), set()
+    for a, b in _IMPORT_LINE.findall(text):
+        counts[a or b] += 3
+        imported.add(a or b)
+    lines = text.splitlines()
+    title = next((line for line in lines if line.strip()), "")
+    for span in re.findall(r"`([^`\n]+)`", text):
+        for first in _DOTTED.findall(span):
+            counts[first] += 1
+    for span in re.findall(r"`([A-Za-z_]\w*)`", title):
+        if span in counts:
+            counts[span] += 5
+    for name, _ in counts.most_common():
+        if name in _NOT_PACKAGES or (name[:1].isupper() and name not in imported):
+            continue
+        if [r for r in refs(text, name) if r.split(".")[-1] not in _FILE_SUFFIXES]:
+            return name
+    return None
+
+
+def find_spec(gate_path, root) -> tuple[Path, str] | None:
+    """The goal's spec and its package: the longest of request.md and the Markdown files it names that gives a
+    Python package's names."""
+    import sections
+    found = sections._goal_inputs(str(gate_path) if gate_path else None, str(root))
+    for path, text in sorted(found, key=lambda pair: -len(pair[1].splitlines())):
+        package = guess_package(text)
+        if package:
+            return Path(path), package
+    return None
+
+
+def _named_python(text: str) -> str | None:
+    """The first absolute python (or the python beside an absolute pytest) a command or script names."""
+    for line in text.splitlines():
+        try:
+            words = shlex.split(line, comments=True, posix=True)
+        except ValueError:
+            words = line.split()
+        for word in words:
+            word = word.rstrip(";&|)")
+            if "=" in word and not word.startswith(os.sep):
+                word = word.split("=", 1)[1]
+            name = os.path.basename(word)
+            if not word.startswith(os.sep):
+                continue
+            if re.fullmatch(r"python[\d.]*", name) and os.access(word, os.X_OK):
+                return word
+            if name in ("pytest", "py.test"):
+                sibling = os.path.join(os.path.dirname(word), "python")
+                if os.access(sibling, os.X_OK):
+                    return sibling
+    return None
+
+
+def interpreter(state: dict) -> str | None:
+    """The project's own Python: the one the gate command names, else one a script the command runs names. None
+    when neither names one: another Python may lack the project's dependencies, so its result cannot block."""
+    if (state.get("gate") or {}).get("kind") != "command":
+        return None
+    command = str(state["gate"]["value"])
+    found = _named_python(command)
+    if found:
+        return found
+    try:
+        import evidence
+        named, _ = evidence._command_paths(state["cwd"], command)
+    except Exception:
+        return None
+    for path in named:
+        try:
+            if path.is_file() and path.stat().st_size < 200_000:
+                found = _named_python(path.read_text(errors="replace"))
+                if found:
+                    return found
+        except OSError:
+            continue
+    return None
+
+
+def _last(record: Path | None) -> dict | None:
+    try:
+        return json.loads(Path(record).read_text()) if record else None
+    except (OSError, ValueError):
+        return None
+
+
+def run(gate_dir: Path, project: Path, python: str, timeout: int = RUN_TIMEOUT_S, record: Path | None = None,
+        key: str | None = None) -> dict | None:
+    """Run the surface gate and return {"passed", "failed": [{"id", "message"}], "error"}; None without one. The
+    result is saved to `record` (outside the watched files) and reused while `key`, the files' hash, is unchanged."""
+    target = Path(gate_dir) / FILE
+    if not target.is_file():
+        return None
+    previous = _last(record)
+    if key is not None and previous and previous.get("key") == key and previous.get("python") == python:
+        return previous
+    result = {"passed": 0, "failed": [], "error": None, "key": key, "python": python}
+    root = None
+    with tempfile.TemporaryDirectory() as tmp:
+        report = Path(tmp) / "report.xml"
+        env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+        output = ""
+        try:
+            done = subprocess.run([python, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-W", "ignore",
+                                   f"--junitxml={report}", str(target)], cwd=str(project), env=env,
+                                  capture_output=True, text=True, timeout=timeout)
+            output = (done.stderr or "") + " " + (done.stdout or "")
+            root = ET.parse(report).getroot()
+        except subprocess.TimeoutExpired:
+            result["error"] = f"did not finish in {timeout} s"
+        except (OSError, ET.ParseError):
+            result["error"] = f"did not run with {python}: {' '.join(output.split())[-300:] or 'no output'}"
+    for case in (root.iter("testcase") if root is not None else ()):
+        name = case.get("name") or ""
+        item = name[name.find("[") + 1:-1] if "[" in name else name
+        bad = next((c for c in case if c.tag in ("failure", "error")), None)
+        if bad is not None:
+            text = " ".join((bad.get("message") or bad.text or "").split())
+            result["failed"].append({"id": item, "message": re.sub(r"^(?:Failed|AssertionError):\s*", "", text)[:300]})
+        elif not any(c.tag == "skipped" for c in case):
+            result["passed"] += 1
+    if record is not None:
+        try:
+            Path(record).parent.mkdir(parents=True, exist_ok=True)
+            Path(record).write_text(json.dumps(result, indent=1) + "\n")
+        except OSError:
+            pass
+    return result
+
+
+def record_path(slug: str) -> Path:
+    import paths
+    return paths.harness_root() / "notes" / f"surface-{slug}.json"  # bookkeeping: never hashed
+
+
+def check(state: dict, key: str | None) -> dict | None:
+    """Run the goal's surface gate, if its gate directory has one. `blocking` is whether the result may stop
+    `close`: only with the project's own interpreter, and only when the file ran."""
+    gate_path = state.get("gate_path")
+    if not gate_path or not (Path(gate_path) / FILE).is_file():
+        return None
+    python = interpreter(state)
+    result = run(Path(gate_path), Path(state["cwd"]), python or sys.executable, record=record_path(state["slug"]),
+                 key=key)
+    if result is None:
+        return None
+    return {**result, "blocking": python is not None and not result.get("error"),
+            "file": str(Path(gate_path) / FILE)}
+
+
+def listing(failed: list[dict], limit: int = 12) -> str:
+    shown = "; ".join(f"{f['id']} ({f['message'][:120]})" if f.get("message") else f["id"] for f in failed[:limit])
+    return shown + (f"; and {len(failed) - limit} more" if len(failed) > limit else "")
+
+
+def message(found: dict) -> str:
+    return ("Names and modules the request gives that do not import: " + listing(found["failed"]) + ". A test "
+            "that imports a missing one fails, whatever else works. Build each one; if the request does not mean "
+            f"one (a file name, an example's variable), delete it from {found['file']} and say why with "
+            "`note --finding`.")
