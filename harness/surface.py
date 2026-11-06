@@ -422,8 +422,9 @@ def _named_python(text: str) -> str | None:
 
 
 def interpreter(state: dict) -> str | None:
-    """The project's own Python: the one the gate command names, else one a script the command runs names. None
-    when neither names one: another Python may lack the project's dependencies, so its result cannot block."""
+    """The project's own Python: the one the gate command names, else one a script the command runs names (wherever
+    the script is, Horizon's gates root included). None when neither names one: another Python may lack the
+    project's dependencies, so its result cannot block."""
     if (state.get("gate") or {}).get("kind") != "command":
         return None
     command = str(state["gate"]["value"])
@@ -431,17 +432,18 @@ def interpreter(state: dict) -> str | None:
     if found:
         return found
     try:
-        import evidence
-        named, _ = evidence._command_paths(state["cwd"], command)
-    except Exception:
-        return None
-    for path in named:
+        words = shlex.split(command, posix=True)
+    except ValueError:
+        words = command.split()
+    root = Path(state["cwd"])
+    for word in words:
+        path = Path(word.rstrip(";&|)")) if os.path.isabs(word) else root / word.rstrip(";&|)")
         try:
             if path.is_file() and path.stat().st_size < 200_000:
                 found = _named_python(path.read_text(errors="replace"))
                 if found:
                     return found
-        except OSError:
+        except (OSError, ValueError):
             continue
     return None
 

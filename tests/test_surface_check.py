@@ -148,6 +148,28 @@ def test_the_interpreter_is_found_inside_a_gate_script(project):
     assert not out["complete"] and any("toolpkg.reader" in m for m in out["missing"]), out
 
 
+def test_the_interpreter_is_found_inside_a_gate_script_under_horizons_own_gates_root(project):
+    # the smoke build of the surface run: `doctor`'s gates root is .claude/harness/gates, which the gate's own file
+    # list leaves out as Horizon's state, and the script set `PY=<venv>/bin/python`
+    p, cli = project
+    cli.new_session("s1")
+    gates = p / ".claude" / "harness" / "gates" / "g"
+    gates.mkdir(parents=True)
+    script = gates / "gate.sh"
+    script.write_text(f"#!/bin/sh\nPY={shlex.quote(sys.executable)}\n\"$PY\" -m pytest -q -p no:cacheprovider "
+                      f"{shlex.quote(str(gates / 'test_request.py'))}\n")
+    gates_text = {"request.md": "Build the library described in SPEC.md\n",
+                  "requirements.md": 'R1 [gate] "parse() returns the line"\n', "test_request.py": PASSING}
+    for name, text in gates_text.items():
+        (gates / name).write_text(text)
+    (p / "SPEC.md").write_text(SPEC)
+    code, out = cli("start", "Build the tool", "--gate-path", str(gates), "--gate", f"bash {shlex.quote(str(script))}")
+    assert code == 0 and (gates / surface.FILE).is_file(), out
+    _build(p, reader=False)
+    code, out = cli("close", "build-the-tool")
+    assert not out["complete"] and any("toolpkg.reader" in m for m in out["missing"]), out
+
+
 def test_with_no_interpreter_in_sight_the_surface_is_reported_and_never_blocks(project):
     p, cli = project
     cli.new_session("s1")
