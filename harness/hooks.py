@@ -162,7 +162,7 @@ def set_opted_out(value: bool) -> None:
         marker.unlink(missing_ok=True)
 
 
-def _goals_with(status: str) -> list[dict]:
+def _active_goals() -> list[dict]:
     out = []
     for path in sorted(paths.goals_dir().glob("*.json")):
         if path.name.endswith(".leases.json"):
@@ -171,13 +171,9 @@ def _goals_with(status: str) -> list[dict]:
             state = goal.load(path.stem)
         except Exception:
             continue
-        if state["status"] == status:
+        if state["status"] == "active":
             out.append(state)
     return out
-
-
-def _active_goals() -> list[dict]:
-    return _goals_with("active")
 
 
 _FAILED = re.compile(r"^(?:FAILED|ERROR)\s+(\S+::\S+)", re.M)
@@ -696,29 +692,13 @@ UNATTENDED_ENV = "HORIZON_UNATTENDED"
 # times a session; the bound keeps a run with no call cap from looping.
 UNATTENDED_STOP_BLOCKS = 5
 
-# A runner that caps each session's model calls may say how many (an integer); unattended sessions are then sent
-# back up to that many times instead of UNATTENDED_STOP_BLOCKS.
-SESSION_CALLS_ENV = "HORIZON_SESSION_CALLS"
-
 
 def _unattended() -> bool:
     return os.environ.get(UNATTENDED_ENV, "").strip().lower() in ("1", "true", "yes", "on")
 
 
-def _stop_block_limit() -> int:
-    """How often an unattended session is sent back. When the run gives its per-session call budget
-    (HORIZON_SESSION_CALLS), that many times: each send-back costs a call, so the budget ends the session first.
-    Otherwise UNATTENDED_STOP_BLOCKS. E2E-SWE paper2: 7 of 46d56b6's 31 builds ended before session 10 with the goal
-    active because a session's sixth stop went through, and the runner reads a session that ends itself as done."""
-    try:
-        calls = int(os.environ.get(SESSION_CALLS_ENV, "").strip())
-    except ValueError:
-        return UNATTENDED_STOP_BLOCKS
-    return calls if calls > 0 else UNATTENDED_STOP_BLOCKS
-
-
 def _stop_block_allowed(session: str | None) -> bool:
-    """Count one more unattended block for this session; False once it has had `_stop_block_limit()`. Counts are
+    """Count one more unattended block for this session; False once it has had UNATTENDED_STOP_BLOCKS. Counts are
     kept per session, so sessions of one project that stop in turn do not reset each other. When the count cannot
     be kept, the stop goes through, as without HORIZON_UNATTENDED: an uncounted block could loop."""
     key = session or "unknown"
@@ -733,28 +713,13 @@ def _stop_block_allowed(session: str | None) -> bool:
             counts = record.get("sessions") if isinstance(record, dict) else None
             counts = {k: v for k, v in counts.items() if isinstance(v, int)} if isinstance(counts, dict) else {}
             blocks = counts.pop(key, 0)
-            if blocks >= _stop_block_limit():
+            if blocks >= UNATTENDED_STOP_BLOCKS:
                 return False
             counts[key] = blocks + 1
             path.write_text(json.dumps({"sessions": dict(list(counts.items())[-50:])}))
             return True
     except Exception:
         return False
-
-
-def _improve_reason(states: list[dict]) -> str:
-    """The send-back for an unattended run whose goal is complete: the latest completed goal and its gate."""
-    state = max(states, key=lambda s: str(s.get("completed_at") or ""))
-    gate_value = (state.get("gate") or {}).get("value")
-    gate_part = (f"rerun its gate (`{gate_value}`) after each change and keep it passing"
-                 if (state.get("gate") or {}).get("kind") == "command" and gate_value
-                 else "keep its gate passing after each change")
-    return (f"Horizon goal {state['slug']} is complete, but this run is unattended and still has budget: no one is "
-            "waiting for the report, so do not stop. Use the rest of the session to make the work more correct "
-            "against the request: re-read the request part by part, run the work the way the request says it is "
-            "used, write a check for behaviour it describes that no check exercises yet (its examples, error "
-            f"cases, edge values), and fix what fails; {gate_part}. If you find a part still to build, start a "
-            "new goal for it. The session ends when its budget does.")
 
 
 def _stop(again: bool = False, session: str | None = None) -> dict | None:
@@ -776,12 +741,6 @@ def _stop(again: bool = False, session: str | None = None) -> dict | None:
         except Exception:
             continue
     if not open_goals:
-        # E2E-SWE paper2: 8 of 46d56b6's builds ended after `close` completed the goal, with sessions left that no
-        # one was waiting on; an unattended run spends them on the request instead.
-        if unattended and not _active_goals():
-            done = _goals_with("complete")
-            if done and _stop_block_allowed(session):
-                return {"decision": "block", "reason": _improve_reason(done)}
         return None
     if unattended:
         if not _stop_block_allowed(session):
@@ -792,11 +751,8 @@ def _stop(again: bool = False, session: str | None = None) -> dict | None:
                            "to wait for a person or a reviewer. Keep building: do the next action now and keep "
                            "`note --next` current. If you need a decision, make it and record it with `note "
                            "--fact`; if the environment blocks a check, record that with `note --fact`, take "
-                           "the check out of the gate, retag its line `[review]`, and go on. If `close` cannot "
-                           "complete yet (a review it cannot get, for one), do not stop for that: until the "
-                           "session ends, make the work more correct against the request, writing a check for "
-                           "behaviour it describes that no check exercises yet and fixing what fails. Stop only "
-                           "once `close` completes the goal.")}
+                           "the check out of the gate, retag its line `[review]`, and go on. Stop only once "
+                           "`close` completes the goal.")}
     return {"decision": "block",
             "reason": ("Horizon goal still active with budget left: " + "; ".join(open_goals) + ". A session's "
                        "length is not the goal's deadline, and your work is committed whenever the session is "

@@ -498,10 +498,8 @@ commands, the review brief, and upgrade rules.
 
 In an unattended run no one will answer or approve anything. When the runner
 sets `HORIZON_UNATTENDED=1`, the Stop hook sends an active goal with budget left
-back to work up to five times a session (as many times as `HORIZON_SESSION_CALLS`
-when the runner gives its per-session call budget), so do not stop to wait for a
-person or a reviewer. Once `close` completes the goal, the hook sends the session
-back to make the work more correct against the request until its budget ends. Take a check the environment blocks (a write outside the project, the
+back to work up to five times a session, so do not stop to wait for a person or a
+reviewer. Take a check the environment blocks (a write outside the project, the
 network, a port) out of the gate, retag its line `[review]`, record it with
 `note --fact`, and keep building.
 
