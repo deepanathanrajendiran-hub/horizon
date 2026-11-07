@@ -125,6 +125,12 @@ def test_a_request_that_says_nothing_about_installing_gets_no_install_check(tmp_
     assert not install_gate.applies("# Build `toolpkg`\n\n`toolpkg.parse(line)` returns the line.\n")
     assert install_gate.applies(SPEC)
 
+def test_the_message_sends_the_agent_to_check_and_warns_off_a_handmade_install():
+    # the install run's smoke build: the agent made its own venv and ran its setup.sh with pip and no --no-index;
+    # offline, pip retried the network until the session ended and its processes outlived it
+    text = install_gate.message({"pyproject": False, "missing_scripts": []})
+    assert "`check`" in text and "--no-index" in text, text
+
 
 # --- close, check and the next session ---------------------------------------------------------------------------
 

@@ -196,4 +196,6 @@ def message(found: dict) -> str:
     return ("The package does not install the way the request says: " + problem(found) + ". Whoever uses the "
             "project installs it first, so until it installs, every test that imports it fails, whatever works from "
             "inside the folder. Give it a pyproject.toml whose build backend is already installed (setuptools when "
-            "it is), make a setup script the request names run that install, then check again; `close` waits.")
+            "it is), and make a setup script the request names run that install. Then run `check`: it repeats this "
+            "install for you. Do not make an environment of your own for it: there is no network, and pip without "
+            "--no-index retries it for minutes, past the session's end. `close` waits.")

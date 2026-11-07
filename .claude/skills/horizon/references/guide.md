@@ -221,11 +221,12 @@ the gate runs, and completes only once every name imports: one missing module fa
 `check` and the session-start message list what is still missing. When your gate names no Python, the result is
 reported but never stops `close`.
 
-When that spec also says the package gets installed, `close` installs it too: a clean copy, `pip install -e .
---no-build-isolation` offline with the project's own packages, in a throwaway environment, then `import` from
-another folder. It completes only once that works and any setup script the spec names exists. An import from the
-project folder always works, so it proves nothing: users install first. Give the package a `pyproject.toml` whose
-build backend is already installed. `check` reports a failure as `install_problem`.
+When that spec also says the package gets installed, `check` and `close` also install it, offline, from a clean
+copy, and import it from another folder. `close` completes only once that works and any setup script the spec names
+exists. An import from the project folder always works, so it proves nothing: users install first. Give the package
+a `pyproject.toml` whose build backend is already installed, then run `check`, which reports a failure as
+`install_problem`. Do not build an install environment of your own: there is no network, and pip without
+`--no-index` retries it for minutes, past the session's end.
 
 `--surface-spec` also writes `$GATES/spec_examples.py`: the spec's own runnable examples and the signatures it
 lists. It is advisory, not part of the gate, because specs are often wrong. `examples SLUG` runs it. For each
