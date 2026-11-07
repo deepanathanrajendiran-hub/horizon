@@ -157,16 +157,19 @@ Horizon's `SessionStart`, `PostToolUse` and `Stop` hooks to the project's
 those and writes the opt-out marker `hooks-optout` in the state directory, so a
 later `start` does not reinstall them. `hook EVENT` reads
 the event JSON on stdin and always exits 0, so a hook never blocks a session.
+No hook runs the project's code (its gate command, the surface gate or the
+install check): Claude Code runs hooks outside the sandbox it gives the agent's
+own commands, and a gate that runs a setup script would write where the agent
+cannot. A hook reads saved results; `check`, `observe` and `close` run the code.
 - `SessionStart` records the session id and reclaims a stale attempt
-  automatically. When a session starts (not on resume, clear or compaction), for
-  each active conversation-mode goal with a command gate, it runs the gate as a
-  `resume` observation unless an observation or checkpoint already covers the
-  current files. All goals share 240 seconds, and the hook's timeout is 300. A
-  run cut short by that limit is not recorded; the message says so. It then
+  automatically. It then
   reports the `HARNESS`, `PROJECT` and `GATES_ROOT` values to use (also when no goal is
   active, with `No active Horizon goal.` and the files line), each goal's budget, deadline,
   gate directory, next action, gate command and newest gate result, whether
-  from its own run (`Gate now:`), an `observe` or a `check`. When the output
+  from an `observe` or a `check` (`Last gate run:`), and, for a conversation-mode
+  goal with a command gate when no observation, checkpoint or pass covers the
+  current files, `The files changed after that run: `check` runs the gate on
+  them.` When the output
   lists `FAILED`/`ERROR` lines it gives the failing checks by name, up to 12, and
   the summary line; otherwise the last 300 characters. A message shared by three
   or more failures leads as `Root cause:`, and surface-gate names are counted by
@@ -181,13 +184,14 @@ the event JSON on stdin and always exits 0, so a hook never blocks a session.
   `*.egg-info` are left out, and a file over 1 MB shows its size instead. Last,
   `Placeholders still to build:` lists source files with functions that only
   raise `NotImplementedError` (abstract methods aside) or that call themselves
-  placeholders. An install from before this behaviour has a
-  30-second hook: the hook upgrades it for the next session and runs no gate in
-  this one. `install-hooks` keeps a longer timeout you set.
+  placeholders. `install-hooks` gives the hook a 300-second timeout (an older
+  30-second one is raised) and keeps a longer timeout you set.
 - `PostToolUse` renews the lease of the session's open attempt.
 - `Stop` completes or finalizes goals whose recorded evidence already allows it
   (the `close --if-ready` rules, so never on files unchanged since the
-  baseline); it never runs the gate. If a conversation-mode goal is then still
+  baseline); it never runs the gate, and the surface gate and install check
+  count only when a `check` or `close` saved their result for the current files
+  (otherwise the goal stays active). If a conversation-mode goal is then still
   active with budget left, it blocks the stop once and names each such goal's
   next action: a session's length is not the goal's deadline. The next stop in a
   row (`stop_hook_active`) always goes through, so a person can still be answered.

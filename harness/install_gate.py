@@ -20,6 +20,7 @@ import tempfile
 from pathlib import Path
 
 import surface
+import hookguard
 
 RUN_TIMEOUT_S = 240
 MAX_COPY_BYTES = 300 * 1024 * 1024
@@ -94,6 +95,7 @@ def run(project: Path, package: str, python: str, request_text: str = "", timeou
     if _size(project) > MAX_COPY_BYTES:
         result["error"] = "the project is too large to copy for the install check"
         return result
+    hookguard.refuse("The install check")
     with tempfile.TemporaryDirectory(prefix="horizon-install-") as tmp:
         tmp = Path(tmp)
         copy, env, elsewhere = tmp / "project", tmp / "env", tmp / "elsewhere"

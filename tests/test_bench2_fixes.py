@@ -108,9 +108,10 @@ def _session_start(p, session="s2"):
     return json.loads(done.stdout)["hookSpecificOutput"]["additionalContext"]
 
 
-def test_session_start_runs_the_gate_on_changed_files_and_hands_over_everything(project):
+def test_session_start_hands_over_everything_and_says_when_the_gate_result_is_older_than_the_files(project):
     # All five bench2 tasks: sessions ended before `check`, so the hook showed the session-1 gate result for
-    # ten sessions, and each session spent 3-6 of its 15 calls on doctor, status and re-reading.
+    # ten sessions, and each session spent 3-6 of its 15 calls on doctor, status and re-reading. The hook ran the
+    # gate then; it runs none of the project's code now (hooks run outside the sandbox), and says the result is old.
     p, cli = project
     _git(p, "init", "-q")
     (p / "gate.sh").write_text('test -f pkg/__init__.py || { echo "MISSING pkg/__init__.py"; exit 1; }\necho ALL-OK\n')
@@ -121,22 +122,22 @@ def test_session_start_runs_the_gate_on_changed_files_and_hands_over_everything(
     (p / "pkg" / "__init__.py").write_text("")
     _git(p, "add", "-A")
     _git(p, "commit", "-q", "-m", "session 1 (auto-commit)")
+    before = len(goal_observations(p, slug))
     context = _session_start(p)
     assert f"HARNESS={ENTRY}" in context and f"PROJECT={p}" in context
     assert "Next: write pkg/testing.py from SPEC lines 1599-1741" in context
-    assert "Gate now: pass" in context and "ALL-OK" in context
+    assert "Last gate run: fail" in context and "MISSING pkg/__init__.py" in context
+    assert "The files changed after that run: `check` runs the gate on them." in context
+    assert len(goal_observations(p, slug)) == before
     assert "notes/" in context and "pkg/__init__.py" in context  # notes file, and the last commit's files
     assert "0/20 turns" in context and "gate dir none" in context  # what the skill's budget check needs
-    before = len(goal_observations(p, slug))
-    _session_start(p, "s3")  # nothing changed since: the gate is not run again
-    assert len(goal_observations(p, slug)) == before
 
 
 def goal_observations(p, slug):
     return json.loads((p / ".claude" / "harness" / "goals" / f"{slug}.json").read_text()).get("observations", [])
 
 
-def test_the_session_start_hook_gets_time_to_run_the_gate(tmp_path):
+def test_the_session_start_hook_keeps_its_300_second_timeout(tmp_path):
     import hooks
     project = tmp_path / "p"
     (project / ".claude").mkdir(parents=True)
@@ -188,23 +189,6 @@ def test_session_start_does_not_rerun_a_gate_that_check_just_ran(project):
     assert [o["role"] for o in goal_observations(p, slug)] == ["baseline"]
 
 
-def test_session_start_runs_gates_only_at_startup_and_never_records_its_own_timeout(project):
-    p, cli = project
-    (p / "slow.sh").write_text("sleep 5\n")
-    _, started = cli("start", "Slow gate", "--gate", "sh slow.sh", "--timeout", "30")
-    slug = started["slug"]
-    (p / "a.py").write_text("x = 1\n")
-    done = subprocess.run([sys.executable, ENTRY, "--runtime", "claude", "--project", str(p), "hook", "SessionStart"],
-                          input=json.dumps({"session_id": "s2", "source": "compact"}), capture_output=True,
-                          text=True, timeout=60)
-    assert len(goal_observations(p, slug)) == 1  # a compaction is not a new session
-    env = dict(os.environ, HORIZON_SESSION_GATE_S="3")
-    done = subprocess.run([sys.executable, ENTRY, "--runtime", "claude", "--project", str(p), "hook", "SessionStart"],
-                          input=json.dumps({"session_id": "s3", "source": "startup"}), capture_output=True,
-                          text=True, timeout=60, env=env)
-    context = json.loads(done.stdout)["hookSpecificOutput"]["additionalContext"]
-    assert len(goal_observations(p, slug)) == 1  # a run cut short by the hook's own budget is not a result
-    assert "did not finish" in context
 
 
 def test_an_old_thirty_second_hook_is_upgraded(tmp_path):

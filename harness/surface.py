@@ -19,6 +19,7 @@ import sys
 import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
+import hookguard
 
 _URL = re.compile(r"(?:https?://|www\.)\S+")
 
@@ -498,6 +499,7 @@ def run(gate_dir: Path, project: Path, python: str, timeout: int = RUN_TIMEOUT_S
     previous = _last(record)
     if key is not None and previous and previous.get("key") == key and previous.get("python") == python:
         return previous
+    hookguard.refuse("The surface gate")
     result = {"passed": 0, "failed": [], "error": None, "key": key, "python": python}
     root = None
     with tempfile.TemporaryDirectory() as tmp:

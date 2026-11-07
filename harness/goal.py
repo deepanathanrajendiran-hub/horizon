@@ -26,6 +26,7 @@ import sections
 import subprocess
 import surface
 import install_gate
+import hookguard
 
 MAX_GATE_OUTPUT = 4000
 
@@ -665,19 +666,25 @@ def unchecked_message(unchecked: list[str]) -> str:
 
 def surface_check(state: dict, observed_hash: str | None) -> dict | None:
     """The goal's surface gate (every module and public name the request gives imports), run with the project's own
-    interpreter whatever the gate command runs, or None without one. It never raises: a check that cannot run
-    reports why and does not block (E2E-SWE spectester: two builds scored 0 on a module their spec named)."""
+    interpreter whatever the gate command runs, or None without one. It never raises but for a hook, which runs none of
+    the project's code: then a result not saved for these files stops completion (GateNotPassed). A check that cannot
+    run reports why and does not block (E2E-SWE spectester: two builds scored 0 on a module their spec named)."""
     try:
         return surface.check(state, None if observed_hash in (None, gate.UNKNOWN_HASH) else observed_hash)
+    except hookguard.Refused as exc:
+        raise GateNotPassed(str(exc)) from exc
     except Exception:
         return None
 
 def install_check(state: dict, observed_hash: str | None) -> dict | None:
     """The goal's install check (the package installs with pip, offline, from a clean copy and imports from another
-    folder), when its request gives a Python package and says it gets installed; None otherwise. It never raises
-    (E2E-SWE paper run: builds that did not install scored 0, plain's h2, rpyc, transitions and mpmath among them)."""
+    folder), when its request gives a Python package and says it gets installed; None otherwise. It never raises but
+    for a hook, as surface_check (E2E-SWE paper run: builds that did not install scored 0, plain's h2, rpyc,
+    transitions and mpmath among them)."""
     try:
         return install_gate.check(state, None if observed_hash in (None, gate.UNKNOWN_HASH) else observed_hash)
+    except hookguard.Refused as exc:
+        raise GateNotPassed(str(exc)) from exc
     except Exception:
         return None
 

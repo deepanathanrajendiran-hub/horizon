@@ -10,6 +10,7 @@ import subprocess
 
 import tree_hash
 from typing import Callable
+import hookguard
 
 MAX_OUTPUT = 4000
 # Below the Bash tool's 600s ceiling that hosts these calls. At 900 the
@@ -143,6 +144,7 @@ def run_gate(state: dict, timeout: int = DEFAULT_TIMEOUT,
             return "skipped", ""
 
     command = state["gate"]["value"]
+    hookguard.refuse("The gate command")
     try:
         # start_new_session=True makes the child the leader of its own
         # process group, so a timeout can kill the whole group — including
