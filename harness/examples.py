@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
+import hookguard
 
 _FENCE = re.compile(r"^[ \t]*(```|~~~)[ \t]*([\w+.-]*)")
 _LANGS = {"", "python", "py", "python3", "pycon", "pytest", "ipython"}
@@ -700,6 +701,7 @@ def run(gate_dir: Path, project: Path, python: str | None = None, timeout: int =
             return previous  # the same files: the same result
     if not target.is_file():
         return None
+    hookguard.refuse("The spec examples")
     with tempfile.TemporaryDirectory() as tmp:
         report = Path(tmp) / "report.xml"
         try:

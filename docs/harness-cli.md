@@ -157,8 +157,8 @@ Horizon's `SessionStart`, `PostToolUse` and `Stop` hooks to the project's
 those and writes the opt-out marker `hooks-optout` in the state directory, so a
 later `start` does not reinstall them. `hook EVENT` reads
 the event JSON on stdin and always exits 0, so a hook never blocks a session.
-No hook runs the project's code (its gate command, the surface gate or the
-install check): Claude Code runs hooks outside the sandbox it gives the agent's
+No hook runs the project's code (its gate command, the spec examples, the surface
+gate or the install check): Claude Code runs hooks outside the sandbox it gives the agent's
 own commands, and a gate that runs a setup script would write where the agent
 cannot. A hook reads saved results; `check`, `observe` and `close` run the code.
 - `SessionStart` records the session id and reclaims a stale attempt

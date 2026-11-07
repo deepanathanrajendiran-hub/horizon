@@ -122,7 +122,7 @@ when `close` prints a `review_brief`, send it unchanged to a fresh reviewer with
 never came back is handed out once more by a later `close` (in a later session, or after 15 quiet minutes),
 and no more, and `close` never completes on it.
 With `review_pending` or `review_unavailable`, keep building and editing the work. Record its reply file with
-`review` (`--result fail` only when it has a FAIL line; UNVERIFIED lines go to the final report), fix the FAIL lines
+`review` (`--result fail` unless every line is PASS or, if tagged [unverifiable], NOT REVIEWED; UNVERIFIED lines go to the final report), fix the FAIL lines
 in the work, and run `close` again: after the round it completes on a passing gate and lists what went unreviewed.
 It will not complete while the work is unchanged since a FAIL. If a FAIL line is wrong, record why with `note
 --finding "Disputed Rk: <reason>"`.

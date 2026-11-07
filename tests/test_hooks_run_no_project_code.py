@@ -16,6 +16,7 @@ from test_e2eswe_fixes import project  # noqa: F401  (the fixture is used by nam
 from installable_project import installable
 from test_surface_check import _begin, _build
 
+import examples
 import gate
 import hookguard
 import install_gate
@@ -63,17 +64,20 @@ def test_the_stop_hooks_close_never_runs_the_surface_gate_or_the_install_check(p
     assert code == 0 and out["complete"], out
 
 
-def test_inside_a_hook_the_gate_the_surface_gate_and_the_install_check_refuse_to_run(tmp_path):
+def test_inside_a_hook_the_gate_the_spec_examples_the_surface_gate_and_the_install_check_refuse_to_run(tmp_path):
     marker = tmp_path / "ran"
     state = {"gate": {"kind": "command", "value": f"touch {shlex.quote(str(marker))}"}, "cwd": str(tmp_path),
              "checkpoints": [], "watch_paths": None}
     gates = tmp_path / "g"
     gates.mkdir()
     (gates / surface.FILE).write_text(f"open({str(marker)!r}, 'w').close()\n\ndef test_x():\n    pass\n")
+    (gates / examples.FILE).write_text(f"open({str(marker)!r}, 'w').close()\n\ndef test_x():\n    pass\n")
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'p'\n")
     with hookguard.active():
         with pytest.raises(hookguard.Refused):
             gate.run_gate(state)
+        with pytest.raises(hookguard.Refused):
+            examples.run(gates, tmp_path, sys.executable)
         with pytest.raises(hookguard.Refused):
             surface.run(gates, tmp_path, sys.executable)
         with pytest.raises(hookguard.Refused):

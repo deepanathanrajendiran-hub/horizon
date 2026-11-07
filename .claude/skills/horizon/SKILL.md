@@ -123,7 +123,7 @@ when `close` prints a `review_brief`, send it unchanged to a fresh reviewer with
 replacing only `<<ARTIFACTS>>` and `<<HOW_TO_RUN>>`. Send each brief once; if the reviewer is cut off, run `close`:
 a round that never came back is handed out once more in a later session, and no more, and `close` never
 completes on it. With `review_pending` or `review_unavailable`, keep building and editing; never wait for a
-reviewer. Record its reply file with `review` (`--result fail` only when it has a FAIL line; UNVERIFIED lines go to
+reviewer. Record its reply file with `review` (`--result fail` unless every line is PASS or, if tagged [unverifiable], NOT REVIEWED; UNVERIFIED lines go to
 the final report), fix the FAIL lines in the work, and run `close` again: after the round it completes on a passing
 gate and lists what went unreviewed. It will not complete while the work is unchanged since a FAIL. If a FAIL line
 is wrong, record why with `note --finding "Disputed Rk: <reason>"`.

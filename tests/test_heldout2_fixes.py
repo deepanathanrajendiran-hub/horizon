@@ -266,7 +266,7 @@ RULES = (
     # E2E-SWE paper run: "keep building while it runs" and "it counts as the round" became these.
     "keep building and editing",
     "Send each brief once",
-    "only when it has a FAIL line",
+    "unless every line is PASS or, if tagged [unverifiable], NOT REVIEWED",  # E2E-SWE fixcheck: review refuses any other pass
     "never replace working code",
     "never stop to ask",
     "A check you wrote that contradicts the request is yours to fix",
