@@ -149,11 +149,12 @@ def run(project: Path, package: str, python: str, request_text: str = "", timeou
                 # the install the request names: its own scripts, run in the copy with the throwaway environment's
                 # python and pip first on PATH, as whoever uses the project runs them before importing it
                 shell = shutil.which("bash") or "/bin/sh"
+                script_env = {**bare, "PYTHON": env_python}  # scripts that take $PYTHON get the throwaway one
                 outputs = []
                 result["script_exit"] = 0
                 for script in result["scripts"]:
                     done = subprocess.run([shell, script], cwd=str(copy), capture_output=True, text=True,
-                                          timeout=timeout, env=bare)
+                                          timeout=timeout, env=script_env)
                     outputs.append((done.stdout or "") + "\n" + (done.stderr or ""))
                     if done.returncode != 0:
                         result["script_exit"], result["script_failed"] = done.returncode, script

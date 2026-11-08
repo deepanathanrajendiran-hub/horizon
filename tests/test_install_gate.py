@@ -167,6 +167,18 @@ def test_a_setup_script_that_installs_is_the_install_even_when_pip_alone_would_f
     found = install_gate.run(p, "toolpkg", sys.executable, request_text=SPEC)
     assert found["ok"], found
 
+def test_a_setup_script_gets_the_throwaway_python_as_PYTHON(tmp_path):
+    # mpmath a's setup.sh: PY=${PYTHON:-/Users/.../venvs/mpmath/bin/python}, the agent's own interpreter, which the
+    # grading image does not have; scripts that take $PYTHON get the throwaway one, not the agent's environment
+    p = tmp_path / "proj"
+    p.mkdir()
+    _build(p)
+    installable(p)
+    (p / "setup.sh").write_text("#!/bin/sh\nset -e\ncd \"$(dirname \"$0\")\"\n"
+                                "\"${PYTHON:?PYTHON is not set}\" -m pip install -e . --no-build-isolation\n")
+    found = install_gate.run(p, "toolpkg", sys.executable, request_text=SPEC)
+    assert found["ok"], found
+
 
 def test_no_pyproject_and_a_setup_script_that_installs_nothing_are_both_reported(tmp_path):
     # authlib b: "no pyproject.toml, so pip install -e cannot work here; setup.sh (the SPEC's installer) is the
