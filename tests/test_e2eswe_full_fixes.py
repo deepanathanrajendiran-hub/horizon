@@ -2,7 +2,7 @@
 candidate 5f3bb6a, 31 tasks x 2 builds each, the same day. Haiku 5.5, 15 model calls a session counting subagents.
 
 Reviewers ran inside the session that sent them, so a reviewer sent late was cut off with it. Of 133 reviewer
-dispatches, those sent with 0-8 of the session's calls used came back 67 times in 75; those sent after 9 or more came
+dispatches, those sent with 0-8 of the session's calls used came back 64 times in 72; those sent after 9 or more came
 back 4 times in 61. A reviewer that came back had used 3 to 10 calls (median 6). The dead rounds then held goals:
 `close` said a reviewer "may still be writing" while its cut-off reply was under 15 minutes old (20 candidate
 sessions), and once both hand-outs had died it said `review_unavailable` and would not complete (66 sessions). The
