@@ -179,6 +179,19 @@ def test_a_setup_script_gets_the_throwaway_python_as_PYTHON(tmp_path):
     found = install_gate.run(p, "toolpkg", sys.executable, request_text=SPEC)
     assert found["ok"], found
 
+def test_a_setup_script_that_installs_needs_no_pyproject(tmp_path):
+    # plain barf a (70% of the hidden tests) and b: setup.sh wrote a .pth into the interpreter's site-packages and
+    # the package imported from anywhere in the grading image; the check refused both for want of a pyproject.toml
+    p = tmp_path / "proj"
+    p.mkdir()
+    _build(p)
+    (p / "setup.sh").write_text(
+        "#!/bin/sh\nset -e\ncd \"$(dirname \"$0\")\"\n\"${PYTHON:-python3}\" -c \"import os, site; "
+        "open(os.path.join(site.getsitepackages()[0], 'toolpkg-dev.pth'), 'w').write(os.getcwd() + chr(10))\"\n")
+    found = install_gate.run(p, "toolpkg", sys.executable, request_text=SPEC)
+    assert found["ok"] and not found["pyproject"], found
+    assert install_gate.problem(found) == "", install_gate.problem(found)
+
 
 def test_no_pyproject_and_a_setup_script_that_installs_nothing_are_both_reported(tmp_path):
     # authlib b: "no pyproject.toml, so pip install -e cannot work here; setup.sh (the SPEC's installer) is the

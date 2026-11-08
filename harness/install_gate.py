@@ -177,7 +177,9 @@ def run(project: Path, package: str, python: str, request_text: str = "", timeou
             return result
     installed = ((result["script_exit"] == 0 and not result["script_import_error"]) if result["scripts"]
                  else (result["exit"] == 0 and not result["import_error"]))
-    result["ok"] = not result["missing_scripts"] and result["pyproject"] and installed
+    # a setup script that installs needs no pyproject.toml (E2E-SWE full run: plain barf's setup.sh wrote a .pth and
+    # scored 70%); pip, run only without one, does
+    result["ok"] = not result["missing_scripts"] and installed
     return result
 
 
@@ -229,7 +231,8 @@ def problem(found: dict) -> str:
     problems = []
     if found.get("missing_scripts"):
         problems.append(f"the request names {', '.join(found['missing_scripts'])}, and the project has none")
-    if not found.get("pyproject", True):
+    script_ok = bool(found.get("scripts")) and found.get("script_exit") == 0 and not found.get("script_import_error")
+    if not found.get("pyproject", True) and not script_ok:
         problems.append("the project has no pyproject.toml, so pip cannot install it: add one with a [build-system] "
                         "table whose backend is already installed (`requires = [\"setuptools\"]` and "
                         "`build-backend = \"setuptools.build_meta\"` when setuptools is) and a [project] table "
