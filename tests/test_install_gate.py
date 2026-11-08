@@ -6,9 +6,9 @@ each task's grading image, plain's h2 and rpyc failed `pip install -e . --no-bui
 rpyc broken metadata), and plain's transitions and mpmath had no packaging file at all: their setup.sh only checked
 the import from inside the folder. Horizon 457791e's mpmath and fiddle had neither setup.sh nor packaging. Every such
 build scored 0. Agents test imports from the project folder, where they always work, and their environments have no
-pip. The check installs a copy of the project with pip in a throwaway environment that sees the project's own
-packages, then imports the package from elsewhere. It never runs the project's own scripts, which can name and write
-to the agent's real environment."""
+pip. The check installs a copy of the project in a throwaway environment that sees the project's own packages, then
+imports the package from elsewhere. Since the E2E-SWE full run (2026-11-08) a setup script the request names is the
+install, run in the copy; otherwise pip is."""
 import shlex
 import sys
 from pathlib import Path
@@ -38,6 +38,9 @@ def test_a_name_imported_from_the_package_is_not_the_package():
     spec = ("# mpmath\n\n```python\nfrom mpmath import mp, mpf\n```\n\n" + "".join(f"`mp.attr{i}` " for i in range(9))
             + "\n`mpmath.sqrt` and `mpmath.pi` exist.\n")
     assert surface.guess_package(spec) == "mpmath"
+
+
+PIP_ONLY = "# Build `toolpkg`\n\nInstall it with `pip install -e .`.\n"  # names no setup script
 
 
 # --- the check itself --------------------------------------------------------------------------------------------
@@ -79,7 +82,7 @@ def test_a_pyproject_pip_cannot_build_is_reported_with_pips_error(tmp_path):
     installable(p)
     (p / "backend.py").write_text("def get_requires_for_build_editable(config_settings=None):\n"
                                   "    raise RuntimeError('broken metadata')\n")
-    found = install_gate.run(p, "toolpkg", sys.executable, request_text=SPEC)
+    found = install_gate.run(p, "toolpkg", sys.executable, request_text=PIP_ONLY)
     assert not found["ok"] and found["exit"] not in (0, None), found
     assert "pip install" in install_gate.message(found), found
 
@@ -90,7 +93,7 @@ def test_an_install_that_leaves_the_package_unimportable_from_elsewhere_fails(tm
     _build(p)
     installable(p)
     (p / "backend.py").write_text(BACKEND.replace('os.path.dirname(os.path.abspath(__file__)) + "\\n"', '"/nowhere\\n"'))
-    found = install_gate.run(p, "toolpkg", sys.executable, request_text=SPEC)
+    found = install_gate.run(p, "toolpkg", sys.executable, request_text=PIP_ONLY)
     assert not found["ok"] and "ModuleNotFoundError" in (found.get("import_error") or ""), found
 
 def test_a_wrongly_guessed_package_name_imports_the_projects_own_package_instead(tmp_path):
@@ -104,18 +107,85 @@ def test_a_wrongly_guessed_package_name_imports_the_projects_own_package_instead
     assert found["ok"] and found["imported"] == ["toolpkg"], found
 
 
-def test_the_check_never_runs_the_projects_own_scripts_or_writes_to_the_interpreters_environment(tmp_path):
+def test_the_named_setup_script_runs_in_a_copy_with_the_throwaway_environment_first_and_writes_nothing_else(tmp_path):
     p = tmp_path / "proj"
     p.mkdir()
     _build(p)
     installable(p)
-    marker = tmp_path / "setup-ran"
-    (p / "setup.sh").write_text(f"#!/bin/sh\ntouch {shlex.quote(str(marker))}\n")
+    (p / "setup.sh").write_text((p / "setup.sh").read_text() + "touch ran-here\n")
     before = _site_files()
     found = install_gate.run(p, "toolpkg", sys.executable, request_text=SPEC)
+    assert found["ok"] and found.get("script_exit") == 0, found
+    assert not (p / "ran-here").exists()  # it ran in the copy
+    assert _site_files() == before  # its pip installed into the throwaway environment
+
+
+# --- the setup script the request names is how the project installs (E2E-SWE full run, 2026-11-08) ---------------
+# The candidate's sapp a wrote a setup.sh that tried pip, failed on `import pip, setuptools` in the grading image,
+# checked the import from src/ and exited 0 with "no install performed"; authlib b's and mpmath a's only checked
+# imports from the project folder. The grader runs setup.sh, then imports from elsewhere: each scored 0. The check
+# never ran setup.sh, and the agents took setup.sh, which "passes", as the install.
+
+NOT_INSTALLING = "#!/bin/sh\ncd \"$(dirname \"$0\")\"\npython -c 'import toolpkg' && echo 'toolpkg is ready'\n"
+
+
+def test_a_setup_script_that_exits_0_without_installing_fails_the_check(tmp_path):
+    p = tmp_path / "proj"
+    p.mkdir()
+    _build(p)
+    installable(p)
+    (p / "setup.sh").write_text(NOT_INSTALLING)
+    found = install_gate.run(p, "toolpkg", sys.executable, request_text=SPEC)
+    assert not found["ok"] and found.get("script_exit") == 0, found
+    assert "ModuleNotFoundError" in (found.get("script_import_error") or ""), found
+    text = install_gate.message(found)
+    assert "setup.sh" in text and "installs nothing" in text, text
+
+
+def test_a_setup_script_that_fails_is_reported_with_its_exit_and_output(tmp_path):
+    p = tmp_path / "proj"
+    p.mkdir()
+    _build(p)
+    installable(p)
+    (p / "setup.sh").write_text("#!/bin/sh\necho 'error: no backend here' >&2\nexit 3\n")
+    found = install_gate.run(p, "toolpkg", sys.executable, request_text=SPEC)
+    assert not found["ok"] and found.get("script_exit") == 3, found
+    text = install_gate.problem(found)
+    assert "setup.sh" in text and "exit 3" in text and "no backend here" in text, text
+
+
+def test_a_setup_script_that_installs_is_the_install_even_when_pip_alone_would_fail(tmp_path):
+    p = tmp_path / "proj"
+    p.mkdir()
+    _build(p)
+    installable(p)
+    (p / "backend.py").write_text("def get_requires_for_build_editable(config_settings=None):\n"
+                                  "    raise RuntimeError('broken metadata')\n")
+    (p / "setup.sh").write_text(
+        "#!/bin/sh\nset -e\ncd \"$(dirname \"$0\")\"\npython -c \"import os, sysconfig; "
+        "open(os.path.join(sysconfig.get_paths()['purelib'], 'toolpkg.pth'), 'w').write(os.getcwd() + chr(10))\"\n")
+    found = install_gate.run(p, "toolpkg", sys.executable, request_text=SPEC)
     assert found["ok"], found
-    assert not marker.exists()
-    assert _site_files() == before
+
+
+def test_no_pyproject_and_a_setup_script_that_installs_nothing_are_both_reported(tmp_path):
+    # authlib b: "no pyproject.toml, so pip install -e cannot work here; setup.sh (the SPEC's installer) is the
+    # install path and it passes" (its note, session 6 of 10, each of which the check refused)
+    p = tmp_path / "proj"
+    p.mkdir()
+    _build(p)
+    (p / "setup.sh").write_text(NOT_INSTALLING)
+    found = install_gate.run(p, "toolpkg", sys.executable, request_text=SPEC)
+    assert not found["ok"], found
+    text = install_gate.problem(found)
+    assert "pyproject.toml" in text and "installs nothing" in text, text
+
+
+def test_the_problem_says_the_check_has_its_own_environment_so_the_agents_is_not_the_cause():
+    # authlib b and mpmath a recorded the refusal as an environment limitation and built on for 4-6 sessions
+    text = install_gate.problem({"pyproject": False, "missing_scripts": []})
+    assert "own throwaway environment" in text and "has pip" in text and "not the cause" in text, text
+    assert "build-backend" in text, text
 
 
 def test_a_request_that_says_nothing_about_installing_gets_no_install_check(tmp_path):

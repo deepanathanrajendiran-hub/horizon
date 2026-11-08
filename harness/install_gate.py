@@ -7,10 +7,19 @@ no packaging file at all: their setup.sh only imported the package from inside t
 457791e's mpmath and fiddle had neither setup.sh nor packaging. Each scored 0. Agents test imports from the project
 folder, where they always work, and their environments have no pip.
 
-So the check installs a copy of the project with pip, offline, into a throwaway environment that sees the project
-interpreter's own packages, and then imports the package from another folder. It never runs the project's own
-scripts: a setup script can name, and write to, the agent's real environment (E2E-SWE transitions' setup.sh wrote a
-.pth into the task's venv when one was in reach)."""
+So the check installs a copy of the project, offline, into a throwaway environment that sees the project
+interpreter's own packages, and then imports the package from another folder.
+
+The install is the one the request names. E2E-SWE full run (Horizon 5f3bb6a, 2026-11-08): the check ran only pip, so
+three of the candidate's four builds at 0 passed or misread it. sapp a's setup.sh tried pip, failed on
+`import pip, setuptools` in the grading image, checked the import from src/ and exited 0 ("no install performed");
+authlib b's and mpmath a's setup.sh only checked imports from the project folder, and their agents, refused for 4-6
+sessions over the missing pyproject.toml, recorded it as their environment's limitation. The grader runs setup.sh,
+then imports from elsewhere. So a setup script the request names, when the project has it, runs in the copy with the
+throwaway environment's python and pip first on PATH, in place of pip; otherwise pip installs it. The scripts run
+only inside the agent's own commands: inside a hook, which Claude Code runs outside the agent's sandbox, the check
+refuses to run (E2E-SWE install run: the SessionStart hook ran a gate, which ran ldaptor's setup.sh, which wrote
+an install pointer into the task's venv)."""
 import json
 import os
 import re
@@ -82,15 +91,32 @@ def import_names(root: Path, package: str | None) -> list[str]:
     return found
 
 
+def _import_error(env_python: str, names: list[str], elsewhere: Path, env: dict) -> str | None:
+    """The last line of the error `import <names>` raises in the throwaway environment from another folder."""
+    code = "; ".join(f"import {name}" for name in names)
+    imported = subprocess.run([env_python, "-I", "-B", "-c", code], cwd=str(elsewhere), capture_output=True,
+                              text=True, timeout=120, env=env)
+    if imported.returncode == 0:
+        return None
+    lines = [x for x in (imported.stderr or "").splitlines() if x.strip()]
+    return (lines[-1] if lines else "the import failed")[:300]
+
+
 def run(project: Path, package: str, python: str, request_text: str = "", timeout: int = RUN_TIMEOUT_S) -> dict:
-    """{"ok", "missing_scripts", "pyproject", "exit", "output", "import_error", "error"}. `error` is set only when the
-    check itself could not run (no venv module, a project too large to copy, a timeout): then it never blocks."""
+    """{"ok", "missing_scripts", "pyproject", "scripts", "script_exit", "script_failed", "script_output",
+    "script_import_error", "exit", "output", "import_error", "error"}. The setup scripts the request names, when the
+    project has them, are its install; otherwise `pip install -e . --no-build-isolation` is. `error` is set only when
+    the check itself could not run (no venv module, a project too large to copy, a timeout): then it never blocks."""
     project = Path(project)
     result = {"ok": False, "package": package, "python": python, "missing_scripts": [], "pyproject": True,
-              "exit": None, "output": "", "imported": [], "import_error": None, "error": None}
-    result["missing_scripts"] = [s for s in named_scripts(request_text) if not (project / s).is_file()]
+              "scripts": [], "script_exit": None, "script_failed": None, "script_output": "",
+              "script_import_error": None, "exit": None, "output": "", "imported": [], "import_error": None,
+              "error": None}
+    named = named_scripts(request_text)
+    result["missing_scripts"] = [s for s in named if not (project / s).is_file()]
+    result["scripts"] = [s for s in named if (project / s).is_file()]
     result["pyproject"] = (project / "pyproject.toml").is_file()
-    if not result["pyproject"]:
+    if not result["pyproject"] and not result["scripts"]:
         return result
     if _size(project) > MAX_COPY_BYTES:
         result["error"] = "the project is too large to copy for the install check"
@@ -102,7 +128,8 @@ def run(project: Path, package: str, python: str, request_text: str = "", timeou
         elsewhere.mkdir()
         bare = {"PATH": f"{env / 'bin'}{os.pathsep}/usr/bin{os.pathsep}/bin", "HOME": str(tmp),
                 "TMPDIR": str(tmp), "PIP_NO_INDEX": "1", "PIP_DISABLE_PIP_VERSION_CHECK": "1",
-                "PIP_NO_INPUT": "1", "PYTHONDONTWRITEBYTECODE": "1", "PYTHONNOUSERSITE": "1"}
+                "PIP_NO_INPUT": "1", "PYTHONDONTWRITEBYTECODE": "1", "PYTHONNOUSERSITE": "1",
+                "VIRTUAL_ENV": str(env)}
         try:
             shutil.copytree(project, copy, symlinks=True, ignore=_SKIP)
             made = subprocess.run([python, "-m", "venv", str(env)], capture_output=True, text=True,
@@ -117,25 +144,39 @@ def run(project: Path, package: str, python: str, request_text: str = "", timeou
                                       capture_output=True, text=True, timeout=60, env=bare).stdout.strip()
             # the project's own packages, read through a path file: nothing is written there
             Path(env_site, "_horizon_project_packages.pth").write_text(sites)
-            done = subprocess.run([env_python, *PIP], cwd=str(copy), capture_output=True, text=True,
-                                  timeout=timeout, env=bare)
-            result["exit"] = done.returncode
-            result["output"] = _tail((done.stdout or "") + "\n" + (done.stderr or ""))
             result["imported"] = import_names(copy, package)
-            if done.returncode == 0 and result["imported"]:
-                code = "; ".join(f"import {name}" for name in result["imported"])
-                imported = subprocess.run([env_python, "-I", "-B", "-c", code], cwd=str(elsewhere),
-                                          capture_output=True, text=True, timeout=120, env=bare)
-                if imported.returncode != 0:
-                    lines = [x for x in (imported.stderr or "").splitlines() if x.strip()]
-                    result["import_error"] = (lines[-1] if lines else "the import failed")[:300]
+            if result["scripts"]:
+                # the install the request names: its own scripts, run in the copy with the throwaway environment's
+                # python and pip first on PATH, as whoever uses the project runs them before importing it
+                shell = shutil.which("bash") or "/bin/sh"
+                outputs = []
+                result["script_exit"] = 0
+                for script in result["scripts"]:
+                    done = subprocess.run([shell, script], cwd=str(copy), capture_output=True, text=True,
+                                          timeout=timeout, env=bare)
+                    outputs.append((done.stdout or "") + "\n" + (done.stderr or ""))
+                    if done.returncode != 0:
+                        result["script_exit"], result["script_failed"] = done.returncode, script
+                        break
+                result["script_output"] = _tail("\n".join(outputs))
+                if result["script_exit"] == 0 and result["imported"]:
+                    result["script_import_error"] = _import_error(env_python, result["imported"], elsewhere, bare)
+            else:
+                done = subprocess.run([env_python, *PIP], cwd=str(copy), capture_output=True, text=True,
+                                      timeout=timeout, env=bare)
+                result["exit"] = done.returncode
+                result["output"] = _tail((done.stdout or "") + "\n" + (done.stderr or ""))
+                if done.returncode == 0 and result["imported"]:
+                    result["import_error"] = _import_error(env_python, result["imported"], elsewhere, bare)
         except subprocess.TimeoutExpired:
             result["error"] = f"the install check did not finish in {timeout} s"
             return result
         except OSError as exc:
             result["error"] = f"the install check could not run: {exc}"
             return result
-    result["ok"] = (not result["missing_scripts"] and result["exit"] == 0 and not result["import_error"])
+    installed = ((result["script_exit"] == 0 and not result["script_import_error"]) if result["scripts"]
+                 else (result["exit"] == 0 and not result["import_error"]))
+    result["ok"] = not result["missing_scripts"] and result["pyproject"] and installed
     return result
 
 
@@ -177,20 +218,39 @@ def check(state: dict, key: str | None) -> dict | None:
     return {**result, "blocking": python is not None and not result.get("error")}
 
 
+NOT_THE_ENVIRONMENT = ("this check runs in its own throwaway environment, which has pip and sees the project "
+                       "interpreter's packages, offline, so your own environment lacking pip or a network is not the "
+                       "cause: the fix is in the project's files")
+
+
 def problem(found: dict) -> str:
     """Everything that is wrong, in one line, so one round of work can fix it all."""
     problems = []
     if found.get("missing_scripts"):
         problems.append(f"the request names {', '.join(found['missing_scripts'])}, and the project has none")
     if not found.get("pyproject", True):
-        problems.append("the project has no pyproject.toml, so `pip install -e . --no-build-isolation` cannot "
-                        "install it (current pip installs a project in editable mode only through pyproject.toml)")
+        problems.append("the project has no pyproject.toml, so pip cannot install it: add one with a [build-system] "
+                        "table whose backend is already installed (`requires = [\"setuptools\"]` and "
+                        "`build-backend = \"setuptools.build_meta\"` when setuptools is) and a [project] table "
+                        "giving its name and version")
+    if found.get("script_exit") not in (0, None):
+        problems.append(f"`{found.get('script_failed') or 'the setup script'}` fails (exit {found['script_exit']}) "
+                        f"when it runs in a clean copy of the project: {found.get('script_output', '')}")
+    if found.get("script_import_error"):
+        scripts = ", ".join(f"`{s}`" for s in found.get("scripts") or []) or "the setup script"
+        names = ", ".join(found.get("imported") or [str(found.get("package"))])
+        problems.append(f"{scripts} exits 0 but installs nothing: after it runs in a clean copy, `import {names}` "
+                        f"from another folder fails ({found['script_import_error']}). A script that only checks the "
+                        "import from inside the project folder does not install the project; make it install it, "
+                        "e.g. with `python -m pip install -e . --no-build-isolation`, which needs no network")
     if found.get("exit") not in (0, None):
         problems.append("`pip install -e . --no-build-isolation` fails on a clean copy, offline, with the project's "
                         f"own packages: {found.get('output', '')}")
     if found.get("import_error"):
         names = ", ".join(found.get("imported") or [str(found.get("package"))])
         problems.append(f"it installs, but `import {names}` fails from another folder: {found['import_error']}")
+    if problems:
+        problems.append(NOT_THE_ENVIRONMENT)
     return "; ".join(problems)
 
 
