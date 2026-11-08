@@ -28,7 +28,9 @@ import hookguard
 import reviewing
 
 MARK = "horizon-hook"
-_EVENTS = {"SessionStart": None, "PostToolUse": "*", "Stop": None}
+# PostToolUse fires only after a tool succeeds; PostToolUseFailure after one fails (a Bash command exiting non-zero),
+# and both count toward a capped session (reviewing.count_call).
+_EVENTS = {"SessionStart": None, "PostToolUse": "*", "PostToolUseFailure": "*", "Stop": None}
 # SessionStart once ran each goal's gate and needed longer; installs keep 300 s so their settings are not rewritten.
 _TIMEOUTS = {"SessionStart": 300}
 
@@ -455,9 +457,7 @@ def _install_line(state: dict) -> str:
 def _review_line(state: dict) -> str:
     """When an earlier session held the goal's review brief back for lack of calls: start with `close`, which hands
     it out while a reviewer has the session's calls (from saved state; the hook runs nothing more)."""
-    deferred = state.get("review_deferred")
-    if (not isinstance(deferred, dict) or deferred.get("session") == paths.current_session()
-            or reviewing.review_spent(state)):
+    if not isinstance(state.get("review_deferred"), dict) or reviewing.review_spent(state):
         return ""
     return (f" Start this session with `close {state['slug']}`: an earlier session held its review brief back for "
             "lack of calls, and a reviewer sent now has the calls to finish.")
@@ -619,6 +619,13 @@ def _session_start(session: str | None, source: str | None = None) -> dict | Non
         root = paths.harness_root()
         root.mkdir(parents=True, exist_ok=True)
         (root / "session").write_text(session + "\n")
+    # A new start, a resume (which keeps its session id) or a clear gets a new call count; a compaction does not.
+    fresh = source != "compact"
+    if fresh:
+        try:
+            reviewing.reset_calls(session)
+        except Exception:
+            pass
     lines = []
     # A session really starts: not a resume, clear or compaction.
     startup = source in (None, "startup")
@@ -641,7 +648,8 @@ def _session_start(session: str | None, source: str | None = None) -> dict | Non
                     note = f" Attempt {attempt} is still owned by a live session."
             line = _goal_line(goal.load(state["slug"]))
             try:
-                line += _examples_line(state) + _surface_line(state) + _install_line(state) + _review_line(state)
+                line += (_examples_line(state) + _surface_line(state) + _install_line(state)
+                         + (_review_line(state) if fresh else ""))
             except Exception:
                 pass
             plateau = _plateau_line(state) if startup else ""
@@ -780,11 +788,13 @@ def _dispatch(event: str, payload: dict) -> dict | None:
     if event == "SessionStart":
         source = payload.get("source") if isinstance(payload, dict) else None
         return _session_start(session, source if isinstance(source, str) else None)
-    if event == "PostToolUse":
+    if event in ("PostToolUse", "PostToolUseFailure"):
         try:
             reviewing.count_call(session)
         except Exception:
             pass
+        if event == "PostToolUseFailure":
+            return None
         _post_tool_use(session)
         try:
             reminder = _reading_reminder(session, payload)

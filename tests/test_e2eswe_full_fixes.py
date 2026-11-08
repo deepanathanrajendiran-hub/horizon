@@ -136,3 +136,63 @@ def test_a_cut_off_reply_in_this_session_may_still_be_written(project):
     review_file.write_text(f"Reviewed checkpoint: {digest}\nR1: PASS - ran parse on three lines - ok\n")
     code, out = cli("close", slug)
     assert out.get("review_pending") and not out["complete"], out
+
+# --- review of the fix (2026-11-08) -------------------------------------------------------------------------------
+
+def _failed_calls(cli, session, n):
+    # Claude Code fires PostToolUse only after a tool succeeds; a Bash command exiting non-zero (a `close` that is not
+    # complete, a failing gate) fires PostToolUseFailure (E2E-SWE full run logs: 93 failed calls, no PostToolUse)
+    for _ in range(n):
+        cli.hook("PostToolUseFailure", {"session_id": session, "hook_event_name": "PostToolUseFailure",
+                                        "tool_name": "Bash", "tool_input": {"command": "x"}, "error": "exit 1"})
+
+
+def test_failed_tool_calls_count_toward_the_session(project):
+    p, cli = project
+    cli.env["HORIZON_SESSION_CALLS"] = "15"
+    slug = _ready(p, cli)
+    _calls(cli, "s1", 3)
+    _failed_calls(cli, "s1", 6)
+    code, out = cli("close", slug)
+    assert out.get("review_deferred") and not out.get("review_brief"), out
+
+
+def test_install_hooks_registers_the_failure_event(project):
+    p, cli = project
+    code, out = cli("install-hooks")
+    settings = json.loads((p / ".claude" / "settings.json").read_text())
+    assert "PostToolUseFailure" in settings["hooks"], settings["hooks"].keys()
+
+
+def test_a_budget_too_small_for_any_reviewer_never_holds_the_brief_back(project):
+    p, cli = project
+    cli.env["HORIZON_SESSION_CALLS"] = "6"
+    slug = _ready(p, cli)
+    _calls(cli, "s1", 5)
+    code, out = cli("close", slug)
+    assert out.get("review_brief") and not out.get("review_deferred"), out
+
+
+def test_a_resumed_session_keeps_its_id_but_starts_a_new_count(project):
+    # `claude --resume` keeps the session id; a runtime that resumes capped sessions gives each a new budget
+    p, cli = project
+    cli.env["HORIZON_SESSION_CALLS"] = "15"
+    slug = _ready(p, cli)
+    _calls(cli, "s1", 12)
+    assert cli("close", slug)[1].get("review_deferred")
+    context = cli.hook("SessionStart", {"session_id": "s1", "source": "resume"})["hookSpecificOutput"][
+        "additionalContext"]
+    assert f"Start this session with `close {slug}`" in context, context
+    _calls(cli, "s1", 1)
+    code, out = cli("close", slug)
+    assert out.get("review_brief") and not out.get("review_deferred"), out
+
+
+def test_a_compaction_does_not_reset_the_count(project):
+    p, cli = project
+    cli.env["HORIZON_SESSION_CALLS"] = "15"
+    slug = _ready(p, cli)
+    _calls(cli, "s1", 10)
+    cli.hook("SessionStart", {"session_id": "s1", "source": "compact"})
+    code, out = cli("close", slug)
+    assert out.get("review_deferred") and not out.get("review_brief"), out

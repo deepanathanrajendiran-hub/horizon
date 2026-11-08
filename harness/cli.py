@@ -129,7 +129,7 @@ def parser() -> argparse.ArgumentParser:
     recover.add_argument("--worker-state", choices=("stopped", "not-started"), required=True)
     recover.add_argument("--evidence-file", type=Path, required=True)
     hook = commands.add_parser("hook", help="Run a Claude Code hook; reads the event JSON on stdin and always exits 0")
-    hook.add_argument("event", choices=("SessionStart", "PostToolUse", "Stop"))
+    hook.add_argument("event", choices=("SessionStart", "PostToolUse", "PostToolUseFailure", "Stop"))
     commands.add_parser("install-hooks", help="Add Horizon's hooks to .claude/settings.json")
     commands.add_parser("uninstall-hooks", help="Remove only Horizon's hooks from .claude/settings.json")
     return p
@@ -274,7 +274,10 @@ def _review_handoff(report: dict, state: dict, digest: str, issue: bool = False)
             "late has been. No hand-out is used. Keep building and run `check` before the session ends; start the "
             "next session with `close`: it hands the brief out first, while a reviewer has the calls to finish.")
         report.setdefault("missing", []).append(report["review_deferred"])
-        goal.defer_review(state["slug"])
+        try:
+            goal.defer_review(state["slug"])
+        except Exception:
+            pass  # only the next session's reminder is lost
         return
     report["review_file"] = review_file
     report["review_carried"], report["review_carried_from"] = carried, carried_from

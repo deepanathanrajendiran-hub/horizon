@@ -192,6 +192,46 @@ def test_a_setup_script_that_installs_needs_no_pyproject(tmp_path):
     assert found["ok"] and not found["pyproject"], found
     assert install_gate.problem(found) == "", install_gate.problem(found)
 
+def test_a_setup_script_that_hangs_fails_the_check_and_its_processes_are_killed(tmp_path):
+    p = tmp_path / "proj"
+    p.mkdir()
+    _build(p)
+    installable(p)
+    pidfile = tmp_path / "child.pid"
+    (p / "setup.sh").write_text(f"#!/bin/sh\nsleep 300 &\necho $! > {shlex.quote(str(pidfile))}\nsleep 300\n")
+    found = install_gate.run(p, "toolpkg", sys.executable, request_text=SPEC, timeout=25)  # venv creation fits
+    assert not found["ok"] and not found.get("error"), found
+    assert "did not finish" in install_gate.problem(found), install_gate.problem(found)
+    import os
+    import time
+    pid = int(pidfile.read_text())
+    for _ in range(50):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        os.kill(pid, 9)
+        raise AssertionError("the script's background process outlived the check")
+
+
+def test_a_setup_script_that_prints_bytes_that_are_not_utf8_does_not_break_the_check(tmp_path):
+    p = tmp_path / "proj"
+    p.mkdir()
+    _build(p)
+    installable(p)
+    (p / "setup.sh").write_text((p / "setup.sh").read_text() + "printf '\\377\\376 done\\n'\n")
+    found = install_gate.run(p, "toolpkg", sys.executable, request_text=SPEC)
+    assert found["ok"], found
+
+
+def test_a_missing_named_script_blocks_even_when_the_check_cannot_run():
+    found = {"ok": False, "missing_scripts": ["setup.sh"], "error": "the project is too large to copy"}
+    assert install_gate.blocks(found, "/usr/bin/python3")
+    assert not install_gate.blocks({"ok": False, "missing_scripts": [], "error": "timeout"}, "/usr/bin/python3")
+    assert not install_gate.blocks(found, None)
+
 
 def test_no_pyproject_and_a_setup_script_that_installs_nothing_are_both_reported(tmp_path):
     # authlib b: "no pyproject.toml, so pip install -e cannot work here; setup.sh (the SPEC's installer) is the

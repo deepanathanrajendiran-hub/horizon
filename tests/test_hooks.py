@@ -26,7 +26,7 @@ def test_install_merges_and_is_idempotent(tmp_path):
     settings = json.loads((project / ".claude/settings.json").read_text())
     commands = [h["command"] for groups in settings["hooks"].values() for g in groups for h in g["hooks"]]
     assert "echo mine" in commands
-    assert sum(hooks.MARK in c for c in commands) == 3
+    assert sum(hooks.MARK in c for c in commands) == len(hooks._EVENTS)  # one per event
     assert all(f'"{ENTRY}"' in c for c in commands if hooks.MARK in c)
 
 
@@ -160,7 +160,7 @@ def test_install_rewrites_a_stale_entrypoint_and_keeps_user_hooks(tmp_path):
     commands = [h["command"] for groups in settings["hooks"].values() for g in groups for h in g["hooks"]]
     assert "echo mine" in commands
     ours = [c for c in commands if hooks.MARK in c]
-    assert len(ours) == 3 and all(f'"{ENTRY}"' in c and "/old/place" not in c for c in ours)
+    assert len(ours) == len(hooks._EVENTS) and all(f'"{ENTRY}"' in c and "/old/place" not in c for c in ours)
 
 
 def test_installed_command_exits_zero_with_a_missing_entrypoint(tmp_path):

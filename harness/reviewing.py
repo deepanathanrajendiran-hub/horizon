@@ -439,8 +439,15 @@ def _calls_path() -> Path:
     return paths.harness_root() / "notes" / "session-calls.json"  # bookkeeping: never hashed
 
 
+def _write_calls(path: Path, session: str, calls: int) -> None:
+    tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps({"session": session, "calls": calls}))
+    os.replace(tmp, path)  # a reader never sees a half-written count
+
+
 def count_call(session: str | None) -> None:
-    """One more tool call in this session, a subagent's included (the PostToolUse hook)."""
+    """One more tool call in this session, a subagent's and a failed one's included (PostToolUse and
+    PostToolUseFailure)."""
     if not session:
         return
     import filelock
@@ -449,10 +456,21 @@ def count_call(session: str | None) -> None:
     with filelock.locked(path):
         try:
             record = json.loads(path.read_text())
-        except (OSError, ValueError):
-            record = {}
-        calls = record.get("calls", 0) if isinstance(record, dict) and record.get("session") == session else 0
-        path.write_text(json.dumps({"session": session, "calls": int(calls) + 1}))
+            calls = int(record["calls"]) if record.get("session") == session else 0
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            calls = 0
+        _write_calls(path, session, calls + 1)
+
+
+def reset_calls(session: str | None) -> None:
+    """A session (re)starts with no calls: a resume keeps its session id but gets a new budget."""
+    if not session:
+        return
+    import filelock
+    path = _calls_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with filelock.locked(path):
+        _write_calls(path, session, 0)
 
 
 def calls_used() -> int:
@@ -461,18 +479,17 @@ def calls_used() -> int:
     session = paths.current_session()
     try:
         record = json.loads(_calls_path().read_text())
-    except (OSError, ValueError):
+        return int(record["calls"]) if session and record.get("session") == session else 0
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return 0
-    if not session or not isinstance(record, dict) or record.get("session") != session:
-        return 0
-    return int(record.get("calls", 0))
 
 
 def calls_short() -> tuple[int, int] | None:
     """(calls left, budget) when the session has fewer calls left than a review round needs; None when it has
-    enough, or when the runtime gives no budget."""
+    enough, when the runtime gives no budget, or when the budget is too small for any reviewer (holding back then
+    would never hand a brief out)."""
     budget = session_call_budget()
-    if budget is None:
+    if budget is None or budget <= REVIEW_CALLS:
         return None
     left = budget - calls_used()
     return (max(left, 0), budget) if left < REVIEW_CALLS else None

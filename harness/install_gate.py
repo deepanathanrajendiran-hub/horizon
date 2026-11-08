@@ -24,6 +24,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 from pathlib import Path
@@ -95,11 +96,28 @@ def _import_error(env_python: str, names: list[str], elsewhere: Path, env: dict)
     """The last line of the error `import <names>` raises in the throwaway environment from another folder."""
     code = "; ".join(f"import {name}" for name in names)
     imported = subprocess.run([env_python, "-I", "-B", "-c", code], cwd=str(elsewhere), capture_output=True,
-                              text=True, timeout=120, env=env)
+                              text=True, errors="replace", timeout=120, env=env)
     if imported.returncode == 0:
         return None
     lines = [x for x in (imported.stderr or "").splitlines() if x.strip()]
     return (lines[-1] if lines else "the import failed")[:300]
+
+def _run_script(argv: list[str], cwd: Path, env: dict, timeout: int) -> tuple[int | None, str]:
+    """(exit code, output) of a command the check runs (the venv, pip, a setup script), or (None, output so far) when it
+    did not finish in `timeout`: then its whole process group is killed, so a pip, build backend or server it started
+    does not outlive the check, write into its folder or hold its output open."""
+    proc = subprocess.Popen(argv, cwd=str(cwd), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                            errors="replace", start_new_session=True)
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+        return proc.returncode, out or ""
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            proc.kill()
+        out, _ = proc.communicate()
+        return None, out or ""
 
 
 def run(project: Path, package: str, python: str, request_text: str = "", timeout: int = RUN_TIMEOUT_S) -> dict:
@@ -109,7 +127,7 @@ def run(project: Path, package: str, python: str, request_text: str = "", timeou
     the check itself could not run (no venv module, a project too large to copy, a timeout): then it never blocks."""
     project = Path(project)
     result = {"ok": False, "package": package, "python": python, "missing_scripts": [], "pyproject": True,
-              "scripts": [], "script_exit": None, "script_failed": None, "script_output": "",
+              "scripts": [], "script_exit": None, "script_failed": None, "script_timeout": None, "script_output": "",
               "script_import_error": None, "exit": None, "output": "", "imported": [], "import_error": None,
               "error": None}
     named = named_scripts(request_text)
@@ -122,7 +140,7 @@ def run(project: Path, package: str, python: str, request_text: str = "", timeou
         result["error"] = "the project is too large to copy for the install check"
         return result
     hookguard.refuse("The install check")
-    with tempfile.TemporaryDirectory(prefix="horizon-install-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="horizon-install-", ignore_cleanup_errors=True) as tmp:
         tmp = Path(tmp)
         copy, env, elsewhere = tmp / "project", tmp / "env", tmp / "elsewhere"
         elsewhere.mkdir()
@@ -132,10 +150,13 @@ def run(project: Path, package: str, python: str, request_text: str = "", timeou
                 "VIRTUAL_ENV": str(env)}
         try:
             shutil.copytree(project, copy, symlinks=True, ignore=_SKIP)
-            made = subprocess.run([python, "-m", "venv", str(env)], capture_output=True, text=True,
-                                  timeout=timeout, env={**bare, "PATH": os.environ.get("PATH", "")})
-            if made.returncode != 0:
-                result["error"] = "could not make a throwaway environment: " + _tail(made.stderr or made.stdout, 2)
+            made, made_output = _run_script([python, "-m", "venv", str(env)], tmp,
+                                            {**bare, "PATH": os.environ.get("PATH", "")}, timeout)
+            if made is None:
+                result["error"] = f"the install check did not finish in {timeout} s"
+                return result
+            if made != 0:
+                result["error"] = "could not make a throwaway environment: " + _tail(made_output, 2)
                 return result
             sites = subprocess.run([python, "-c", "import site; print('\\n'.join(site.getsitepackages()))"],
                                    capture_output=True, text=True, timeout=60).stdout
@@ -153,21 +174,25 @@ def run(project: Path, package: str, python: str, request_text: str = "", timeou
                 outputs = []
                 result["script_exit"] = 0
                 for script in result["scripts"]:
-                    done = subprocess.run([shell, script], cwd=str(copy), capture_output=True, text=True,
-                                          timeout=timeout, env=script_env)
-                    outputs.append((done.stdout or "") + "\n" + (done.stderr or ""))
-                    if done.returncode != 0:
-                        result["script_exit"], result["script_failed"] = done.returncode, script
+                    code, output = _run_script([shell, script], copy, script_env, timeout)
+                    outputs.append(output)
+                    if code is None:  # a script that hangs is the script's failure, not the check's
+                        result["script_exit"], result["script_failed"] = None, script
+                        result["script_timeout"] = timeout
+                        break
+                    if code != 0:
+                        result["script_exit"], result["script_failed"] = code, script
                         break
                 result["script_output"] = _tail("\n".join(outputs))
                 if result["script_exit"] == 0 and result["imported"]:
                     result["script_import_error"] = _import_error(env_python, result["imported"], elsewhere, bare)
             else:
-                done = subprocess.run([env_python, *PIP], cwd=str(copy), capture_output=True, text=True,
-                                      timeout=timeout, env=bare)
-                result["exit"] = done.returncode
-                result["output"] = _tail((done.stdout or "") + "\n" + (done.stderr or ""))
-                if done.returncode == 0 and result["imported"]:
+                code, output = _run_script([env_python, *PIP], copy, bare, timeout)
+                if code is None:
+                    result["error"] = f"the install check did not finish in {timeout} s"
+                    return result
+                result["exit"], result["output"] = code, _tail(output)
+                if code == 0 and result["imported"]:
                     result["import_error"] = _import_error(env_python, result["imported"], elsewhere, bare)
         except subprocess.TimeoutExpired:
             result["error"] = f"the install check did not finish in {timeout} s"
@@ -190,6 +215,11 @@ def record_path(slug: str) -> Path:
 
 def last(slug: str) -> dict | None:
     return surface._last(record_path(slug))
+
+def blocks(found: dict, python: str | None) -> bool:
+    """Whether a result stops `close`: only with the project's own interpreter, and only when the check ran; a setup
+    script the request names and the project lacks stops it even then, since that needs no run to see."""
+    return python is not None and (not found.get("error") or bool(found.get("missing_scripts")))
 
 
 def check(state: dict, key: str | None) -> dict | None:
@@ -218,7 +248,7 @@ def check(state: dict, key: str | None) -> dict | None:
             record_path(state["slug"]).write_text(json.dumps(result, indent=1) + "\n")
         except OSError:
             pass
-    return {**result, "blocking": python is not None and not result.get("error")}
+    return {**result, "blocking": blocks(result, python)}
 
 
 NOT_THE_ENVIRONMENT = ("this check runs in its own throwaway environment, which has pip and sees the project "
@@ -237,6 +267,10 @@ def problem(found: dict) -> str:
                         "table whose backend is already installed (`requires = [\"setuptools\"]` and "
                         "`build-backend = \"setuptools.build_meta\"` when setuptools is) and a [project] table "
                         "giving its name and version")
+    if found.get("script_timeout"):
+        problems.append(f"`{found.get('script_failed') or 'the setup script'}` did not finish in "
+                        f"{found['script_timeout']} s when it ran in a clean copy of the project, offline (a pip "
+                        f"without --no-index retries the network that long): {found.get('script_output', '')}")
     if found.get("script_exit") not in (0, None):
         problems.append(f"`{found.get('script_failed') or 'the setup script'}` fails (exit {found['script_exit']}) "
                         f"when it runs in a clean copy of the project: {found.get('script_output', '')}")
