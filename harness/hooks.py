@@ -25,6 +25,7 @@ import filelock
 import surface
 import install_gate
 import hookguard
+import reviewing
 
 MARK = "horizon-hook"
 _EVENTS = {"SessionStart": None, "PostToolUse": "*", "Stop": None}
@@ -451,6 +452,16 @@ def _install_line(state: dict) -> str:
         return ""
     return f" The package does not install the way the request says: {install_gate.problem(last)}; `close` waits for it."
 
+def _review_line(state: dict) -> str:
+    """When an earlier session held the goal's review brief back for lack of calls: start with `close`, which hands
+    it out while a reviewer has the session's calls (from saved state; the hook runs nothing more)."""
+    deferred = state.get("review_deferred")
+    if (not isinstance(deferred, dict) or deferred.get("session") == paths.current_session()
+            or reviewing.review_spent(state)):
+        return ""
+    return (f" Start this session with `close {state['slug']}`: an earlier session held its review brief back for "
+            "lack of calls, and a reviewer sent now has the calls to finish.")
+
 
 
 
@@ -630,7 +641,7 @@ def _session_start(session: str | None, source: str | None = None) -> dict | Non
                     note = f" Attempt {attempt} is still owned by a live session."
             line = _goal_line(goal.load(state["slug"]))
             try:
-                line += _examples_line(state) + _surface_line(state) + _install_line(state)
+                line += _examples_line(state) + _surface_line(state) + _install_line(state) + _review_line(state)
             except Exception:
                 pass
             plateau = _plateau_line(state) if startup else ""
@@ -770,6 +781,10 @@ def _dispatch(event: str, payload: dict) -> dict | None:
         source = payload.get("source") if isinstance(payload, dict) else None
         return _session_start(session, source if isinstance(source, str) else None)
     if event == "PostToolUse":
+        try:
+            reviewing.count_call(session)
+        except Exception:
+            pass
         _post_tool_use(session)
         try:
             reminder = _reading_reminder(session, payload)

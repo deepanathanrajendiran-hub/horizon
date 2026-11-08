@@ -263,6 +263,19 @@ def _review_handoff(report: dict, state: dict, digest: str, issue: bool = False)
             "stop and give the final report, listing the lines no reviewer passed as unverified.")
         report.setdefault("missing", []).append(report["review_paused"])
         return
+    short = reviewing.calls_short()
+    if short:
+        # E2E-SWE full run: reviewers sent with 9 or more of a session's 15 calls used came back 4 times in 61; the
+        # dead rounds then held the goal ("may still be writing", then `review_unavailable`).
+        left, budget = short
+        report["review_deferred"] = (
+            f"No reviewer now: this session has about {left} of its {budget} calls left and a reviewer needs about "
+            f"{reviewing.REVIEW_CALLS}, so it would be cut off with the session, as nearly every reviewer sent this "
+            "late has been. No hand-out is used. Keep building and run `check` before the session ends; start the "
+            "next session with `close`: it hands the brief out first, while a reviewer has the calls to finish.")
+        report.setdefault("missing", []).append(report["review_deferred"])
+        goal.defer_review(state["slug"])
+        return
     report["review_file"] = review_file
     report["review_carried"], report["review_carried_from"] = carried, carried_from
     # After a cut-off round, a smaller batch of the open lines; smaller again after a round that decided none.

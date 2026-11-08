@@ -222,10 +222,13 @@ the gate runs, and completes only once every name imports: one missing module fa
 reported but never stops `close`.
 
 When that spec also says the package gets installed, `check` and `close` also install it, offline, from a clean
-copy, and import it from another folder. `close` completes only once that works and any setup script the spec names
-exists. An import from the project folder always works, so it proves nothing: users install first. Give the package
-a `pyproject.toml` whose build backend is already installed, then run `check`, which reports a failure as
-`install_problem`. Do not build an install environment of your own: there is no network, and pip without
+copy, the way the spec says, and import it from another folder: a setup script the spec names runs in the copy with
+a throwaway environment's python and pip first on PATH (and as `$PYTHON`); without one, `pip install -e .
+--no-build-isolation` installs it. `close` completes only once that works. An import from the project folder always
+works, so it proves nothing: users install first, and a setup script that only checks the import installs nothing.
+Give the package a `pyproject.toml` whose build backend is already installed, make the setup script install it, then
+run `check`, which reports a failure as `install_problem`. The check has its own environment with pip: yours lacking
+pip or a network is not the cause. Do not build an install environment of your own: there is no network, and pip without
 `--no-index` retries it for minutes, past the session's end.
 
 `--surface-spec` also writes `$GATES/spec_examples.py`: the spec's own runnable examples and the signatures it
@@ -363,14 +366,18 @@ session's last calls; `review_spent` means it has run, and only a reply that cam
 back (a finished round file or a recorded `review`) spends it. Send each brief
 once: if the reviewer is cut off, or its reply holds only its header, do not send
 it again yourself. `close` prints `review_pending` until a later session starts
-(or 15 quiet minutes pass); after that it hands the round out once more (two
+(or 15 quiet minutes pass); a cut-off reply then counts as it stands, since its
+reviewer ended with its session. Otherwise it hands the round out once more (two
 hand-outs per goal), and once no reviewer has answered either brief it prints
 `review_unavailable` and sends no more. A round that never came back never lets
 `close` complete: the goal then completes only on a passing review, or is
 finalized when its budget is spent. With `review_pending` or `review_unavailable`,
 keep building and editing the work; never leave it unchanged for a reviewer. A
-reviewer still appending verdicts holds the goal until it ends or has been quiet
-for 15 minutes. If a reviewer runs in the background anyway, keep building while it
+reviewer still appending verdicts holds the goal until its session ends or it has
+been quiet for 15 minutes. When the runtime gives the session's call budget
+(`HORIZON_SESSION_CALLS`) and fewer calls are left than a reviewer needs (8),
+`close` and `check` print `review_deferred` instead of a brief: no hand-out is
+used, and the next session's start says to run `close` first. If a reviewer runs in the background anyway, keep building while it
 runs and never wait or search for its reply. A reply that would pass but for its
 UNVERIFIED lines (checks the environment cannot run) does not block `close`: those
 lines go to `unreviewed` and the final report.

@@ -797,6 +797,17 @@ def issue_review(slug: str, digest: str, review_file: str) -> None:
         if any(i.get("file") == review_file and not reviewing.issue_expired(i) for i in issued):
             return
         issued.append({"at": _now(), "digest": digest, "file": review_file, "session": paths.current_session()})
+        state.pop("review_deferred", None)
+        _save(state)
+
+def defer_review(slug: str) -> None:
+    """Record that `close` or `check` held the review brief back because the session had too few calls left for a
+    reviewer (`reviewing.calls_short`), so the next session starts with `close`. No hand-out is used."""
+    with filelock.goal_locked(_path(slug)):
+        state = load(slug)
+        if execution_mode(state) == "state" or state["status"] != "active":
+            return
+        state["review_deferred"] = {"at": _now(), "session": paths.current_session()}
         _save(state)
 
 def latest_observation(state: dict) -> dict | None:

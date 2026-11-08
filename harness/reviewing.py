@@ -9,6 +9,7 @@ PASS" passed; "the previous FAIL is fixed" was refused), so prose is only
 checked for the two unambiguous signals: a `Rk: FAIL` line and an overall
 FAIL headline.
 """
+import json
 import os
 import re
 import tempfile
@@ -416,6 +417,66 @@ def handouts_per_goal() -> int:
     "Async agent launched" and 11 were cut off by the call cap)."""
     return rounds_per_goal() + 1
 
+SESSION_CALLS_ENV = "HORIZON_SESSION_CALLS"
+
+# The calls a review round needs left in its session: the `close` that hands it out, the dispatch, and the
+# reviewer's own reads and reply. E2E-SWE full run (15 calls a session, subagents counted): reviewers that came back
+# had used 3-10 calls, median 6; of those sent with 9 or more calls used, 4 in 61 came back.
+REVIEW_CALLS = 8
+
+
+def session_call_budget() -> int | None:
+    """The calls a session may make, its subagents' counted, when the runtime gives it (HORIZON_SESSION_CALLS)."""
+    try:
+        value = int(os.environ[SESSION_CALLS_ENV])
+    except (KeyError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _calls_path() -> Path:
+    import paths
+    return paths.harness_root() / "notes" / "session-calls.json"  # bookkeeping: never hashed
+
+
+def count_call(session: str | None) -> None:
+    """One more tool call in this session, a subagent's included (the PostToolUse hook)."""
+    if not session:
+        return
+    import filelock
+    path = _calls_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with filelock.locked(path):
+        try:
+            record = json.loads(path.read_text())
+        except (OSError, ValueError):
+            record = {}
+        calls = record.get("calls", 0) if isinstance(record, dict) and record.get("session") == session else 0
+        path.write_text(json.dumps({"session": session, "calls": int(calls) + 1}))
+
+
+def calls_used() -> int:
+    """The tool calls the current session has made so far; 0 when unknown."""
+    import paths
+    session = paths.current_session()
+    try:
+        record = json.loads(_calls_path().read_text())
+    except (OSError, ValueError):
+        return 0
+    if not session or not isinstance(record, dict) or record.get("session") != session:
+        return 0
+    return int(record.get("calls", 0))
+
+
+def calls_short() -> tuple[int, int] | None:
+    """(calls left, budget) when the session has fewer calls left than a review round needs; None when it has
+    enough, or when the runtime gives no budget."""
+    budget = session_call_budget()
+    if budget is None:
+        return None
+    left = budget - calls_used()
+    return (max(left, 0), budget) if left < REVIEW_CALLS else None
+
 
 def review_dir(watch_paths=()) -> str:
     """The directory round files are written to."""
@@ -479,11 +540,34 @@ def _goal_round_paths(state: dict) -> list[str]:
     return out
 
 
+def _decided(text: str) -> bool:
+    """A reply that decided at least one line (a FAIL headline counts)."""
+    return bool(_fail_lines(text) or any(_DECIDED.match(l) for l in text.splitlines()
+                                         if not l.lstrip().startswith(">")))
+
+
+def _ended_files(state: dict) -> set[str]:
+    """Reply files of rounds handed out only in sessions that have ended: a reviewer runs inside the session that
+    sends it, so it ended with that session, and its reply is finished as it stands (E2E-SWE full run: `close` said
+    a cut-off reviewer "may still be writing" for 15 minutes, in 20 of the candidate's sessions)."""
+    import paths
+    session = paths.current_session()
+    if not session:
+        return set()
+    issued = state.get("review_issued") or []
+    live = {os.path.realpath(i["file"]) for i in issued if i.get("file") and i.get("session") == session}
+    return {os.path.realpath(i["file"]) for i in issued
+            if i.get("file") and i.get("session") and i["session"] != session} - live
+
+
 def goal_rounds(state: dict) -> list[str]:
-    """This goal's finished review rounds."""
+    """This goal's finished review rounds: complete replies, cut-off ones quiet for ROUND_QUIET_S, and cut-off ones
+    whose reviewer's session has ended."""
     import time
     now = time.time()
-    return [p for p in _goal_round_paths(state) if round_finished(_text(p), now - _mtime(p))]
+    ended = _ended_files(state)
+    return [p for p in _goal_round_paths(state)
+            if round_finished(_text(p), now - _mtime(p)) or (os.path.realpath(p) in ended and _decided(_text(p)))]
 
 
 def _writing(text: str, age_s: float) -> bool:
@@ -537,7 +621,9 @@ def review_pending(state: dict) -> bool:
         return True
     import time
     now = time.time()
-    return any(_writing(_text(p), now - _mtime(p)) for p in _goal_round_paths(state))
+    ended = _ended_files(state)
+    return any(_writing(_text(p), now - _mtime(p)) for p in _goal_round_paths(state)
+               if os.path.realpath(p) not in ended)
 
 
 def review_unavailable(state: dict) -> bool:

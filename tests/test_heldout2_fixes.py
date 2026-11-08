@@ -141,10 +141,12 @@ def test_a_brief_from_check_does_not_spend_the_review(project):
 
 
 def test_a_reviewer_still_writing_verdicts_holds_the_goal(project):
+    # In its own session. Since the E2E-SWE full run (2026-11-08) a reply left by a session that has ended is
+    # finished as it stands: the reviewer ran in that session's foreground and ended with it, and `close` called
+    # such replies "still writing" for 15 minutes in 20 of the candidate's sessions (test_e2eswe_full_fixes.py).
     p, cli = project
     slug, digest, review_file = _brief(p, cli)
     review_file.write_text(f"Reviewed checkpoint: {digest}\nR1: PASS - ran parse - ok\n")
-    cli.new_session("s2")
     code, out = cli("close", slug)
     assert code == 1 and not out["complete"] and out.get("review_pending"), out
     code, out = cli("check", slug, "--did", "Ran the gate again", "--next", "Run close")
