@@ -455,12 +455,18 @@ def _install_line(state: dict) -> str:
     return f" The package does not install the way the request says: {install_gate.problem(last)}; `close` waits for it."
 
 def _review_line(state: dict) -> str:
-    """When an earlier session held the goal's review brief back for lack of calls: start with `close`, which hands
-    it out while a reviewer has the session's calls (from saved state; the hook runs nothing more)."""
-    if not isinstance(state.get("review_deferred"), dict) or reviewing.review_spent(state):
+    """When an earlier session held the goal's review brief back for lack of calls, or (with the session's call
+    budget known) its hand-out went unanswered: start with `close`, which hands the brief out while a reviewer has
+    the session's calls (from saved state; the hook runs nothing more)."""
+    if reviewing.review_spent(state):
         return ""
-    return (f" Start this session with `close {state['slug']}`: an earlier session held its review brief back for "
-            "lack of calls, and a reviewer sent now has the calls to finish.")
+    if isinstance(state.get("review_deferred"), dict):
+        return (f" Start this session with `close {state['slug']}`: an earlier session held its review brief back "
+                "for lack of calls, and a reviewer sent now has the calls to finish.")
+    if reviewing.fresh_brief_due(state):
+        return (f" Start this session with `close {state['slug']}`: no reviewer has answered its review brief yet, "
+                "and a reviewer sent now has the calls to finish.")
+    return ""
 
 
 

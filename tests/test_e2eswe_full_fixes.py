@@ -76,7 +76,9 @@ def test_the_next_session_starts_with_close_and_close_then_hands_the_brief_out(p
     code, out = cli("close", slug)
     assert out.get("review_brief") and not out.get("review_deferred"), out
     assert len(_state(p, slug)["review_issued"]) == 1
-    assert "Start this session with" not in cli.new_session("s3")["hookSpecificOutput"]["additionalContext"]
+    context = cli.new_session("s3")["hookSpecificOutput"]["additionalContext"]
+    # the deferral is over; the hand-out no reviewer answered asks for `close` first (test_e2eswe_fixtest_fixes.py)
+    assert "for lack of calls" not in context and "no reviewer has answered" in context, context
 
 
 def test_with_calls_to_spare_close_hands_the_brief_out(project):

@@ -788,7 +788,8 @@ def issue_review(slug: str, digest: str, review_file: str) -> None:
     never came back (a reviewer cut off by a call cap, or a background one that died with its session) no longer
     holds the goal open: heldout2 lost about 70 of 193 sessions re-sending one review. The same file handed out
     again in a later session is another round. Since the E2E-SWE paper run such a round is handed out at most
-    `reviewing.handouts_per_goal()` times and never lets the goal complete unreviewed."""
+    `reviewing.handouts_per_goal()` times and never lets the goal complete unreviewed; since the E2E-SWE fix test a
+    hand-out counts only once a reviewer took it up (`reviewing._tried`)."""
     with filelock.goal_locked(_path(slug)):
         state = load(slug)
         if execution_mode(state) == "state" or state["status"] != "active":

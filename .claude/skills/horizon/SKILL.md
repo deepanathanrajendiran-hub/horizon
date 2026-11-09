@@ -121,9 +121,9 @@ A goal gets one review round. Dispatch it once, as the first action of a session
 when `close` prints a `review_brief`, send it unchanged to a fresh reviewer with Claude Code's `Agent` tool, passing
 `subagent_type: "general-purpose"` and `run_in_background: false` so its reply comes back in that call, and
 replacing only `<<ARTIFACTS>>` and `<<HOW_TO_RUN>>`. Send each brief once; if the reviewer is cut off, run `close`:
-a round that never came back is handed out once more in a later session, and no more, and `close` never
-completes on it. With `review_pending`, `review_unavailable` or `review_deferred`, keep building and editing;
-never wait for a reviewer. Record its reply file with `review` (`--result fail` unless every line is PASS or, if tagged [unverifiable], NOT REVIEWED; UNVERIFIED lines go to
+a round that never came back is handed out once more in a later session, and `close` never completes on it.
+With `review_pending`, `review_unavailable` or `review_deferred`, keep building and editing; never wait for a
+reviewer. Record its reply file with `review` (`--result fail` unless every line is PASS or, if tagged [unverifiable], NOT REVIEWED; UNVERIFIED lines go to
 the final report), fix the FAIL lines in the work, and run `close` again: after the round it completes on a passing
 gate and lists what went unreviewed. It will not complete while the work is unchanged since a FAIL. If a FAIL line
 is wrong, record why with `note --finding "Disputed Rk: <reason>"`.

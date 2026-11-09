@@ -412,9 +412,10 @@ def rounds_per_goal() -> int:
 
 
 def handouts_per_goal() -> int:
-    """How many review briefs `close` may hand out per goal: one more than its rounds, so a round whose reviewer
+    """How many review briefs a reviewer may take up per goal: one more than its rounds, so a round whose reviewer
     never answered goes out once more, and no further (E2E-SWE paper run: of 65 reviewers, 46 came back only as
-    "Async agent launched" and 11 were cut off by the call cap)."""
+    "Async agent launched" and 11 were cut off by the call cap). A brief no reviewer took up does not count, and with
+    the session's call budget known a new session may hand out a fresh one (`fresh_brief_allowed`)."""
     return rounds_per_goal() + 1
 
 SESSION_CALLS_ENV = "HORIZON_SESSION_CALLS"
@@ -617,6 +618,41 @@ def _answered(state: dict) -> int:
     """How many of this goal's rounds came back: finished round files on its own checkpoints, or recorded reviews."""
     return max(len(goal_rounds(state)), len(state.get("reviews") or []))
 
+def _tried(state: dict) -> list[dict]:
+    """This goal's hand-outs a reviewer took up, oldest first: the reply file is on disk, written since the goal
+    began (a brief's first step is to write the reply's header), and the latest hand-out of each file. A brief no
+    reviewer took up is not a hand-out (E2E-SWE fix test: fiddle's two briefs, never dispatched, used both of the
+    goal's hand-outs and held it on `review_unavailable` for 5 sessions)."""
+    since = _started(state)
+    last = {}
+    for entry in state.get("review_issued") or []:
+        path = entry.get("file")
+        if path and os.path.exists(path) and _mtime(path) >= since:
+            key = os.path.realpath(path)
+            last.pop(key, None)
+            last[key] = entry
+    return list(last.values())
+
+
+def fresh_brief_allowed(state: dict) -> bool:
+    """When the runtime gives the session's call budget, a session in which no reviewer has taken up a brief may
+    hand out a fresh one even after the goal's hand-outs died: the brief goes out only while the session has the
+    calls a reviewer needs (`calls_short`), when nearly every reviewer comes back (E2E-SWE fix test: once both
+    hand-outs had died, `review_unavailable` made 8 of the 12 stalled sessions). Rounds on unchanged files stay
+    bounded by REVIEW_ROUNDS_PER_CHECKPOINT."""
+    import paths
+    session = paths.current_session()
+    if session_call_budget() is None or not session:
+        return False
+    return not any(entry.get("session") == session for entry in _tried(state))
+
+
+def fresh_brief_due(state: dict) -> bool:
+    """For the session start: with the session's call budget known, an earlier session's hand-out went unanswered and
+    the goal still needs its review round, so this session's `close` should hand out a brief first."""
+    return (session_call_budget() is not None and bool(state.get("review_issued"))
+            and not review_spent(state))
+
 
 def review_spent(state: dict) -> bool:
     """Whether this goal has had its review round(s): finished rounds on this goal's own checkpoints or recorded
@@ -628,13 +664,14 @@ def review_spent(state: dict) -> bool:
 
 
 def review_pending(state: dict) -> bool:
-    """Every round handed out, and the last one has not come back and still may: it went out in this session (or
-    less than ROUND_QUIET_S ago, for a runtime without hooks), or a reviewer is still writing. Keep building, send
-    no other reviewer."""
-    issued = state.get("review_issued") or []
-    if len(issued) < rounds_per_goal() or review_spent(state) or _answered(state) >= len(issued):
+    """Every round taken up by a reviewer (`_tried`), and the last one has not come back and still may: it went out in
+    this session (or less than ROUND_QUIET_S ago, for a runtime without hooks), or a reviewer is still writing. Keep
+    building, send no other reviewer. A brief no reviewer took up is not pending: `close` and `check` give it again
+    (E2E-SWE fix test: fiddle's `check` said a reviewer "may still be writing" when none had been dispatched)."""
+    tried = _tried(state)
+    if len(tried) < rounds_per_goal() or review_spent(state) or _answered(state) >= len(tried):
         return False
-    if not issue_expired(issued[-1]):
+    if not issue_expired(tried[-1]):
         return True
     import time
     now = time.time()
@@ -644,11 +681,12 @@ def review_pending(state: dict) -> bool:
 
 
 def review_unavailable(state: dict) -> bool:
-    """Every brief this goal may hand out went out, none of its rounds is still to come back, and too few came back:
-    no reviewer will answer, so `close` sends no more and completes only on a passing review."""
-    issued = state.get("review_issued") or []
-    return (len(issued) >= handouts_per_goal() and not review_spent(state)
-            and not review_pending(state))
+    """Reviewers took up every brief this goal may hand out, none of its rounds is still to come back, and too few
+    came back: no reviewer will answer, so `close` sends no more and completes only on a passing review. With the
+    session's call budget known, a session no reviewer has worked in may still hand out a fresh brief
+    (`fresh_brief_allowed`)."""
+    return (len(_tried(state)) >= handouts_per_goal() and not review_spent(state)
+            and not review_pending(state) and not fresh_brief_allowed(state))
 
 
 def _fail_lines(text: str) -> list[str]:

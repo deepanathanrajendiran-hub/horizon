@@ -108,11 +108,16 @@ def test_a_reply_with_only_its_header_does_not_spend_the_round(project):
 
 
 def test_after_two_unanswered_hand_outs_close_sends_no_third_and_does_not_complete(project):
+    # Since the E2E-SWE fix test a hand-out counts once a reviewer took it up (its reply file is on disk), and the
+    # hand-outs stay bounded without the session's call budget (test_e2eswe_fixtest_fixes.py).
     p, cli = project
+    cli.env.pop("HORIZON_SESSION_CALLS", None)
     slug, digest, review_file = _brief(p, cli)
+    review_file.write_text(f"Reviewed checkpoint: {digest}\n")
     cli.new_session("s2")
     code, out = cli("close", slug)
     assert out.get("review_brief"), out
+    Path(out["review_file"]).write_text(f"Reviewed checkpoint: {digest}\n")
     cli.new_session("s3")
     code, out = cli("close", slug)
     assert code == 1 and not out["complete"], out
@@ -154,6 +159,7 @@ def test_an_answered_round_still_lets_close_complete_after_its_fail_is_fixed(pro
 def test_review_pending_tells_the_agent_to_keep_editing(project):
     p, cli = project
     slug, digest, review_file = _brief(p, cli)
+    review_file.write_text(f"Reviewed checkpoint: {digest}\n")  # a reviewer took the brief up
     code, out = cli("close", slug)
     assert out.get("review_pending"), out
     text = out["review_pending"].lower()

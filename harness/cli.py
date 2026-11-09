@@ -207,10 +207,12 @@ def goal_rows(exclude: str | None = None) -> list[dict]:
 
 
 def _review_handoff(report: dict, state: dict, digest: str, issue: bool = False) -> None:
-    """Hand out the review brief. With `issue` (from `close`), the round counts as handed out: if it never comes
-    back, a later session's `close` hands it out again, up to `reviewing.handouts_per_goal()`; after that `close`
-    sends no more and completes only on a passing review (E2E-SWE paper run: an unanswered round counted as spent
-    closed 79 goals on the agent's own gate)."""
+    """Hand out the review brief. With `issue` (from `close`), the round is recorded as handed out; it counts once a
+    reviewer takes it up (its reply file is on disk), and a brief no reviewer took up is given again. If a round
+    never comes back, a later session's `close` hands it out again, up to `reviewing.handouts_per_goal()`; after
+    that `close` sends no more and completes only on a passing review (E2E-SWE paper run: an unanswered round
+    counted as spent closed 79 goals on the agent's own gate), unless the runtime gives the session's call budget:
+    then a session no reviewer has worked in may hand out a fresh brief (`reviewing.fresh_brief_allowed`)."""
     review_file = reviewing.next_review_file(
         state["slug"], digest, len(state.get("reviews") or []) + 1,
         watch_paths=state.get("watch_paths") or [state["cwd"]])
