@@ -556,6 +556,15 @@ def _start_surface(args) -> None:
                 args.surface_gate = {"spec": str(spec), "package": package, "names": count, "file": str(target)}
         except Exception:
             pass
+        # The spec's own examples too, advisory (E2E-SWE full and retry runs: no build of 77 passed --surface-spec,
+        # so the one check that does not come from the agent's own reading of the spec never ran).
+        try:
+            examples_file = Path(args.gate_path) / examples.FILE
+            found = None if examples_file.exists() else surface.find_spec(args.gate_path, paths.project_root())
+            if found:
+                args.spec_examples = examples.write_gate(found[0], found[1], examples_file)
+        except Exception:
+            pass
         return
     if not args.gate_path or not args.package:
         raise ValueError("--surface-spec needs --gate-path and --package")

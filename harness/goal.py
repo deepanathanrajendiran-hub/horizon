@@ -291,35 +291,38 @@ def _covers(root: str, path: str) -> bool:
 
 
 def _resolve_gate_path(cwd, gate_path) -> str:
-    """The goal's gate directory, refused unless the request and its lines exist.
+    """The goal's gate directory, refused unless the request exists; requirement lines too, when it has that file.
 
-    C1 asks for the request verbatim and a quoted requirement list before
-    `start`; checking for them here is the one place prose can be enforced.
+    C1 asks for the request verbatim before `start`; checking for it here is the one place prose can be enforced.
+    A directory with no requirements.md starts a thin goal (`_is_thin`): its gate is the project's own tests plus
+    Horizon's install and surface checks, with no requirement lines and no reviewer.
     """
     resolved = os.path.abspath(os.path.join(os.path.abspath(str(cwd)), str(gate_path)))
     directory = Path(resolved)
     if not directory.is_dir():
         raise GateRequired(
-            f"--gate-path {resolved} is not a directory; write request.md and "
-            f"requirements.md there before start")
-    texts = {}
-    for name in ("request.md", "requirements.md"):
-        try:
-            texts[name] = (directory / name).read_text()
-        except (OSError, UnicodeError) as exc:
-            raise GateRequired(f"{directory / name} is missing or unreadable: {exc}") from exc
-    if not texts["request.md"].strip():
+            f"--gate-path {resolved} is not a directory; write request.md there before start")
+    try:
+        request = (directory / "request.md").read_text()
+    except (OSError, UnicodeError) as exc:
+        raise GateRequired(f"{directory / 'request.md'} is missing or unreadable: {exc}") from exc
+    if not request.strip():
         raise GateRequired(f"{directory / 'request.md'} is blank; save the request verbatim")
-    if not reviewing.requirement_lines(texts["requirements.md"]):
-        raise GateRequired(
-            f"{directory / 'requirements.md'} has no requirement lines (R1, R2, ...)")
+    if (directory / "requirements.md").exists():
+        try:
+            requirements = (directory / "requirements.md").read_text()
+        except (OSError, UnicodeError) as exc:
+            raise GateRequired(f"{directory / 'requirements.md'} is unreadable: {exc}") from exc
+        if not reviewing.requirement_lines(requirements):
+            raise GateRequired(
+                f"{directory / 'requirements.md'} has no requirement lines (R1, R2, ...)")
     return resolved
 
 
 def _requirements(state: dict) -> dict | None:
-    """The goal's requirement lines, or None when it has no gate directory."""
+    """The goal's requirement lines, or None when it has no gate directory or started without the file (thin)."""
     gate_path = state.get("gate_path")
-    if not gate_path:
+    if not gate_path or state.get("thin"):
         return None
     target = Path(gate_path) / "requirements.md"
     try:
@@ -353,6 +356,9 @@ def _initial_state(goal, cwd, gate_kind, gate_value, max_turns,
     if gate_path is not None:
         # Top-level, never in state["gate"]: checkpoints compare that dict.
         state["gate_path"] = gate_path
+        if not (Path(gate_path) / "requirements.md").exists():
+            # Fixed at start: a goal that began with requirement lines keeps them when the file goes missing.
+            state["thin"] = True
         if not any(_covers(watch, gate_path) for watch in state["watch_paths"]):
             state["watch_paths"].append(gate_path)
     if gate_kind == "command":

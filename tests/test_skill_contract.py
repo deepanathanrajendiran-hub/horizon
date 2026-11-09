@@ -68,7 +68,9 @@ def test_documented_commands_parse_with_the_real_cli(runtime, folder, name):
             "step-recover",
         } <= documented_state_commands
         evidence_flow = {"close", "observe", "step-reclaim", "approve-test-change"}
-        assert evidence_flow <= documented_by_source["SKILL.md"]
+        # exp/thin: the Claude skill is the thin variant, whose flow is start, check, note and close
+        thin_flow = {"doctor", "start", "check", "note", "waive-example", "close"}
+        assert (thin_flow if runtime == "claude" else evidence_flow) <= documented_by_source["SKILL.md"]
         assert evidence_flow <= documented_by_source["commands.md"]
 
 @pytest.mark.parametrize("runtime", ["codex", "claude"])

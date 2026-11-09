@@ -14,6 +14,7 @@ import keyword
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -454,11 +455,44 @@ def _named_python(text: str) -> str | None:
                     return sibling
     return None
 
+def _relative_python(words: list[str], root: Path) -> str | None:
+    """The first python (or the python beside a pytest) the command's words name without an absolute path: a bare
+    name is looked up on PATH, a relative path from the project, then from each directory a `cd` in the command
+    enters."""
+    bases, previous = [root], ""
+    for word in words:
+        if previous == "cd":
+            bases.insert(0, Path(word) if os.path.isabs(word) else root / word)
+        previous = word
+    for word in words:
+        word = word.rstrip(";&|)")
+        if "=" in word:
+            word = word.split("=", 1)[1]
+        name = os.path.basename(word)
+        is_python = bool(re.fullmatch(r"python[\d.]*", name))
+        if not word or os.path.isabs(word) or not (is_python or name in ("pytest", "py.test")):
+            continue
+        if os.sep in word:
+            found = next((str(base / word) for base in bases if os.access(base / word, os.X_OK)), None)
+        else:
+            found = shutil.which(word)
+        if not found:
+            continue
+        if is_python:
+            return os.path.abspath(found)
+        sibling = os.path.join(os.path.dirname(os.path.abspath(found)), "python")
+        if os.access(sibling, os.X_OK):
+            return sibling
+    return None
+
 
 def interpreter(state: dict) -> str | None:
     """The project's own Python: the one the gate command names, else one a script the command runs names (wherever
-    the script is, Horizon's gates root included). None when neither names one: another Python may lack the
-    project's dependencies, so its result cannot block."""
+    the script is, Horizon's gates root included). An absolute path wins; without one, a python or pytest the
+    command names by a bare name or a relative path is the one the gate itself runs, so it counts too (E2E-SWE full
+    and retry runs: 9 of 161 goals named no absolute Python, and the surface gate and install check only advised).
+    None when the command names no Python at all: another Python may lack the project's dependencies, so its result
+    cannot block."""
     if (state.get("gate") or {}).get("kind") != "command":
         return None
     command = str(state["gate"]["value"])
@@ -479,7 +513,7 @@ def interpreter(state: dict) -> str | None:
                     return found
         except (OSError, ValueError):
             continue
-    return None
+    return _relative_python(words, root)
 
 
 def _last(record: Path | None) -> dict | None:

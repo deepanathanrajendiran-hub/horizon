@@ -206,7 +206,11 @@ effect from the next session.
 ## Requirements and review
 
 `start --gate-path DIR` records the goal's gate directory. DIR must already hold a
-non-blank `request.md` (the request, verbatim) and a `requirements.md` with at
+non-blank `request.md` (the request, verbatim). With no `requirements.md` there, the
+goal is thin (exp/thin): it has no requirement lines and, without `--review`, no
+reviewer; its gate is the command given plus the surface gate, the install check and
+the advisory spec examples below. This is fixed at `start`: a goal that began with
+a `requirements.md` keeps needing it. A `requirements.md` that is there must hold at
 least one requirement line. A requirement line starts with an id (`R1`, `R2`, or
 a sub-id such as `R1a` or `R1.2`) after any heading, list, checkbox or numbering
 marker and emphasis; the tags `[gate]`, `[review]`, `[unverifiable]` and
@@ -601,8 +605,10 @@ never silently migrated between Codex and Claude.
   (`setup.sh`).
 - **What it writes:** `$GATES/test_surface.py`, reported as `surface_gate`. A file already there is kept.
 - **How it is held:** `close` runs the file with the Python the gate command names, or one a script the command
-  runs names, and does not complete while a name fails to import. The result is cached per snapshot in
-  `notes/surface-SLUG.json`.
+  runs names, and does not complete while a name fails to import. An absolute path wins; without one, a `python` or
+  `pytest` named by a bare name is looked up on `PATH`, and one named by a relative path is found from the project
+  or a directory the command enters with `cd` (exp/thin). The install check uses the same Python. The result is
+  cached per snapshot in `notes/surface-SLUG.json`.
 - **Where misses show early:** `check` reports them as `surface_missing`, and the SessionStart message lists them.
 - **No Python named:** the file runs with Horizon's own Python, and what fails is reported as `surface_advisory`
   without stopping `close`.
@@ -620,10 +626,11 @@ command, a packaging file, a setup script, or the word install):
   throwaway environment with the project's Python (`python -m venv`). That environment reads the project
   interpreter's own packages through a path file. It runs `pip install -e . --no-build-isolation --use-pep517`
   there with no index, then `python -I -c "import PACKAGE"` from another folder.
-- **What it never does:** run the project's own scripts (a setup script can name, and write to, the real
-  environment), or write to the project interpreter's environment.
-- **It fails when:** a setup script the spec names (`setup.sh`) is missing, there is no `pyproject.toml`, pip fails
-  (its error lines are reported), or the import fails.
+- **Setup scripts:** when the spec names a setup script (`setup.sh`), the check runs that script in the copy, with
+  the throwaway environment's `python` and `pip` first on `PATH`, in place of the pip command.
+- **What it never does:** write to the project interpreter's environment.
+- **It fails when:** a setup script the spec names is missing, the script fails or installs nothing, there is no
+  `pyproject.toml` and no setup script that installs, pip fails (its error lines are reported), or the import fails.
 - **How it is held:** `close` does not complete on a failure, and `check` reports it as `install_problem`. The
   SessionStart message repeats the last one. Results are cached per snapshot in `notes/install-SLUG.json`.
 - **When it cannot run:** with no project Python named, the venv module missing, a project over 300 MB, or a
@@ -661,8 +668,9 @@ line that raised it (`pkg does not import: ...`).
 
 ## Spec examples (advisory)
 
-`start --surface-spec SPEC.md --package NAME --gate-path $GATES` also writes
-`$GATES/spec_examples.py` and an empty `$GATES/examples_waived.json`. The file holds:
+`start --gate-path $GATES` writes `$GATES/spec_examples.py` and an empty `$GATES/examples_waived.json` whenever it
+finds the spec the way the surface gate does (exp/thin), and so does `start --surface-spec SPEC.md --package NAME
+--gate-path $GATES` for a spec you name. A file already there is kept. The file holds:
 
 - **Examples:** each fenced Python block that imports from the package and states an expected result. That is a
   `print(...)` or an expression with an `# Output:`/`# Result:`/`# ->` comment (on its line or the next), or a
