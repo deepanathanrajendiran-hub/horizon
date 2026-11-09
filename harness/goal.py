@@ -782,23 +782,33 @@ def note(slug: str, next_action: str | None = None, finding: str | None = None, 
             state.setdefault("facts", []).append({"at": _now(), "text": _clip(fact, 400)})
         return _save(state)
 
-def issue_review(slug: str, digest: str, review_file: str) -> None:
-    """Record that `close` handed out the review brief for these files, with the session it went to. Once a goal's
-    rounds have all been handed out and the last can no longer come back (`reviewing.issue_expired`), a round that
-    never came back (a reviewer cut off by a call cap, or a background one that died with its session) no longer
-    holds the goal open: heldout2 lost about 70 of 193 sessions re-sending one review. The same file handed out
-    again in a later session is another round. Since the E2E-SWE paper run such a round is handed out at most
-    `reviewing.handouts_per_goal()` times and never lets the goal complete unreviewed; since the E2E-SWE fix test a
-    hand-out counts only once a reviewer took it up (`reviewing._tried`)."""
+def issue_review(slug: str, digest: str, review_file: str, via_check: bool = False) -> None:
+    """Record that `close` (or, with `via_check`, `check`) handed out the review brief for these files, with the
+    session it went to. Once a goal's rounds have all been handed out and the last can no longer come back
+    (`reviewing.issue_expired`), a round that never came back (a reviewer cut off by a call cap, or a background one
+    that died with its session) no longer holds the goal open: heldout2 lost about 70 of 193 sessions re-sending
+    one review. The same file handed out again in a later session is another round. Since the E2E-SWE paper run such
+    a round is handed out at most `reviewing.handouts_per_goal()` times and never lets the goal complete unreviewed;
+    since the E2E-SWE fix test a brief no reviewer took up is not pending, and which hand-outs count is
+    `reviewing._handouts_used` (a brief from `check` only once a reviewer took it up)."""
     with filelock.goal_locked(_path(slug)):
         state = load(slug)
         if execution_mode(state) == "state" or state["status"] != "active":
             return
         issued = state.setdefault("review_issued", [])
-        if any(i.get("file") == review_file and not reviewing.issue_expired(i) for i in issued):
+        live = [i for i in issued if i.get("file") == review_file and not reviewing.issue_expired(i)]
+        if live:
+            if not via_check and live[-1].get("check"):
+                live[-1].pop("check")  # `close` handed it out too
+                state.pop("review_deferred", None)
+                _save(state)
             return
-        issued.append({"at": _now(), "digest": digest, "file": review_file, "session": paths.current_session()})
-        state.pop("review_deferred", None)
+        entry = {"at": _now(), "digest": digest, "file": review_file, "session": paths.current_session()}
+        if via_check:
+            entry["check"] = True
+        else:
+            state.pop("review_deferred", None)
+        issued.append(entry)
         _save(state)
 
 def defer_review(slug: str) -> None:

@@ -94,8 +94,8 @@ versions. [Codex skills](https://learn.chatgpt.com/docs/build-skills),
 - **A goal that asks for review completes only once a reviewer answers.** A review
   brief that never comes back is handed out once more in a later session; after
   that the goal stays open until a passing review or until its budget is spent.
-  A brief no reviewer took up does not count, and when the runtime gives each
-  session a call budget, a later session may hand out a fresh brief.
+  A brief no reviewer took up is given again; when the runtime gives each session
+  a call budget, it does not count, and a later session may hand out a fresh brief.
 - **Unattended runs set `HORIZON_UNATTENDED=1`.** Claude Code's Stop hook then sends
   an active goal back to work up to five times a session instead of letting the
   second stop through for a person.

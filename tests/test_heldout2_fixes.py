@@ -119,16 +119,12 @@ def test_a_second_close_in_the_same_session_waits_for_the_reviewer(project):
 
 def test_a_review_handed_out_and_never_answered_goes_out_once_more_and_then_no_more(project):
     # E2E-SWE paper run: no longer completes the goal; the hand-outs are bounded instead, so the review cannot
-    # loop as it did on heldout2. Since the E2E-SWE fix test a hand-out counts once a reviewer took it up, and the
-    # bound holds without the session's call budget (test_e2eswe_fixtest_fixes.py).
+    # loop as it did on heldout2.
     p, cli = project
-    cli.env.pop("HORIZON_SESSION_CALLS", None)
     slug, digest, review_file = _brief(p, cli)
-    review_file.write_text(f"Reviewed checkpoint: {digest}\n")
     cli.new_session("s2")
     code, out = cli("close", slug)
     assert code == 1 and not out["complete"] and out.get("review_brief"), out
-    Path(out["review_file"]).write_text(f"Reviewed checkpoint: {digest}\n")
     cli.new_session("s3")
     code, out = cli("close", slug)
     assert code == 1 and not out["complete"], out
@@ -168,24 +164,18 @@ def test_more_rounds_still_need_each_round_to_finish(project):
     assert code == 1 and out.get("review_brief"), out
 
 
-def test_with_more_rounds_reviewers_that_never_answer_do_not_loop(project):
+def test_with_more_rounds_a_reviewer_that_never_writes_does_not_loop(project):
     # review of fe5740f: the brief kept the same file name while it did not exist, so the round count never grew.
-    # Since the E2E-SWE fix test a brief no reviewer took up is not a hand-out; reviewers that start and never
-    # answer still use them, and the bound holds without the session's call budget.
     p, cli = project
     cli.env["HORIZON_REVIEW_ROUNDS_PER_GOAL"] = "2"
-    cli.env.pop("HORIZON_SESSION_CALLS", None)
     slug, digest, review_file = _brief(p, cli)
-    review_file.write_text(f"Reviewed checkpoint: {digest}\n")
     cli.new_session("s2")
     code, out = cli("close", slug)
     assert code == 1 and out.get("review_brief"), out
-    Path(out["review_file"]).write_text(f"Reviewed checkpoint: {digest}\n")
     cli.new_session("s3")
     code, out = cli("close", slug)
     # E2E-SWE paper run: two rounds allow three hand-outs, then close sends no more and does not complete.
     assert code == 1 and out.get("review_brief"), out
-    Path(out["review_file"]).write_text(f"Reviewed checkpoint: {digest}\n")
     cli.new_session("s4")
     code, out = cli("close", slug)
     assert code == 1 and not out["complete"], out

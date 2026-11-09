@@ -70,8 +70,12 @@ def test_once_the_reviewer_writes_its_reply_the_round_is_pending(project):
     assert not out.get("review_brief"), out
 
 
-def test_briefs_no_reviewer_took_up_do_not_use_the_goals_hand_outs(project):
+def test_with_a_budget_briefs_no_reviewer_took_up_do_not_use_the_goals_hand_outs(project):
+    # Without a budget a brief that went out in an earlier session still counts, taken up or not: nothing else
+    # bounds the re-sends there, and a reviewer gone before its first write cannot be told from no reviewer
+    # (test_heldout2_fixes.py, test_with_more_rounds_a_reviewer_that_never_writes_does_not_loop).
     p, cli = project
+    cli.env["HORIZON_SESSION_CALLS"] = "15"
     slug, digest, review_file = _brief(p, cli)
     for session in ("s2", "s3", "s4"):
         cli.new_session(session)
@@ -152,3 +156,84 @@ def test_after_an_answered_round_no_session_is_told_to_start_with_close(project)
                            "VERDICTS\nR1: PASS\nR2: PASS\nEND VERDICTS\n")
     context = cli.new_session("s2")["hookSpecificOutput"]["additionalContext"]
     assert "Start this session with" not in context, context
+
+
+# --- review of b1c3778 (2026-11-08) ------------------------------------------------------------------------------
+
+def _age(p, slug, review_file, seconds):
+    # the reviewer went quiet `seconds` ago, and so did its hand-out
+    import os
+    import time
+    from datetime import datetime, timedelta, timezone
+    then = time.time() - seconds
+    os.utime(review_file, (then, then))
+    path = p / ".claude" / "harness" / "goals" / f"{slug}.json"
+    state = json.loads(path.read_text())
+    state["review_issued"][-1]["at"] = (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat()
+    # the goal and the session started before that
+    state["used"]["started"] = (datetime.now(timezone.utc) - timedelta(seconds=seconds + 120)).isoformat()
+    path.write_text(json.dumps(state))
+    calls = p / ".claude" / "harness" / "notes" / "session-calls.json"
+    record = json.loads(calls.read_text())
+    record["started"] = then - 60
+    calls.write_text(json.dumps(record))
+
+
+def test_a_resumed_session_after_dead_reviewers_hands_out_a_fresh_brief(project):
+    # a resume keeps its session id: the reviewer of the earlier run ended with it
+    p, cli = project
+    slug, digest = _both_died(p, cli)
+    cli.hook("SessionStart", {"session_id": "s2", "source": "resume"})
+    code, out = cli("close", slug)
+    assert not out.get("review_pending") and not out.get("review_unavailable"), out
+    assert out.get("review_brief"), out
+
+
+def test_with_a_budget_a_session_whose_reviewer_went_quiet_gets_no_second_brief_and_hears_of_the_next(project):
+    p, cli = project
+    slug, digest = _both_died(p, cli)
+    cli.new_session("s3")
+    code, out = cli("close", slug)
+    _started(out["review_file"], digest)
+    _age(p, slug, Path(out["review_file"]), 1000)
+    code, out = cli("close", slug)
+    assert not out.get("review_brief") and out.get("review_unavailable"), out
+    assert "next session" in out["review_unavailable"], out
+    cli.new_session("s4")
+    assert cli("close", slug)[1].get("review_brief")
+
+
+def test_a_brief_from_check_that_a_reviewer_took_up_is_pending(project):
+    p, cli = project
+    slug, digest = _both_died(p, cli)
+    cli.new_session("s3")
+    code, out = cli("check", slug, "--did", "Kept building", "--next", "Run close")
+    assert out.get("review_brief"), out
+    _started(out["review_file"], digest)
+    code, out = cli("close", slug)
+    assert out.get("review_pending") and not out.get("review_brief"), out
+
+
+def test_a_budget_too_small_for_any_reviewer_keeps_the_hand_outs_bounded(project):
+    p, cli = project
+    cli.env["HORIZON_SESSION_CALLS"] = "6"
+    slug, digest, review_file = _brief(p, cli)
+    _started(review_file, digest)
+    cli.new_session("s2")
+    code, out = cli("close", slug)
+    _started(out["review_file"], digest)
+    context = cli.new_session("s3")["hookSpecificOutput"]["additionalContext"]
+    assert "no reviewer has answered" not in context, context
+    code, out = cli("close", slug)
+    assert out.get("review_unavailable") and not out.get("review_brief"), out
+
+
+def test_after_a_round_came_back_the_session_start_does_not_say_no_reviewer_answered(project):
+    p, cli = project
+    cli.env["HORIZON_SESSION_CALLS"] = "15"
+    cli.env["HORIZON_REVIEW_ROUNDS_PER_GOAL"] = "2"
+    slug, digest, review_file = _brief(p, cli)
+    review_file.write_text(f"Reviewed checkpoint: {digest}\nR1: PASS - ran parse - ok\nR2: FAIL - unclear\n"
+                           "VERDICTS\nR1: PASS\nR2: FAIL\nEND VERDICTS\n")
+    context = cli.new_session("s2")["hookSpecificOutput"]["additionalContext"]
+    assert "no reviewer has answered" not in context, context

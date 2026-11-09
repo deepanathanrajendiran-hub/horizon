@@ -440,9 +440,12 @@ def _calls_path() -> Path:
     return paths.harness_root() / "notes" / "session-calls.json"  # bookkeeping: never hashed
 
 
-def _write_calls(path: Path, session: str, calls: int) -> None:
+def _write_calls(path: Path, session: str, calls: int, started: float | None = None) -> None:
+    record = {"session": session, "calls": calls}
+    if started is not None:
+        record["started"] = started
     tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
-    tmp.write_text(json.dumps({"session": session, "calls": calls}))
+    tmp.write_text(json.dumps(record))
     os.replace(tmp, path)  # a reader never sees a half-written count
 
 
@@ -455,23 +458,28 @@ def count_call(session: str | None) -> None:
     path = _calls_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     with filelock.locked(path):
+        started = None
         try:
             record = json.loads(path.read_text())
             calls = int(record["calls"]) if record.get("session") == session else 0
+            if record.get("session") == session and isinstance(record.get("started"), (int, float)):
+                started = float(record["started"])
         except (OSError, ValueError, TypeError, KeyError, AttributeError):
             calls = 0
-        _write_calls(path, session, calls + 1)
+        _write_calls(path, session, calls + 1, started)
 
 
 def reset_calls(session: str | None) -> None:
-    """A session (re)starts with no calls: a resume keeps its session id but gets a new budget."""
+    """A session (re)starts with no calls: a resume keeps its session id but gets a new budget. The (re)start time
+    is kept too (`session_started`): a reviewer sent before a resume ended with the earlier run."""
     if not session:
         return
     import filelock
+    import time
     path = _calls_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     with filelock.locked(path):
-        _write_calls(path, session, 0)
+        _write_calls(path, session, 0, time.time())
 
 
 def calls_used() -> int:
@@ -483,6 +491,27 @@ def calls_used() -> int:
         return int(record["calls"]) if session and record.get("session") == session else 0
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return 0
+
+def session_started() -> float | None:
+    """When the current session last (re)started (a resume keeps its session id); None when unknown."""
+    import paths
+    session = paths.current_session()
+    try:
+        record = json.loads(_calls_path().read_text())
+        if session and record.get("session") == session:
+            return float(record["started"])
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        pass
+    return None
+
+
+def budget_tracked() -> bool:
+    """The runtime gives the session's call budget, large enough for a reviewer, and sessions are tracked: then a
+    brief goes out only while a reviewer has the calls to finish (`calls_short`), and a new session may hand out a
+    fresh one (`fresh_brief_allowed`)."""
+    import paths
+    budget = session_call_budget()
+    return budget is not None and budget > REVIEW_CALLS and bool(paths.current_session())
 
 
 def calls_short() -> tuple[int, int] | None:
@@ -567,15 +596,33 @@ def _decided(text: str) -> bool:
 def _ended_files(state: dict) -> set[str]:
     """Reply files of rounds handed out only in sessions that have ended: a reviewer runs inside the session that
     sends it, so it ended with that session, and its reply is finished as it stands (E2E-SWE full run: `close` said
-    a cut-off reviewer "may still be writing" for 15 minutes, in 20 of the candidate's sessions)."""
+    a cut-off reviewer "may still be writing" for 15 minutes, in 20 of the candidate's sessions). A resume keeps its
+    session id, but a reviewer sent before it ended with the earlier run."""
     import paths
-    session = paths.current_session()
-    if not session:
+    if not paths.current_session():
         return set()
     issued = state.get("review_issued") or []
-    live = {os.path.realpath(i["file"]) for i in issued if i.get("file") and i.get("session") == session}
+    live = {os.path.realpath(i["file"]) for i in issued if i.get("file") and _this_session(i)}
     return {os.path.realpath(i["file"]) for i in issued
-            if i.get("file") and i.get("session") and i["session"] != session} - live
+            if i.get("file") and i.get("session") and not _this_session(i)} - live
+
+
+def _at(entry: dict) -> float | None:
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(entry["at"]).timestamp()
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _this_session(entry: dict) -> bool:
+    """A hand-out made in the current session since it last (re)started."""
+    import paths
+    session = paths.current_session()
+    if not session or entry.get("session") != session:
+        return False
+    started, at = session_started(), _at(entry)
+    return started is None or (at is not None and at >= started)
 
 
 def goal_rounds(state: dict) -> list[str]:
@@ -596,18 +643,16 @@ def _writing(text: str, age_s: float) -> bool:
 
 
 def issue_expired(entry: dict, now: float | None = None) -> bool:
-    """Whether a round `close` handed out can no longer come back: a later session has started (the reviewer, run
-    inside the session that dispatched it, ended with that session), or neither the hand-out nor its reply file
-    has changed for ROUND_QUIET_S (a runtime without hooks)."""
+    """Whether a round `close` handed out can no longer come back: a later session has started, or this one was
+    resumed since (the reviewer, run inside the session that dispatched it, ended with that run), or neither the
+    hand-out nor its reply file has changed for ROUND_QUIET_S (a runtime without hooks)."""
     import time
     import paths
     session = paths.current_session()
-    if entry.get("session") and session and entry["session"] != session:
+    if entry.get("session") and session and not _this_session(entry):
         return True
-    from datetime import datetime
-    try:
-        latest = datetime.fromisoformat(entry["at"]).timestamp()
-    except (KeyError, TypeError, ValueError):
+    latest = _at(entry)
+    if latest is None:
         return True
     if entry.get("file") and os.path.exists(entry["file"]):
         latest = max(latest, _mtime(entry["file"]))
@@ -618,40 +663,53 @@ def _answered(state: dict) -> int:
     """How many of this goal's rounds came back: finished round files on its own checkpoints, or recorded reviews."""
     return max(len(goal_rounds(state)), len(state.get("reviews") or []))
 
+def _taken_up(entry: dict, since: float) -> bool:
+    path = entry.get("file")
+    return bool(path) and os.path.exists(path) and _mtime(path) >= since
+
+
 def _tried(state: dict) -> list[dict]:
     """This goal's hand-outs a reviewer took up, oldest first: the reply file is on disk, written since the goal
     began (a brief's first step is to write the reply's header), and the latest hand-out of each file. A brief no
-    reviewer took up is not a hand-out (E2E-SWE fix test: fiddle's two briefs, never dispatched, used both of the
-    goal's hand-outs and held it on `review_unavailable` for 5 sessions)."""
+    reviewer took up is not pending (E2E-SWE fix test: fiddle's `check` said a reviewer "may still be writing" when
+    none had been dispatched)."""
     since = _started(state)
     last = {}
     for entry in state.get("review_issued") or []:
-        path = entry.get("file")
-        if path and os.path.exists(path) and _mtime(path) >= since:
-            key = os.path.realpath(path)
+        if _taken_up(entry, since):
+            key = os.path.realpath(entry["file"])
             last.pop(key, None)
             last[key] = entry
     return list(last.values())
 
 
+def _handouts_used(state: dict) -> int:
+    """The hand-outs counted against `handouts_per_goal()`. With the session's call budget tracked (`budget_tracked`),
+    only those a reviewer took up (E2E-SWE fix test: fiddle's two briefs, never dispatched, used both hand-outs and
+    held the goal on `review_unavailable` for 5 sessions). Otherwise also every `close` hand-out that went out in an
+    earlier session, taken up or not: nothing else bounds the re-sends there, and a reviewer gone before its first
+    write cannot be told from no reviewer. A brief from `check` counts only once taken up."""
+    if budget_tracked():
+        return len(_tried(state))
+    since = _started(state)
+    return sum(1 for entry in state.get("review_issued") or []
+               if _taken_up(entry, since) or (not entry.get("check") and issue_expired(entry)))
+
+
 def fresh_brief_allowed(state: dict) -> bool:
-    """When the runtime gives the session's call budget, a session in which no reviewer has taken up a brief may
-    hand out a fresh one even after the goal's hand-outs died: the brief goes out only while the session has the
-    calls a reviewer needs (`calls_short`), when nearly every reviewer comes back (E2E-SWE fix test: once both
-    hand-outs had died, `review_unavailable` made 8 of the 12 stalled sessions). Rounds on unchanged files stay
-    bounded by REVIEW_ROUNDS_PER_CHECKPOINT."""
-    import paths
-    session = paths.current_session()
-    if session_call_budget() is None or not session:
-        return False
-    return not any(entry.get("session") == session for entry in _tried(state))
+    """With the session's call budget tracked (`budget_tracked`), a session (or resumed run) in which no reviewer
+    has taken up a brief may hand out a fresh one even after the goal's hand-outs died: the brief goes out only
+    while the session has the calls a reviewer needs (`calls_short`), when nearly every reviewer comes back (E2E-SWE
+    fix test: once both hand-outs had died, `review_unavailable` made 8 of the 12 stalled sessions). Rounds on
+    unchanged files stay bounded by REVIEW_ROUNDS_PER_CHECKPOINT."""
+    return budget_tracked() and not any(_this_session(entry) for entry in _tried(state))
 
 
 def fresh_brief_due(state: dict) -> bool:
-    """For the session start: with the session's call budget known, an earlier session's hand-out went unanswered and
-    the goal still needs its review round, so this session's `close` should hand out a brief first."""
-    return (session_call_budget() is not None and bool(state.get("review_issued"))
-            and not review_spent(state))
+    """For the session start: with the session's call budget tracked, an earlier hand-out went unanswered and no
+    round of this goal has come back, so this session's `close` should hand out a brief first."""
+    return (budget_tracked() and bool(state.get("review_issued")) and not review_spent(state)
+            and _answered(state) == 0)
 
 
 def review_spent(state: dict) -> bool:
@@ -681,11 +739,11 @@ def review_pending(state: dict) -> bool:
 
 
 def review_unavailable(state: dict) -> bool:
-    """Reviewers took up every brief this goal may hand out, none of its rounds is still to come back, and too few
-    came back: no reviewer will answer, so `close` sends no more and completes only on a passing review. With the
-    session's call budget known, a session no reviewer has worked in may still hand out a fresh brief
+    """Every hand-out this goal may use is used (`_handouts_used`), none of its rounds is still to come back, and
+    too few came back: no reviewer will answer, so `close` sends no more and completes only on a passing review.
+    With the session's call budget tracked, a session no reviewer has worked in may still hand out a fresh brief
     (`fresh_brief_allowed`)."""
-    return (len(_tried(state)) >= handouts_per_goal() and not review_spent(state)
+    return (_handouts_used(state) >= handouts_per_goal() and not review_spent(state)
             and not review_pending(state) and not fresh_brief_allowed(state))
 
 

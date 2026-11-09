@@ -206,9 +206,10 @@ def goal_rows(exclude: str | None = None) -> list[dict]:
 
 
 
-def _review_handoff(report: dict, state: dict, digest: str, issue: bool = False) -> None:
-    """Hand out the review brief. With `issue` (from `close`), the round is recorded as handed out; it counts once a
-    reviewer takes it up (its reply file is on disk), and a brief no reviewer took up is given again. If a round
+def _review_handoff(report: dict, state: dict, digest: str, issue: bool | str = False) -> None:
+    """Hand out the review brief. With `issue` (True from `close`, "check" from `check`), the round is recorded as
+    handed out; a brief no reviewer took up (its reply file is not on disk) is given again, and which hand-outs count
+    is `reviewing._handouts_used`. If a round
     never comes back, a later session's `close` hands it out again, up to `reviewing.handouts_per_goal()`; after
     that `close` sends no more and completes only on a passing review (E2E-SWE paper run: an unanswered round
     counted as spent closed 79 goals on the agent's own gate), unless the runtime gives the session's call budget:
@@ -249,9 +250,13 @@ def _review_handoff(report: dict, state: dict, digest: str, issue: bool = False)
         return
     if reviewing.review_unavailable(state):
         report["review_unavailable"] = (
-            "No reviewer answered this goal's review briefs, and close hands out no more. It will not complete "
-            "this goal without a passing review: keep building and extend the gate toward what the request still "
-            "lacks. When the budget is spent, close records the current files as the deliverable.")
+            ("No reviewer answered this goal's review briefs, and close hands out no more in this session: start "
+             "the next session with `close`, which hands out a fresh brief while a reviewer has the calls to "
+             "finish. " if reviewing.budget_tracked() else
+             "No reviewer answered this goal's review briefs, and close hands out no more. ")
+            + "It will not complete this goal without a passing review: keep building and extend the gate toward "
+            "what the request still lacks. When the budget is spent, close records the current files as the "
+            "deliverable.")
         report.setdefault("missing", []).append(report["review_unavailable"])
         return
     # Lines an earlier reviewer of this same checkpoint passed before it was cut off.
@@ -291,7 +296,7 @@ def _review_handoff(report: dict, state: dict, digest: str, issue: bool = False)
         state, digest, report["review_file"], str(paths.harness_root()),
         carried=report["review_carried"], scope=report["review_scope"])
     if issue:
-        goal.issue_review(state["slug"], digest, review_file)
+        goal.issue_review(state["slug"], digest, review_file, via_check=issue == "check")
 
 
 def check(args) -> tuple[dict, int]:
@@ -337,7 +342,8 @@ def check(args) -> tuple[dict, int]:
         if unchecked:
             report["unchecked_gate_lines"] = unchecked
         else:
-            _review_handoff(report, state, digest)
+            # recorded too, so a reviewer that took it up is pending; it counts only once taken up
+            _review_handoff(report, state, digest, issue="check")
     if error:
         report["error"] = error
     _with_examples(report, state)
