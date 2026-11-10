@@ -13,6 +13,7 @@ from pathlib import Path
 import subprocess
 
 import evidence
+import gate
 import goal
 import leases
 import paths
@@ -26,6 +27,7 @@ import surface
 import install_gate
 import hookguard
 import reviewing
+import stubs
 
 MARK = "horizon-hook"
 # PostToolUse fires only after a tool succeeds; PostToolUseFailure after one fails (a Bash command exiting non-zero),
@@ -305,62 +307,15 @@ def _resume_line(state: dict) -> str:
 
 
 def _placeholders(root: Path, limit: int = 10, facts=()) -> str:
-    """Source files whose functions only raise NotImplementedError (abstract methods aside) or that call
-    themselves placeholders (NL2Repo bench6 deepdiff: a green gate over five placeholder modules).
-
-    Methods of abstract base classes (named Abstract*/Base*, or based on ABC/Protocol) are interfaces, not
-    placeholders, and a file named in a recorded fact is the agent's settled judgment (NL2Repo held-out:
-    DictDataBase and python-jose re-checked the same abstract stubs in 4-5 sessions each)."""
-    import ast
+    """Source files with functions that are still placeholders (NL2Repo bench6 deepdiff: a green gate over five
+    placeholder modules). What counts, and what is an interface or a deliberate raise, is in `stubs`."""
     try:
-        out = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
-                             capture_output=True, timeout=10)
-        if out.returncode:
-            return ""
-        names = [n for n in out.stdout.decode(errors="replace").split("\0") if n.endswith(".py")]
-    except (OSError, subprocess.SubprocessError):
+        found = stubs.find(root, facts)
+    except Exception:
         return ""
-    found = []
-    for name in dict.fromkeys(names):
-        parts = name.split("/")
-        if (any(p.startswith(".") or p in _NOT_SOURCE or p in ("tests", "test") for p in parts[:-1])
-                or parts[-1].startswith("test_") or parts[-1] == "conftest.py"):
-            continue
-        if any("by design" in fact.lower() and re.search(r"(?<![\w/.-])" + re.escape(name) + r"(?![\w/.-])", fact)
-               for fact in facts):
-            continue
-        try:
-            tree = ast.parse((root / name).read_text(errors="replace"))
-        except (OSError, SyntaxError, ValueError):
-            continue
-        hits = []
-        stack = [(node, "") for node in tree.body]
-        while stack:
-            node, prefix = stack.pop(0)
-            if isinstance(node, ast.ClassDef):
-                bases = {getattr(b, "attr", None) or getattr(b, "id", None) for b in node.bases}
-                if re.match(r"(?:Abstract|Base)(?:[A-Z_]|$)", node.name) or bases & {"ABC", "Protocol"} or any(
-                        (getattr(k.value, "attr", None) or getattr(k.value, "id", None)) == "ABCMeta"
-                        for k in node.keywords):
-                    continue
-                stack += [(child, f"{prefix}{node.name}.") for child in node.body]
-            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                abstract = any((getattr(d, "attr", None) or getattr(d, "id", None)) == "abstractmethod"
-                               for d in node.decorator_list)
-                raises = any(isinstance(s, ast.Raise) and "NotImplementedError" in ast.unparse(s.exc or s)
-                             for s in node.body)
-                doc = (ast.get_docstring(node) or "").lower()
-                if (raises and not abstract) or "placeholder" in doc:
-                    hits.append(prefix + node.name)
-        if "placeholder" in (ast.get_docstring(tree) or "").lower():
-            hits.append("module marked placeholder")
-        if hits:
-            shown = ", ".join(hits[:4]) + (f" and {len(hits) - 4} more" if len(hits) > 4 else "")
-            found.append(f"{name} ({shown})")
     if not found:
         return ""
-    more = f"; and {len(found) - limit} more files" if len(found) > limit else ""
-    return "Placeholders still to build: " + "; ".join(found[:limit]) + more + "."
+    return "Placeholders still to build: " + stubs.listing(found, limit) + "."
 
 def _files_changed_since_gate(state: dict) -> bool:
     """Whether no gate result covers the current files of a conversation-mode goal with a command gate.
@@ -440,12 +395,61 @@ def _examples_line(state: dict) -> str:
     return f" {line}" if line else ""
 
 def _surface_line(state: dict) -> str:
-    """The names the goal's surface gate last found missing (from its saved result; the hook runs nothing more)."""
+    """The names the goal's surface gate last found missing (from its saved result; the hook runs nothing more).
+    All of them: a session that sees eight of forty builds eight."""
     last = surface._last(surface.record_path(state["slug"]))
     if not last or not last.get("failed"):
         return ""
     return (f" Names the request gives that did not import at the last check ({len(last['failed'])}): "
-            f"{surface.listing(last['failed'], limit=8)}; `close` waits for them.")
+            f"{surface.grouped(last['failed'])}. A test that imports a missing one fails whatever else works, so "
+            "give each a working first version before you deepen what exists; `close` waits for them.")
+
+def _unfinished_line(state: dict) -> str:
+    """A gate run that never returned (from the note `gate` leaves while it runs; the hook runs nothing)."""
+    left = gate.unfinished(state["slug"])
+    if not left:
+        return ""
+    when = left["started"][:16]
+    if left["alive"]:
+        return (f" A gate run started at {when} is still going in the background; its result is not in the lines "
+                "above yet.")
+    return (f" The last gate run (started {when}) never finished: it was still going when its call or its session "
+            "ended, so nothing it found was saved, and the gate result, the missing names and the next action "
+            "above are older than the files. A test probably hangs, or the gate outgrew its call. Make "
+            f"`check {state['slug']} --timeout 100` your first call: it stops the gate at 100 seconds, saves this "
+            "session's state and prints how far the gate got. Then fix or remove the test that does not finish.")
+
+
+NEXT_REPEATS = 3
+
+
+def _repeat_line(state: dict, session: str | None) -> str:
+    """Say so when the same next action has opened NEXT_REPEATS sessions in a row.
+
+    E2E-SWE big run: django-modelcluster opened four sessions on one next action for a file that never changed,
+    and transitions came back to the same "verify" item in four of six sessions; each added tests and no code."""
+    text = (goal.row(state)["next_action"] or "").strip()
+    if not text or not session:
+        return ""
+    path = goal.notes_path(state["slug"]).with_suffix(".next.json")  # bookkeeping: never hashed
+    try:
+        record = json.loads(path.read_text())
+    except (OSError, ValueError):
+        record = {}
+    seen = record.get("sessions") if isinstance(record, dict) and record.get("next") == text else []
+    seen = [s for s in seen if isinstance(s, str)] if isinstance(seen, list) else []
+    if session not in seen:
+        seen.append(session)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"next": text, "sessions": seen[-20:]}))
+    except OSError:
+        pass
+    if len(seen) < NEXT_REPEATS:
+        return ""
+    return (f" This next action has now opened {len(seen)} sessions in a row. If it is done, or it is not moving "
+            "the work, do not take it up again: pick the largest part of the request that is unbuilt or untried, "
+            "do that, and record it as the next action with `check`.")
 
 def _install_line(state: dict) -> str:
     """What the goal's last install check found wrong (from its saved result; the hook runs nothing more)."""
@@ -754,6 +758,10 @@ def _session_start(session: str | None, source: str | None = None) -> dict | Non
             try:
                 line += (_examples_line(state) + _surface_line(state) + _install_line(state)
                          + (_review_line(state) if fresh else ""))
+            except Exception:
+                pass
+            try:
+                line += _unfinished_line(state) + (_repeat_line(state, session) if startup else "")
             except Exception:
                 pass
             plateau = _plateau_line(state) if startup else ""

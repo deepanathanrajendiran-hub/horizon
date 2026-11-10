@@ -4,10 +4,13 @@ Separated from the skill markdown so the loop's decision logic is unit
 tested once rather than re-derived in prose on every run.
 """
 
+import json
 import os
 import signal
 import subprocess
+from datetime import datetime, timezone
 
+import paths
 import tree_hash
 from typing import Callable
 import hookguard
@@ -98,6 +101,69 @@ def _stop_owned_process(proc: subprocess.Popen) -> None:
             pass
     proc.wait()
 
+RUNNING = "gate-running.json"
+TIMEOUT_OUTPUT = 600
+
+
+def running_path():
+    return paths.harness_root() / "notes" / RUNNING  # bookkeeping: never hashed
+
+
+def _mark_running(state: dict, command: str):
+    """Leave a note that this process is running the gate. A run that returns or times out removes it; a run the
+    host kills (its call's own time limit, or the end of the session) cannot, and the next session is told.
+
+    E2E-SWE big run, mpmath: one of the build's own tests hung, so every `check` outlived its call and was killed
+    before it saved anything. Four sessions in a row started from the same gate result, the same 48 missing names
+    and the same next action, and spent themselves on one function while 44 names had no module."""
+    try:
+        path = running_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"pid": os.getpid(), "slug": state.get("slug"), "command": command,
+                                    "started": datetime.now(timezone.utc).isoformat(timespec="seconds")}))
+        return path
+    except Exception:
+        return None
+
+
+def _unmark_running(path) -> None:
+    if path is None:
+        return
+    try:
+        record = json.loads(path.read_text())
+        if record.get("pid") == os.getpid():
+            path.unlink()
+    except Exception:
+        pass
+
+
+def unfinished(slug: str | None = None) -> dict | None:
+    """The gate run that never returned, if one was left: {"started", "command", "alive"}. `alive` is whether the
+    process that started it still runs (a run moved to the background), in which case it may yet save its result."""
+    try:
+        record = json.loads(running_path().read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict) or (slug and record.get("slug") not in (None, slug)):
+        return None
+    alive = False
+    try:
+        os.kill(int(record.get("pid")), 0)
+        alive = True
+    except (OSError, TypeError, ValueError):
+        pass
+    return {"started": str(record.get("started") or ""), "command": str(record.get("command") or ""), "alive": alive}
+
+
+def _printed_before_stop(proc: subprocess.Popen) -> str:
+    """What the gate printed before it was stopped, so a hang can be placed: for a test run, how far it got."""
+    try:
+        stdout, stderr = proc.communicate(timeout=5)
+    except Exception:
+        return ""
+    text = ((stdout or "") + (stderr or "")).strip()
+    return f". Printed before the stop: {text[-TIMEOUT_OUTPUT:]}" if text else ". It printed nothing before the stop."
+
 def run_gate(state: dict, timeout: int = DEFAULT_TIMEOUT,
              current_hash: str | None = None, *,
              on_spawn: Callable[[subprocess.Popen], None] | None = None) -> tuple[str, str]:
@@ -167,11 +233,16 @@ def run_gate(state: dict, timeout: int = DEFAULT_TIMEOUT,
             error.spawn_record_uncertain = True
             raise error from exc
 
+    marker = _mark_running(state, command)
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as e:
         _stop_owned_process(proc)
-        raise GateUnrunnable(f"gate timed out after {timeout}s: {command}") from e
+        raise GateUnrunnable(f"gate timed out after {timeout}s: {command}{_printed_before_stop(proc)}") from e
+    finally:
+        # Reached on every return and on a timeout; not when the host kills this process, which is the case the
+        # marker is for.
+        _unmark_running(marker)
 
     if proc.returncode in (SHELL_NOT_FOUND, SHELL_NOT_EXECUTABLE):
         reason = (

@@ -27,6 +27,7 @@ import subprocess
 import surface
 import install_gate
 import hookguard
+import stubs
 
 MAX_GATE_OUTPUT = 4000
 
@@ -739,6 +740,34 @@ def _hold_small_gate(state: dict, observed_hash: str) -> None:
         return
     raise GateNotPassed(message)
 
+def placeholders(state: dict) -> str | None:
+    """What to say when a thin goal's work still has placeholder functions, or None. Read from the source; nothing
+    is run.
+
+    E2E-SWE big run, authlib: every name the request gives imported, so the surface test passed 40 of 40, while a
+    dozen of those modules were 10 to 25 lines of `raise NotImplementedError`; `close` completed the goal."""
+    if not state.get("thin"):
+        return None
+    try:
+        found = stubs.find(state["cwd"], [f.get("text", "") for f in state.get("facts") or []])
+    except Exception:
+        return None
+    if not found:
+        return None
+    return ("These functions are still placeholders: " + stubs.listing(found) + ". A name that imports and does "
+            "nothing fails the first caller that uses it. Build each one, then run close again. If the request "
+            "means one to raise (a hook the library's user fills in), record it once with "
+            "`note --fact \"<file> <name> raises NotImplementedError by design\"`.")
+
+
+def _hold_placeholders(state: dict) -> None:
+    """Stop completion while the work has placeholder functions."""
+    if state["status"] != "active":
+        return
+    message = placeholders(state)
+    if message:
+        raise GateNotPassed(message)
+
 
 def advisory_sections(state: dict) -> str:
     """The `close` note listing unbuilt or unquoted sections, or "" when there are none or they cannot be read."""
@@ -1137,6 +1166,7 @@ def _apply_completion(state: dict, observed_hash: str, gate_output: str, allow_u
     found = install_check(state, observed_hash)
     if found and found.get("blocking") and not found.get("ok"):
         raise GateNotPassed(install_gate.message(found))
+    _hold_placeholders(state)
     reasons = evidence.review_reasons(state, _requirements(state))
     if reasons:
         criterion = state["gate"]["review_criterion"]

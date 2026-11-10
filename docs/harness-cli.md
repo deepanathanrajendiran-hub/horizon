@@ -182,9 +182,19 @@ cannot. A hook reads saved results; `check`, `observe` and `close` run the code.
   and the project's files with their line counts, up to 40, tracked files and
   code files first; files in dot-directories, environments, `build`, `dist` and
   `*.egg-info` are left out, and a file over 1 MB shows its size instead. Last,
-  `Placeholders still to build:` lists source files with functions that only
-  raise `NotImplementedError` (abstract methods aside) or that call themselves
-  placeholders. `install-hooks` gives the hook a 300-second timeout (an older
+  `Placeholders still to build:` lists source files with functions that have
+  no body yet: a docstring at most, then `pass`, `...` or
+  `raise NotImplementedError`, and either that raise or a docstring that says
+  placeholder. Not listed: a function that does work and raises on one path, a
+  method another class of the project overrides, a method of an abstract base,
+  a special method other than `__init__`, a raise whose message says who
+  must supply the method ("must implement ..."), and a file a recorded fact calls
+  "by design". Three more lines appear when they apply. After the missing
+  names (all of them, by module): `The last gate run ... never finished`, when
+  a gate run was killed before it returned (its call's time limit, or the end
+  of the session), with the `check --timeout 100` that saves the session's
+  state; and `This next action has now opened N sessions in a row`, from the
+  third session that starts on the same next action. `install-hooks` gives the hook a 300-second timeout (an older
   30-second one is raised) and keeps a longer timeout you set.
 - `PostToolUse` renews the lease of the session's open attempt. While a goal is
   active, it and `PostToolUseFailure` also keep the session's latest call in
@@ -219,6 +229,11 @@ reviewer; its gate is the command given plus the surface gate, the install check
 the advisory spec examples below. This is fixed at `start`: a goal that began with
 a `requirements.md` keeps needing it. Two more things hold for a thin goal:
 
+- **Placeholders.** `close` does not complete a thin goal while the work has
+  placeholder functions (the rule above); `check` reports them as
+  `placeholders`. A name that imports passes the surface gate even when its
+  function only raises. Build each, or record a deliberate one with
+  `note --fact "<file> <name> raises NotImplementedError by design"`.
 - **Small gate.** When the surface gate lists N names and the gate's pytest run
   passed fewer than min(N, 10) tests, `close` does not complete and `missing` says
   how many tests ran; `check` reports the same as `small_gate`. A gate whose

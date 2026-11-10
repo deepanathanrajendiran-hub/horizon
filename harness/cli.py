@@ -171,7 +171,7 @@ def _with_examples(report: dict, state: dict) -> dict:
     except Exception:
         key, found = None, None
     if found and found["failed"] and "surface_advisory" not in report:
-        report["surface_missing"] = (surface.listing(found["failed"]) + ". `close` waits for these: a test that "
+        report["surface_missing"] = (surface.grouped(found["failed"]) + ". `close` waits for these: a test that "
                                      "imports a missing one fails, whatever else works.")
     try:
         installed = goal.install_check(goal.load(state["slug"]), key)
@@ -190,6 +190,12 @@ def _with_examples(report: dict, state: dict) -> dict:
         small = None
     if small:
         report["small_gate"] = small
+    try:  # as with the small gate: said at `check`, held at `close`
+        unbuilt = goal.placeholders(goal.load(state["slug"])) if "missing" not in report else None
+    except Exception:
+        unbuilt = None
+    if unbuilt:
+        report["placeholders"] = unbuilt
     return report
 
 

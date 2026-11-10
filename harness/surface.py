@@ -565,11 +565,18 @@ def _unalias(text: str, package: str) -> str:
             text = re.sub(rf"(?<![\w.]){re.escape(alias)}\.", module + ".", text)
     return text
 
+# The package a spec names outright: "the top-level `grappa` package". (`from x import y` in a code span is not
+# that: it is as often a dependency.) E2E-SWE big run, grappa: the spec says so, but writes `should.<chain>` in
+# fifty code spans, so the surface test was written for a package called `should` and two builds spent sessions
+# on it.
+_STATED_PACKAGE = re.compile(r"(?:top-level|top level)\s+`([A-Za-z_]\w*)`\s+(?:package|module)\b")
+
 def guess_package(text: str) -> str | None:
     """The import name a spec builds: the name it imports from most, and whose dotted names it gives most in code
     spans, the title counting extra; never a standard module, never a name whose dotted references are all files
-    (`setup.sh`), and never an alias or a name taken from a module: an alias's spans count for its module. None when
-    nothing qualifies (a prose request for no Python package)."""
+    (`setup.sh`), and never an alias or a name taken from a module: an alias's spans count for its module. A name
+    the spec states as the package (`_STATED_PACKAGE`) comes before any count. None when nothing qualifies (a prose
+    request for no Python package)."""
     counts, imported = collections.Counter(), set()
     aliases, bound = _aliases(text)
     for a, b in _IMPORT_LINE.findall(text):
@@ -586,6 +593,10 @@ def guess_package(text: str) -> str | None:
     for span in re.findall(r"`([A-Za-z_]\w*)`", title):
         if span in counts:
             counts[span] += 5
+    stated = set(_STATED_PACKAGE.findall(text))
+    for name in stated:
+        imported.add(name)
+        counts[name] += 1000
     for name, _ in counts.most_common():
         if name in _NOT_PACKAGES or (name[:1].isupper() and name not in imported):
             continue
@@ -765,6 +776,22 @@ def check(state: dict, key: str | None) -> dict | None:
 
 def listing(failed: list[dict], limit: int = 12) -> str:
     shown = "; ".join(f"{f['id']} ({f['message'][:120]})" if f.get("message") else f["id"] for f in failed[:limit])
+    return shown + (f"; and {len(failed) - limit} more" if len(failed) > limit else "")
+
+def grouped(failed: list[dict], limit: int = 200) -> str:
+    """Every missing name, under the module it belongs to: `pkg: a, b; pkg.mod: C`. A short list keeps each name's
+    own message (`listing`).
+
+    E2E-SWE big run, mpmath: the session-start message gave 8 of 48 missing names, alphabetically, "and 40 more".
+    One build never listed the rest and ended with 44 names in no module; the other listed them itself and built
+    them all in one session."""
+    if len(failed) <= 8:
+        return listing(failed, limit=8)
+    groups: dict[str, list[str]] = {}
+    for item in failed[:limit]:
+        owner, _, leaf = item["id"].rpartition(".")
+        groups.setdefault(owner or item["id"], []).append(leaf if owner else "(the module)")
+    shown = "; ".join(f"{owner}: {', '.join(names)}" for owner, names in groups.items())
     return shown + (f"; and {len(failed) - limit} more" if len(failed) > limit else "")
 
 

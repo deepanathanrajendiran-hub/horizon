@@ -71,7 +71,7 @@ python3 "$HARNESS" --runtime claude --project "$PROJECT" start "Requested outcom
 `check` is your test run and your checkpoint in one call: it runs the gate and Horizon's checks and saves what you
 did and the next action. Run it when a part works, not after every edit. Use `note` only for what `check` does not
 carry, in the same Bash call as another command, never a call of its own: `--fact`, once, for an environment
-problem or the exact command that worked; `--finding` for a bug you will not fix now.
+problem or the exact command that worked; `--finding` for a bug, or a part of the request, you leave for later.
 
 ```bash
 python3 "$HARNESS" --runtime claude --project "$PROJECT" check "$SLUG" \
@@ -81,15 +81,16 @@ python3 "$HARNESS" --runtime claude --project "$PROJECT" note "$SLUG" --fact "Te
 
 What `check`, `close` and the session-start message report, and what to do:
 
-- `surface_missing`: a module or name the request gives does not import. Build it. If the request does not mean one
-  (a file name, an example's variable), delete it from the surface file and say why with `note --finding`.
+- `surface_missing`: modules and names the request gives that do not import. Give each a working first version
+  before you deepen what exists. If the request does not mean one (a file name, an example's variable), delete it
+  from the surface file and say why with `note --finding`.
 - `install_problem`: the package does not install in a clean copy, offline. Fix the project's own files (its
   `pyproject.toml`, the setup script the request names); never build an environment of your own for it.
 - `spec_examples`: how many of the request's own examples agree with the work, and which disagree. For each, read
   the request's prose: fix the code when the prose agrees with the example. If the example itself is wrong, skip
   it with `waive-example`, citing the line.
-- `Placeholders`: functions that only raise or pass. Fill each in. If one is meant (an abstract base), record it
-  once with `note --fact "<file> <name> raises NotImplementedError by design"` and it is not listed again.
+- `placeholders`: functions with no body yet; `close` waits for them. Fill each in. If one is meant (a hook the
+  library's user fills in), record it once with `note --fact "<file> <name> raises NotImplementedError by design"`.
 
 ```bash
 python3 "$HARNESS" --runtime claude --project "$PROJECT" waive-example "$SLUG" "$EXAMPLE_ID" --reason "Line 40 of the request says the opposite"
