@@ -856,10 +856,11 @@ def _stop(again: bool = False, session: str | None = None) -> dict | None:
         # The second stop in a row always goes through, so a person can still be answered.
         return None
     # NL2Repo bench6: Haiku ended capped sessions itself to hand off, and an unattended run reads that as done.
-    open_goals = []
+    open_goals, lines = [], False
     for state in _active_goals():
         try:
             if goal.execution_mode(state) == "conversation" and not goal.budget_exhausted(state):
+                lines = lines or not state.get("thin")  # a thin goal has no requirement lines to retag
                 open_goals.append(f"{state['slug']} (next: {goal.row(state)['next_action'] or 'not set'})")
         except Exception:
             continue
@@ -874,7 +875,8 @@ def _stop(again: bool = False, session: str | None = None) -> dict | None:
                            "to wait for a person or a reviewer. Keep building: do the next action now and keep "
                            "`note --next` current. If you need a decision, make it and record it with `note "
                            "--fact`; if the environment blocks a check, record that with `note --fact`, take "
-                           "the check out of the gate, retag its line `[review]`, and go on. Stop only once "
+                           "the check out of the gate" + (", retag its line `[review]`" if lines else "")
+                           + ", and go on. Stop only once "
                            "`close` completes the goal.")}
     return {"decision": "block",
             "reason": ("Horizon goal still active with budget left: " + "; ".join(open_goals) + ". A session's "

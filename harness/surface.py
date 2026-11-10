@@ -131,6 +131,119 @@ def _init_all(lines: list[str], package: str) -> set[str]:
     return found
 
 # A directory-tree line: `│   ├── core.py   # comment`; the branch's column gives the depth.
+_QUANTIFIER = re.compile(r"\b(?:all|every|everything)\b", re.I)
+_EXPORTED = re.compile(r"\b(?:importable|imported|re-?exported|exported|exposed)\b", re.I)
+_TOP_LEVEL = re.compile(r"\btop[- ]level\b", re.I)
+_HEADING = re.compile(r"^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$")
+_FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
+# A list entry that opens with code: `name(args)` or `Name`, bold or not.
+_ENTRY = re.compile(r"^\s{0,3}[-*+]\s+(?:\*\*|__)?`([A-Za-z_]\w*)\s*(\(|`)")
+_CLASS_HEADING = re.compile(r"^(?:class\s+)?`?([A-Z]\w*)`?(?:\s*\(.*\))?$")
+_BUILTINS = set(dir(__import__("builtins")))
+_MEMBERS = re.compile(r"\b(?:methods?|attributes?|propert(?:y|ies)|parameters?|arguments?|options?|fields?)\b", re.I)
+
+
+def _documented(name: str) -> bool:
+    return not (name.startswith("_") or keyword.iskeyword(name) or _is_test(name) or name in _BUILTINS)
+
+
+def _blanket_owner(line: str, package: str) -> str | None:
+    """The module a sentence says every name comes from: "All public classes and functions below are importable
+    from the top-level `pkg` package", "All importable from `pkg.exceptions`."; None for any other line."""
+    if not (_QUANTIFIER.search(line) and _EXPORTED.search(line)) or re.search(r"\bsubmodules?\b", line, re.I):
+        return None
+    pkg = re.escape(package)
+    named = re.search(rf"\b(?:from|off|of|in|at)\s+(?:the\s+)?(?:top[- ]level\s+)?`({pkg}(?:\.[A-Za-z_]\w*)*)`", line)
+    if named:
+        return named.group(1).removesuffix(".__init__")
+    if _TOP_LEVEL.search(line) and not re.search(r"`[A-Za-z_][\w.]*`\s+package", line.replace(f"`{package}`", "")):
+        return package
+    return None
+
+
+def _entries(lines: list[str], package: str) -> list[tuple[int, str, str | None]]:
+    """(line, name, module it says it is importable from) for each name the lines document: a list entry that opens
+    with `name(...)` or `Name`, a heading that is one class-like name, and code that opens a heading or is
+    class-like in it. An entry under a class's heading is that class's method, not a name of the package."""
+    out, fence, in_class, of_members = [], None, False, False
+    pkg = re.escape(package)
+    # "Exceptions" or "Helpers" alone in a heading is a title; "Location" is a class when the spec also calls it.
+    called = set(re.findall(r"\b([A-Z]\w*)\(", "\n".join(lines)))
+    for i, line in enumerate(lines):
+        opened = _FENCE.match(line)
+        if opened:
+            fence = None if fence and opened.group(1)[0] == fence[0] else (fence or opened.group(1))
+            continue
+        if fence:
+            continue
+        heading = _HEADING.match(line)
+        if heading:
+            title = heading.group(2).strip()
+            bare = _CLASS_HEADING.match(re.split(r"\s+[—–-]\s+", title)[0].strip())
+            if bare and "`" not in bare.group(0) and not (re.search(r"[a-z][A-Z]", bare.group(1))
+                                                          or bare.group(1) in called):
+                bare = None
+            in_class = bool(bare)
+            names = [bare.group(1)] if bare else []
+            first = re.match(r"`([A-Za-z_]\w*)`", title)
+            if first:
+                names.append(first.group(1))
+                in_class = in_class or first.group(1)[:1].isupper()
+            names += [n for n in re.findall(r"`([A-Z]\w*)`", title)]
+            out += [(i, n, None) for n in dict.fromkeys(names)]
+            of_members = False
+            continue
+        entry = _ENTRY.match(line)
+        if not entry:
+            if line.strip() and not re.match(r"^\s*(?:[-*+]|\d+[.)])\s", line) and not line.startswith((" ", "\t")):
+                # the sentence that introduces a list says what it lists ("Base class methods available on all:")
+                of_members = bool(_MEMBERS.search(line)) and line.rstrip().endswith(":")
+            continue
+        if of_members or (entry.group(2) == "`" and not entry.group(1)[:1].isupper()):
+            continue  # a bare lower-case name in a list is a parameter or an attribute
+        if in_class and not entry.group(1)[:1].isupper():
+            continue
+        elsewhere = re.search(rf"\bimportable\s+from\s+`({pkg}(?:\.[A-Za-z_]\w*)+)`", line, re.I)
+        out.append((i, entry.group(1), elsewhere.group(1) if elsewhere else None))
+    return out
+
+
+def _blanket_exports(lines: list[str], package: str) -> set[str]:
+    """Names a spec documents without an import line, when it says in one sentence where all of them import from.
+
+    The sentence covers its own section when that section documents names (a list of exceptions followed by "All
+    importable from `pkg`."); otherwise everything after it (an "Imports" section at the top of the spec).
+
+    E2E-SWE thin2: dnachisel and mpmath scored 0 on an ImportError at collection. Each spec says once that
+    everything below is importable from the top-level package and then lists its functions in bullets; the surface
+    gate, reading import lines only, held 4 and 10 names."""
+    entries = _entries(lines, package)
+    levels = [(i, len(m.group(1))) for i, m in ((i, _HEADING.match(line)) for i, line in enumerate(lines)) if m]
+    found, fence = set(), None
+    for i, line in enumerate(lines):
+        opened = _FENCE.match(line)
+        if opened:
+            fence = None if fence and opened.group(1)[0] == fence[0] else (fence or opened.group(1))
+            continue
+        if fence or _HEADING.match(line):
+            continue
+        # a sentence may wrap: read it with the next line
+        owner = _blanket_owner(line + " " + (lines[i + 1] if i + 1 < len(lines) else ""), package) \
+            if _QUANTIFIER.search(line) else None
+        if not owner:
+            continue
+        above = [(at, level) for at, level in levels if at < i]
+        start, level = above[-1] if above else (0, 0)
+        end = next((at for at, lv in levels if at > i and lv <= level), len(lines))
+        inside = [e for e in entries if start < e[0] < end]
+        covered = inside if inside else [e for e in entries if e[0] > i]
+        for _, name, elsewhere in covered:
+            if _documented(name) and name != package:
+                found.add(f"{elsewhere or owner}.{name}")
+    return found
+
+
+
 _TREE_LINE = re.compile(r"^(?P<lead>[│|\s]*)(?:[├└]──|\|--|`--)\s*(?P<name>[^#\s][^#]*?)\s*(?:#.*)?$")
 _NOT_PACKAGE_DIRS = {"tests", "test", "docs", "doc", "examples", "example", "benchmarks", "scripts"}
 # Top-level files a project's own packaging commonly reads (setup.py's long_description, pyproject's readme and
@@ -198,6 +311,7 @@ def refs(text: str, package: str) -> list[str]:
         kept |= _line_refs(line, package, pkg)
     kept |= _from_imports(lines, package, pkg)
     kept |= _init_all(text.splitlines(), package)  # with its backticks: headings name the module in code
+    kept |= _blanket_exports(text.splitlines(), package)
     # A private module's public names are reached through the package (NL2Repo structlog: the spec gave
     # `from structlog._config import reset_defaults`, and callers used `structlog.reset_defaults`).
     for ref in list(kept):

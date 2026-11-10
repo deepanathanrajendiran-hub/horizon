@@ -496,3 +496,133 @@ def test_the_thin_skill_asks_for_a_test_of_the_main_use_and_names_the_trail():
     flat = " ".join(SKILL.read_text().split())
     for phrase in ("main use end to end", "Where the last session stopped", "gate ran"):
         assert phrase in flat, phrase
+
+# --- after the thin2 run (E2E-SWE thin2, 2026-11-09) ----------------------------------------------------------
+# dnachisel (0, thin 88.6) and mpmath (0 in every variant) stopped at one ImportError at collection. Both specs say
+# once that everything below is importable from the top-level package ("All public classes and functions below are
+# importable from the top-level `dnachisel` package unless stated otherwise"), then document the names in bullets and
+# headings with no import line. The surface gate read only the import lines: 4 names for dnachisel, 10 for mpmath.
+
+BLANKET = """# toolpkg
+
+## Imports
+
+All public classes and functions below are importable from the top-level `toolpkg` package unless stated
+otherwise. Example: `from toolpkg import Problem`.
+
+## Core API
+
+### Problem
+
+The central class, built with `Problem(sequence)`. Its methods:
+
+- `resolve(limit=3)` — Resolve the problem.
+- `summary()` — A text summary.
+
+### `Location` — a span
+
+- `start` (int) — where it starts.
+
+## Helpers
+
+### Sequence operations
+
+- `translate(seq, table="Standard")` — Translate it.
+- `gc_content(seq)` — GC share. Importable from `toolpkg.biotools`.
+- **`reverse(seq)`** — Reverse it.
+- `len(seq)` works on a `Location`.
+- `_private(seq)` — not part of the contract.
+
+```python
+- `fenced(x)` is not prose
+```
+"""
+
+
+def test_a_spec_that_says_everything_below_is_top_level_gives_its_documented_names():
+    names = surface.refs(BLANKET, "toolpkg")
+    for name in ("toolpkg.Problem", "toolpkg.Location", "toolpkg.translate", "toolpkg.reverse",
+                 "toolpkg.biotools.gc_content"):
+        assert name in names, (name, names)
+
+
+def test_methods_parameters_builtins_and_private_names_are_not_taken_for_top_level_names():
+    names = surface.refs(BLANKET, "toolpkg")
+    for name in ("toolpkg.resolve", "toolpkg.summary", "toolpkg.start", "toolpkg.len", "toolpkg._private",
+                 "toolpkg.fenced", "toolpkg.gc_content"):
+        assert name not in names, (name, names)
+
+def test_a_list_introduced_as_methods_is_not_a_list_of_top_level_names():
+    # dnachisel: "Base class methods available on all specifications:" under the prose heading "## Specifications"
+    spec = BLANKET + ("\n## Specifications\n\nBase class methods available on all specifications:\n"
+                      "- `as_passive_objective()` — a copy.\n\nFactory functions:\n\n- `make_spec(kind)` — builds one.\n")
+    names = surface.refs(spec, "toolpkg")
+    assert "toolpkg.as_passive_objective" not in names and "toolpkg.make_spec" in names, names
+
+
+def test_without_such_a_sentence_documented_names_are_not_added():
+    plain = BLANKET.replace("All public classes and functions below are importable from the top-level `toolpkg` "
+                            "package unless stated\notherwise. ", "")
+    assert surface.refs(plain, "toolpkg") == ["toolpkg.Problem", "toolpkg.biotools"]
+
+
+def test_a_sentence_inside_a_section_of_names_covers_that_section_only():
+    spec = """# toolpkg
+
+Use `import toolpkg`.
+
+## Exceptions
+
+All importable from `toolpkg.exceptions`.
+
+- `ToolError(Exception)` — base
+- `ParseError(ToolError)` — bad input
+
+## Storage
+
+- `MemoryStore(size)` — in memory
+"""
+    names = surface.refs(spec, "toolpkg")
+    assert "toolpkg.exceptions.ToolError" in names and "toolpkg.exceptions.ParseError" in names, names
+    assert not [n for n in names if n.endswith("MemoryStore")], names
+
+
+def test_a_sentence_after_its_list_covers_the_list():
+    spec = "# toolpkg\n\n## Exceptions\n\n- `FrameworkError(msg)` — base\n\nAll importable from `toolpkg`.\n\n" \
+           "## Other\n\n- `helper(x)` — not covered\n"
+    names = surface.refs(spec, "toolpkg")
+    assert "toolpkg.FrameworkError" in names and "toolpkg.helper" not in names, names
+
+
+def test_a_sentence_about_submodules_or_another_package_adds_nothing():
+    for sentence in ("All public APIs are importable from submodules of the `toolpkg` package.",
+                     "All of these are importable from `otherlib`."):
+        spec = f"# toolpkg\n\n{sentence}\n\n## API\n\n- `helper(x)` — helps\n"
+        assert surface.refs(spec, "toolpkg") == [], sentence
+
+
+def test_a_heading_that_names_code_gives_the_name_when_everything_is_top_level():
+    spec = ("# toolpkg\n\nEverything used below is importable directly from the top-level package, e.g.\n\n"
+            "```python\nfrom toolpkg import mp\n```\n\n## Numbers\n\n### `mpf` — real numbers\n\n`mpf` is a float.\n\n"
+            "### The context `mp`\n\n### Installing with `pip`\n")
+    names = surface.refs(spec, "toolpkg")
+    assert "toolpkg.mpf" in names and "toolpkg.mp" in names, names
+    assert "toolpkg.pip" not in names, names
+
+def test_an_unattended_stop_on_a_thin_goal_names_no_requirement_line(project):
+    p, cli = project
+    cli.new_session("s1")
+    _thin(p, cli)
+    cli.env["HORIZON_UNATTENDED"] = "1"
+    out = cli.hook("Stop", {"session_id": "s1"})
+    assert out["decision"] == "block" and "take the check out of the gate, and go on" in out["reason"], out
+    assert "[review]" not in out["reason"], out
+
+
+def test_the_generated_examples_file_names_no_benchmark(project):
+    p, cli = project
+    cli.new_session("s1")
+    _, gates = _thin(p, cli)
+    text = (gates / examples.FILE).read_text()
+    assert "NL2Repo" not in text and "E2E-SWE" not in text, text[:600]
+    assert "NL2Repo" not in (gates / surface.FILE).read_text()

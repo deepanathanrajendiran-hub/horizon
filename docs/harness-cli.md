@@ -632,6 +632,16 @@ never silently migrated between Codex and Claude.
   without stopping `close`.
 - **An `__all__` block** belongs to the module the nearest heading above names in code (`## Admin (`pkg.admin`)`),
   else to the package when an `__init__` (not a constructor `__init__(`) is mentioned within 30 lines before it.
+- **A sentence that says where everything imports from** ("All public classes and functions below are importable
+  from the top-level `pkg` package", "All importable from `pkg.exceptions`.") adds the names the spec documents
+  without an import line (exp/thin, after dnachisel and mpmath scored 0 on an ImportError at collection):
+  - a list entry that opens with code, `name(args)` or `Name`;
+  - a heading that is one class name, and code that opens a heading or is class-like in it.
+
+  The sentence covers its own section when that section documents names, otherwise everything after it. Left out:
+  entries under a class's heading or after a line that introduces methods, attributes, parameters, options or
+  fields; bare lower-case names; private names and builtins; a sentence about submodules or another package. An
+  entry that says `importable from `pkg.mod`` belongs to that module.
 - **Aliases:** `import fiddle as fdl` makes `fdl.Config` a reference to `fiddle.Config`, and a name taken from a
   module (`from mpmath import mp`) is never the package.
 
