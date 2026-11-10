@@ -291,6 +291,66 @@ def _module_refs(text: str, package: str) -> set[str]:
     return {m for m in (_module_of(p, package) for p in paths) if m}
 
 
+# "Rewritings (`rewritings.py`)": a section titled after the module file it documents.
+_FILE_IN_TITLE = re.compile(r"\(`((?:[A-Za-z_][\w-]*/)*[A-Za-z_]\w*\.py)`\)")
+# "### `generic.py`": a heading that is only a file name.
+_FILE_ONLY = re.compile(r"^`((?:[A-Za-z_][\w-]*/)*[A-Za-z_]\w*\.py)`$")
+# "Walker Infrastructure (`walkers/`)": a heading that names a folder.
+_DIR_IN_TITLE = re.compile(r"`((?:[A-Za-z_][\w-]*/)+)`")
+# Folders that hold a project's scripts, tests and docs, not its package.
+_SCRIPT_DIRS = {"tools", "bin", "script", "scripts", "tests", "test", "docs", "doc", "examples", "example",
+                "benchmarks"}
+
+
+def _heading_modules(lines: list[str], package: str) -> set[str]:
+    """Modules a spec documents section by section, from its headings: "Rewritings (`rewritings.py`)" is the
+    package's `rewritings` module, and a heading that is only `generic.py` under "Walkers (`walkers/`)" is
+    `walkers.generic`. Not modules: a file in a folder of scripts, tests or docs (`tools/pdf2txt.py`), a packaging
+    or test file, a single-module package's own file, and a heading that is only a file name with no folder heading
+    above it (a spec may head a section with a file the program writes, such as a generated client's `types.py`).
+
+    E2E-SWE thin2: pysmt's build had no `pysmt.parsing` or `pysmt.rewritings`, and 8 hidden tests failed on
+    ModuleNotFoundError; its spec names each module only in its section's heading ("## 19. HR Parsing
+    (`parsing.py`)"), so the surface gate did not ask for them."""
+    # A single-module package (`tool.py` in the spec's tree) has no modules: `tool/x.py` is then the repo folder.
+    if any(p.split("/")[-1] == f"{package}.py" for _, p in _tree_paths("\n".join(lines))):
+        return set()
+    found, fence, folders = set(), None, {}
+    for line in lines:
+        opened = _FENCE.match(line)
+        if opened:
+            fence = None if fence and opened.group(1)[0] == fence[0] else (fence or opened.group(1))
+            continue
+        if fence:
+            continue
+        heading = _HEADING.match(line)
+        if not heading:
+            continue
+        level, title = len(heading.group(1)), heading.group(2).strip()
+        folders = {lv: d for lv, d in folders.items() if lv < level}
+        named = _FILE_IN_TITLE.search(title)
+        path = named.group(1) if named else None
+        if path is None:
+            only = _FILE_ONLY.match(title)
+            if only and folders:
+                path = f"{folders[max(folders)]}/{only.group(1)}"
+            folder = _DIR_IN_TITLE.search(title)
+            if folder and not only:
+                folders[level] = folder.group(1).rstrip("/")
+        if not path:
+            continue
+        parts = path.split("/")
+        if parts[0] != package:
+            if (parts[0] in _SCRIPT_DIRS or _PACKAGING_FILE.match(parts[-1])
+                    or (len(parts) == 1 and parts[0] == f"{package}.py")):
+                continue
+            path = f"{package}/{path}"
+        module = _module_of(path, package)
+        if module:
+            found.add(module)
+    return found
+
+
 def spec_files(text: str) -> list[str]:
     """Top-level files in the spec's directory tree that packaging reads (NL2Repo bench6: boto3's setup.py opens
     README.rst, and a build without it failed to install)."""
@@ -312,6 +372,7 @@ def refs(text: str, package: str) -> list[str]:
     kept |= _from_imports(lines, package, pkg)
     kept |= _init_all(text.splitlines(), package)  # with its backticks: headings name the module in code
     kept |= _blanket_exports(text.splitlines(), package)
+    kept |= _heading_modules(text.splitlines(), package)
     # A private module's public names are reached through the package (NL2Repo structlog: the spec gave
     # `from structlog._config import reset_defaults`, and callers used `structlog.reset_defaults`).
     for ref in list(kept):

@@ -626,3 +626,65 @@ def test_the_generated_examples_file_names_no_benchmark(project):
     text = (gates / examples.FILE).read_text()
     assert "NL2Repo" not in text and "E2E-SWE" not in text, text[:600]
     assert "NL2Repo" not in (gates / surface.FILE).read_text()
+
+# --- after the thin2 run, pysmt (E2E-SWE thin2, 2026-11-09) -----------------------------------------------------------
+# pysmt scored 19 of 27 (thin 0759974: 24): 8 tests failed on ModuleNotFoundError. The build had no `pysmt.parsing` and
+# no `pysmt.rewritings`; the spec documents its modules section by section ("## 19. HR Parsing (`parsing.py`)") and
+# never writes `pysmt.parsing`, so the surface gate did not ask for either.
+
+SECTIONS = """# smtkit
+
+## 1. Package Layout
+
+## 2. Operators (`operators.py`)
+
+Text.
+
+## 7. Walker Infrastructure (`walkers/`)
+
+### `generic.py`
+
+### `__init__.py`
+
+## 15. Rewritings (`rewritings.py`)
+
+## 20. SMT-LIB Commands (`smtlib/commands.py`)
+
+## 21. Packaging (`setup.py`)
+
+## 22. Tests (`tests/test_parsing.py`)
+
+## 23. Command line (`tools/smt2txt.py`)
+
+## `types.py`
+
+A file the tool generates in its output.
+
+```markdown
+## Fenced (`fenced.py`)
+```
+"""
+
+
+def test_a_heading_that_names_a_module_file_asks_for_that_module():
+    names = surface.refs(SECTIONS, "smtkit")
+    for name in ("smtkit.operators", "smtkit.rewritings", "smtkit.smtlib.commands"):
+        assert name in names, (name, names)
+
+
+def test_a_file_heading_under_a_folder_heading_is_that_folders_module():
+    names = surface.refs(SECTIONS, "smtkit")
+    assert "smtkit.walkers.generic" in names and "smtkit.walkers" in names, names
+    assert "smtkit.generic" not in names, names
+
+
+def test_packaging_test_script_generated_and_fenced_files_in_headings_are_not_modules():
+    names = surface.refs(SECTIONS, "smtkit")
+    for name in ("smtkit.setup", "smtkit.tests", "smtkit.tests.test_parsing", "smtkit.test_parsing",
+                 "smtkit.tools.smt2txt", "smtkit.smt2txt", "smtkit.types", "smtkit.fenced"):
+        assert name not in names, (name, names)
+
+
+def test_a_single_module_package_heading_its_own_file_asks_for_nothing_more():
+    names = surface.refs("# tool\n\n## The module (`tool.py`)\n\nUse `tool.run()`.\n", "tool")
+    assert "tool.tool" not in names, names
