@@ -39,11 +39,12 @@ PASSING = "def test_parse_returns_the_line():\n    assert True\n"
 SLUG = "build-the-tool"
 
 
-def _thin(p, cli, gate=None):
+def _thin(p, cli, gate=None, tests=10):
     """A goal the way the thin SKILL.md starts one: the request, and the project's own tests as the gate."""
     (p / "SPEC.md").write_text(SPEC)
     (p / "tests").mkdir(exist_ok=True)
-    (p / "tests" / "test_tool.py").write_text(PASSING)
+    (p / "tests" / "test_tool.py").write_text(
+        PASSING + "".join(f"\n\ndef test_parse_case_{i}():\n    assert True\n" for i in range(1, tests)))
     gates = p / ".claude" / "gates" / "g"
     gates.mkdir(parents=True, exist_ok=True)
     (gates / "request.md").write_text("Build the library described in SPEC.md\n")
@@ -291,4 +292,207 @@ def test_the_thin_skill_keeps_the_rules_with_evidence():
     for phrase in ("Make the deliverable usable first", "in a clean copy", "Write straight into the real files",
                    "Build before you verify", "never from your own code", "never stop to ask",
                    "Make your first edit within your first 5 tool calls", "baseline `observation`"):
+        assert phrase in flat, phrase
+
+# --- after the thin run (E2E-SWE thin, 2026-11-09) ------------------------------------------------------------
+# pdfminer scored 6.1 (9a72fb4: 97.0). Session 1 wrote a bug that left every page's text empty. Session 4 found the
+# symptom ("Pages are found now, but the text is still empty", then a probe printing `contents []`) and was cut off
+# by the call cap on that call; no `check` had run yet, so session 5 started from the baseline and never went back.
+# The gate was one import test from start to finish, and `close` completed the goal on it in session 8.
+
+def _surface_names(gates):
+    import re
+    body = re.search(r"^NAMES = \[(.*?)^\]", (gates / surface.FILE).read_text(), re.M | re.S).group(1)
+    return len(re.findall(r"^\s*'", body, re.M))
+
+
+def test_close_waits_when_the_gate_runs_fewer_tests_than_the_request_names_things(project):
+    p, cli = project
+    cli.new_session("s1")
+    _, gates = _thin(p, cli, tests=1)
+    assert _surface_names(gates) >= 2
+    _build(p)
+    installable(p)
+    code, out = cli("close", SLUG)
+    assert code == 1 and not out["complete"], out
+    assert any("gate ran 1 test" in m and "end to end" in m for m in out["missing"]), out
+
+def test_check_says_the_gate_is_small_before_close_holds_on_it(project):
+    p, cli = project
+    cli.new_session("s1")
+    _thin(p, cli, tests=1)
+    _build(p)
+    code, out = cli("check", SLUG, "--did", "Built parse and Reader", "--next", "Make it install")
+    assert code == 0 and "gate ran 1 test" in out.get("small_gate", ""), out
+    (p / "tests" / "test_more.py").write_text("".join(f"def test_use_{i}():\n    assert True\n\n" for i in range(9)))
+    code, out = cli("check", SLUG, "--did", "Added tests of the main use", "--next", "Make it install")
+    assert code == 0 and "small_gate" not in out, out
+
+
+def test_close_completes_once_the_gate_runs_a_test_for_each_name(project):
+    p, cli = project
+    cli.new_session("s1")
+    _, gates = _thin(p, cli, tests=1)
+    _build(p)
+    installable(p)
+    assert cli("close", SLUG)[0] == 1
+    (p / "tests" / "test_more.py").write_text(
+        "".join(f"def test_use_{i}():\n    assert True\n\n" for i in range(_surface_names(gates))))
+    code, out = cli("close", SLUG)
+    assert code == 0 and out["complete"], out
+
+
+def test_a_gate_that_is_not_pytest_is_not_counted(project):
+    p, cli = project
+    cli.new_session("s1")
+    _thin(p, cli, gate="true")
+    _build(p)
+    installable(p)
+    code, out = cli("close", SLUG)
+    assert code == 0 and out["complete"], out
+
+
+def test_a_request_that_names_no_package_closes_on_one_test(project):
+    # "make this test pass" is a whole request: the count only applies when the request names a public surface
+    p, cli = project
+    cli.new_session("s1")
+    (p / "tests").mkdir()
+    (p / "tests" / "test_tool.py").write_text(PASSING)
+    gates = p / ".claude" / "gates" / "g"
+    gates.mkdir(parents=True)
+    (gates / "request.md").write_text("Make parse() return the line it is given\n")
+    code, out = cli("start", "Fix parse", "--gate-path", str(gates), "--gate",
+                    f"{shlex.quote(sys.executable)} -m pytest -q -p no:cacheprovider tests")
+    assert code == 0, out
+    (p / "src" / "tool.py").write_text("def parse(line):\n    return line  # fixed\n")
+    code, out = cli("close", out["slug"])
+    assert code == 0 and out["complete"], out
+
+
+def _transcript(tmp_path, *said):
+    import json
+    path = tmp_path / "transcript.jsonl"
+    path.write_text("".join(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+        {"type": "text", "text": text}]}}) + "\n" for text in said))
+    return str(path)
+
+
+def _call(cli, session, command, stdout, transcript=None, event="PostToolUse", **extra):
+    payload = {"session_id": session, "tool_name": "Bash", "tool_input": {"command": command},
+               "tool_response": {"stdout": stdout, "stderr": ""}, **extra}
+    if transcript:
+        payload["transcript_path"] = transcript
+    return cli.hook(event, payload)
+
+
+def _context(out):
+    return out["hookSpecificOutput"]["additionalContext"]
+
+
+def test_the_next_session_is_told_where_a_cut_off_session_stopped(project, tmp_path):
+    p, cli = project
+    cli.new_session("s1")
+    _thin(p, cli)
+    said = _transcript(tmp_path, "I'll read the parser.", "Pages are found now, but the text is still empty.")
+    _call(cli, "s1", "python probe.py hello.pdf", "contents [] res {'Font': 1}", said)
+    text = _context(cli.new_session("s2"))
+    assert "Where the last session stopped" in text, text
+    assert "the text is still empty" in text and "python probe.py hello.pdf" in text and "contents []" in text, text
+    assert "I'll read the parser" not in text  # only the last thing it said
+
+
+def test_a_session_is_not_told_about_its_own_calls(project, tmp_path):
+    p, cli = project
+    cli.new_session("s1")
+    _thin(p, cli)
+    _call(cli, "s1", "python probe.py", "contents []", _transcript(tmp_path, "The text is still empty."))
+    out = cli.hook("SessionStart", {"session_id": "s1", "source": "compact"})
+    assert "Where the last session stopped" not in _context(out)
+
+
+def test_a_session_that_ended_on_check_leaves_nothing_more_to_tell(project, tmp_path):
+    p, cli = project
+    cli.new_session("s1")
+    _thin(p, cli)
+    said = _transcript(tmp_path, "The text is still empty.")
+    _call(cli, "s1", "python probe.py", "contents []", said)
+    _call(cli, "s1", f'python3 "/x/scripts/harness.py" --runtime claude --project "{p}" check {SLUG} --did a --next b',
+          "{}", said)
+    assert "Where the last session stopped" not in _context(cli.new_session("s2"))
+
+
+def test_a_failed_call_is_kept_too(project, tmp_path):
+    p, cli = project
+    cli.new_session("s1")
+    _thin(p, cli)
+    cli.hook("PostToolUseFailure", {"session_id": "s1", "tool_name": "Bash",
+                                    "tool_input": {"command": "python probe.py"},
+                                    "error": "Traceback: KeyError: 'Contents'"})
+    text = _context(cli.new_session("s2"))
+    assert "python probe.py" in text and "KeyError: 'Contents'" in text, text
+
+
+def test_a_reviewer_or_other_subagent_call_is_not_kept(project, tmp_path):
+    p, cli = project
+    cli.new_session("s1")
+    _thin(p, cli)
+    _call(cli, "s1", "cat notes.txt", "subagent output", agent_id="a1")
+    assert "Where the last session stopped" not in _context(cli.new_session("s2"))
+
+
+def test_long_output_is_cut_to_its_end_and_a_bad_transcript_is_ignored(project, tmp_path):
+    p, cli = project
+    cli.new_session("s1")
+    _thin(p, cli)
+    _call(cli, "s1", "python probe.py", "x" * 5000 + " THE END", str(tmp_path / "missing.jsonl"))
+    text = _context(cli.new_session("s2"))
+    assert "THE END" in text and "x" * 1000 not in text, text
+
+
+def test_no_goal_no_trail(project, tmp_path):
+    p, cli = project
+    cli.new_session("s1")
+    _call(cli, "s1", "ls", "a b c", _transcript(tmp_path, "Looking around."))
+    assert "Where the last session stopped" not in _context(cli.new_session("s2"))
+
+
+def test_a_later_goal_keeps_the_first_goals_request(project):
+    # mpmath: the second goal's request.md read "Remaining placeholder: lambertw in mpmath/_elem.py", and `close`
+    # completed that goal while the hidden score was 0.
+    p, cli = project
+    cli.new_session("s1")
+    _thin(p, cli)
+    _build(p)
+    installable(p)
+    assert cli("close", SLUG)[0] == 0
+    later = p / ".claude" / "gates" / "later"
+    later.mkdir(parents=True)
+    (later / "request.md").write_text("Remaining placeholder: Reader.read\n")
+    code, out = cli("start", "Finish Reader", "--gate-path", str(later), "--gate",
+                    f"{shlex.quote(sys.executable)} -m pytest -q -p no:cacheprovider tests")
+    assert code == 0, out
+    text = (later / "request.md").read_text()
+    assert text.startswith("Remaining placeholder: Reader.read") and "Build the library described in SPEC.md" in text
+    assert "earlier_request" in out and (later / surface.FILE).is_file(), out  # the spec is still found through it
+
+
+def test_a_later_goal_with_the_same_request_is_left_alone(project):
+    p, cli = project
+    cli.new_session("s1")
+    _thin(p, cli)
+    _build(p)
+    installable(p)
+    assert cli("close", SLUG)[0] == 0
+    later = p / ".claude" / "gates" / "later"
+    later.mkdir(parents=True)
+    (later / "request.md").write_text("Build the library  described in SPEC.md\n\n")
+    code, out = cli("start", "Build the tool", "--gate-path", str(later), "--gate",
+                    f"{shlex.quote(sys.executable)} -m pytest -q -p no:cacheprovider tests")
+    assert code == 0 and "earlier_request" not in out, out
+    assert (later / "request.md").read_text() == "Build the library  described in SPEC.md\n\n"
+
+
+def test_the_thin_skill_asks_for_a_test_of_the_main_use_and_names_the_trail():
+    flat = " ".join(SKILL.read_text().split())
+    for phrase in ("main use end to end", "Where the last session stopped", "gate ran"):
         assert phrase in flat, phrase

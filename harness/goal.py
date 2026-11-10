@@ -694,6 +694,51 @@ def install_check(state: dict, observed_hash: str | None) -> dict | None:
     except Exception:
         return None
 
+SMALL_GATE_NAMES = 10
+_TESTS_PASSED = re.compile(r"\b(\d+) passed\b")
+_SURFACE_NAMES = re.compile(r"^NAMES = \[(.*?)^\]", re.M | re.S)
+
+
+def small_gate(state: dict, gate_output: str) -> str | None:
+    """What to say when a thin goal's gate ran fewer tests than its request names modules and public names (at most
+    SMALL_GATE_NAMES are asked for), or None. Only a pytest count is read, and only a request that names a package's
+    surface is held to it: "make this test pass" closes on one test.
+
+    E2E-SWE thin run, pdfminer: the gate was one import test for ten sessions, text extraction never ran in it, and
+    `close` completed the goal at 2 of 33 hidden tests (9a72fb4's own gate ran 29 to 31 tests and scored 97)."""
+    if not state.get("thin") or not state.get("gate_path"):
+        return None
+    try:
+        body = _SURFACE_NAMES.search((Path(state["gate_path"]) / surface.FILE).read_text(errors="replace"))
+    except OSError:
+        return None
+    names = len(re.findall(r"^\s*['\"]", body.group(1), re.M)) if body else 0
+    ran = _TESTS_PASSED.findall(gate_output or "")
+    if not names or not ran:
+        return None
+    count, wanted = int(ran[-1]), min(names, SMALL_GATE_NAMES)
+    if count >= wanted:
+        return None
+    return (f"The gate ran {count} test{'' if count == 1 else 's'}, and the request names {names} modules and "
+            "public names: a gate that small cannot show the request is met. Add tests beside it that run the "
+            "deliverable's main use end to end on a real input, with every expected value taken from the request, "
+            f"until the gate runs at least {wanted}; fix what they find, then run close again.")
+
+
+def _hold_small_gate(state: dict, observed_hash: str) -> None:
+    """Stop completion on a small gate, once the gate passes and every name the request gives imports (a failing
+    gate or a missing name is the more useful thing to hear first)."""
+    if state["status"] != "active" or state["gate"]["kind"] != "command":
+        return
+    record = evidence.passing_record(state, observed_hash)
+    message = small_gate(state, record.get("gate_output") or "") if record else None
+    if not message:
+        return
+    found = surface_check(state, observed_hash)
+    if found and found["blocking"] and found["failed"]:
+        return
+    raise GateNotPassed(message)
+
 
 def advisory_sections(state: dict) -> str:
     """The `close` note listing unbuilt or unquoted sections, or "" when there are none or they cannot be read."""
@@ -1066,6 +1111,7 @@ def _apply_coverage_completion(state: dict, observed_hash: str, gate_output: str
     state["completed_at"] = _now()
 
 def _apply_completion(state: dict, observed_hash: str, gate_output: str, allow_unreviewed: bool = False) -> None:
+    _hold_small_gate(state, observed_hash)
     if state["status"] != "active":
         raise GoalClosed(f"cannot complete: goal status is {state['status']!r}")
     if state["gate"]["kind"] == "coverage":

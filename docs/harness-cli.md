@@ -186,7 +186,14 @@ cannot. A hook reads saved results; `check`, `observe` and `close` run the code.
   raise `NotImplementedError` (abstract methods aside) or that call themselves
   placeholders. `install-hooks` gives the hook a 300-second timeout (an older
   30-second one is raised) and keeps a longer timeout you set.
-- `PostToolUse` renews the lease of the session's open attempt.
+- `PostToolUse` renews the lease of the session's open attempt. While a goal is
+  active, it and `PostToolUseFailure` also keep the session's latest call in
+  `notes/last-call.json`: the last thing the agent said (read from the end of the
+  session's transcript, up to 400 characters), the command or tool input (300)
+  and the end of what came back (400). A subagent's calls are not kept, and a
+  `check` or `close` call clears the file, since it saves the next action itself.
+  The next session's `SessionStart` message ends with `Where the last session
+  stopped`, so a session cut off before `check` still hands on what it had found.
 - `Stop` completes or finalizes goals whose recorded evidence already allows it
   (the `close --if-ready` rules, so never on files unchanged since the
   baseline); it never runs the gate, and the surface gate and install check
@@ -210,7 +217,18 @@ non-blank `request.md` (the request, verbatim). With no `requirements.md` there,
 goal is thin (exp/thin): it has no requirement lines and, without `--review`, no
 reviewer; its gate is the command given plus the surface gate, the install check and
 the advisory spec examples below. This is fixed at `start`: a goal that began with
-a `requirements.md` keeps needing it. A `requirements.md` that is there must hold at
+a `requirements.md` keeps needing it. Two more things hold for a thin goal:
+
+- **Small gate.** When the surface gate lists N names and the gate's pytest run
+  passed fewer than min(N, 10) tests, `close` does not complete and `missing` says
+  how many tests ran; `check` reports the same as `small_gate`. A gate whose
+  output has no pytest count, or a request that names no package, is not counted.
+- **Earlier request.** When the project already has a goal with another gate
+  directory, `start` appends the first goal's `request.md` to the new one under
+  `## Earlier request for this project (kept by Horizon)`, unless the new text
+  already holds it, and reports `earlier_request`.
+
+ A `requirements.md` that is there must hold at
 least one requirement line. A requirement line starts with an id (`R1`, `R2`, or
 a sub-id such as `R1a` or `R1.2`) after any heading, list, checkbox or numbering
 marker and emphasis; the tags `[gate]`, `[review]`, `[unverifiable]` and

@@ -620,6 +620,104 @@ def _last_commit_files(limit: int = 12) -> list[str]:
     return names[:limit] + (["…"] if len(names) > limit else [])
 
 
+TRAIL_SAID, TRAIL_COMMAND, TRAIL_OUTPUT = 400, 300, 400
+TRANSCRIPT_TAIL = 200_000  # bytes read from the end of the session's transcript
+# A `check` or `close` saves the next action itself, so a session that ended on one has nothing more to tell.
+_SAVED_BY_HORIZON = re.compile(r"harness\.py\b.*?\s(?:check|close)\s", re.S)
+
+
+def _trail_path() -> Path:
+    path = paths.harness_root() / "notes" / "last-call.json"  # bookkeeping: never hashed
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _flat(text, limit: int, end: bool = False) -> str:
+    text = " ".join(str(text or "").split())
+    if len(text) <= limit:
+        return text
+    return "…" + text[-limit:] if end else text[:limit] + "…"
+
+
+def _last_said(transcript) -> str:
+    """The last thing the session's own agent said, read from the end of its transcript; "" when it cannot be."""
+    if not isinstance(transcript, str) or not transcript:
+        return ""
+    try:
+        with open(transcript, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, handle.tell() - TRANSCRIPT_TAIL))
+            lines = handle.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return ""
+    for line in reversed(lines):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get("type") != "assistant" or entry.get("isSidechain"):
+            continue
+        content = (entry.get("message") or {}).get("content")
+        texts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"] \
+            if isinstance(content, list) else []
+        texts = [t for t in texts if t.strip()]
+        if texts:
+            return texts[-1]
+    return ""
+
+
+def _call_text(payload: dict) -> tuple[str, str]:
+    """A tool call as (what was run, what came back)."""
+    given = payload.get("tool_input")
+    if isinstance(given, dict):
+        ran = given.get("command") or given.get("file_path") or given.get("pattern") or json.dumps(given)
+    else:
+        ran = str(given or "")
+    name = payload.get("tool_name")
+    if isinstance(name, str) and name != "Bash":
+        ran = f"{name} {ran}"
+    back = payload.get("error") or payload.get("tool_response")
+    if isinstance(back, dict):
+        parts = [back.get(k) for k in ("stdout", "stderr") if isinstance(back.get(k), str) and back.get(k).strip()]
+        back = "\n".join(parts) if parts else ("" if "stdout" in back else json.dumps(back))
+    return str(ran), str(back or "")
+
+
+def _record_trail(session: str | None, payload: dict) -> None:
+    """Keep the session's latest call and what its agent last said, at no model call, so the next session can be
+    told where this one stopped. A subagent's calls are not kept.
+
+    E2E-SWE thin run, pdfminer: session 4 said "Pages are found now, but the text is still empty", ran a probe that
+    printed `contents []`, and was cut off by the call cap on that call. No `check` had run, so session 5 started
+    from the baseline, worked on something else, and the goal closed with every page's text still empty."""
+    if not session or not isinstance(payload, dict) or payload.get("agent_id") or payload.get("agent_type"):
+        return
+    if not _active_goals():
+        return
+    path = _trail_path()
+    ran, back = _call_text(payload)
+    if _SAVED_BY_HORIZON.search(ran + " "):
+        path.unlink(missing_ok=True)
+        return
+    record = {"session": session, "said": _flat(_last_said(payload.get("transcript_path")), TRAIL_SAID),
+              "command": _flat(ran, TRAIL_COMMAND), "output": _flat(back, TRAIL_OUTPUT, end=True)}
+    path.write_text(json.dumps(record))
+
+
+def _trail_line(session: str | None) -> str:
+    """Where another session stopped, for a session's start; "" for the session's own calls."""
+    try:
+        record = json.loads(_trail_path().read_text())
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(record, dict) or record.get("session") == session or not record.get("command"):
+        return ""
+    said = f' it said "{record["said"]}";' if record.get("said") else ""
+    printed = f', which gave: {record["output"]}' if record.get("output") else ""
+    return ("Where the last session stopped (it ended after this call, before `check` could save it):"
+            f"{said} its last call was `{record['command']}`{printed}. If that left a problem open, take it up "
+            "first.")
+
 def _session_start(session: str | None, source: str | None = None) -> dict | None:
     if session:
         root = paths.harness_root()
@@ -787,16 +885,31 @@ def _stop(again: bool = False, session: str | None = None) -> dict | None:
                        "decision, make it, record it with `note --fact`, and keep building.")}
 
 
+def _with_trail(out: dict | None, session: str | None) -> dict | None:
+    """Add where the last session stopped to a session-start message, while a goal is active."""
+    try:
+        line = _trail_line(session) if out and _active_goals() else ""
+        if line:
+            out["hookSpecificOutput"]["additionalContext"] += "\n" + line
+    except Exception:
+        pass
+    return out
+
+
 def _dispatch(event: str, payload: dict) -> dict | None:
     session = payload.get("session_id") if isinstance(payload, dict) else None
     if not isinstance(session, str):
         session = None
     if event == "SessionStart":
         source = payload.get("source") if isinstance(payload, dict) else None
-        return _session_start(session, source if isinstance(source, str) else None)
+        return _with_trail(_session_start(session, source if isinstance(source, str) else None), session)
     if event in ("PostToolUse", "PostToolUseFailure"):
         try:
             reviewing.count_call(session)
+        except Exception:
+            pass
+        try:
+            _record_trail(session, payload)
         except Exception:
             pass
         if event == "PostToolUseFailure":

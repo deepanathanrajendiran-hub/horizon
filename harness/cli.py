@@ -180,6 +180,16 @@ def _with_examples(report: dict, state: dict) -> dict:
     if installed and not installed.get("ok") and not installed.get("error") and "install_advisory" not in report:
         report["install_problem"] = (install_gate.problem(installed) + ". `close` waits for it: until the package "
                                      "installs, every test that imports it fails.")
+    try:  # `check` says it before `close` holds on it
+        fresh = goal.load(state["slug"])
+        last = (fresh.get("checkpoints") or [None])[-1]
+        small = (goal.small_gate(fresh, last.get("gate_output") or "")
+                 if last and last.get("gate") == "pass" and fresh["status"] == "active" and "missing" not in report
+                 else None)
+    except Exception:
+        small = None
+    if small:
+        report["small_gate"] = small
     return report
 
 
@@ -466,6 +476,8 @@ def dispatch(args) -> tuple[dict, int]:
         report["observation"] = goal.latest_observation(state)
         report["other_goals"] = goal_rows(exclude=state["slug"])
         report.update(installed)
+        if getattr(args, "earlier_request", None):
+            report["earlier_request"] = args.earlier_request
         if getattr(args, "spec_examples", None) is not None:
             report["spec_examples"] = args.spec_examples
         if getattr(args, "surface_gate", None):
@@ -538,10 +550,52 @@ def dispatch(args) -> tuple[dict, int]:
     raise ValueError(f"Unknown action: {args.action}")
 
 
+EARLIER_REQUEST = "## Earlier request for this project (kept by Horizon)"
+
+
+def _carry_request(args) -> None:
+    """`start` of a thin goal in a project that already had one: keep the first goal's request in the new
+    request.md, below what the agent wrote, unless the new text already holds it. The surface gate and the spec
+    examples are then still written from the spec the first request names.
+
+    E2E-SWE thin run, mpmath: after one goal completed, the next one's request.md read "Remaining placeholder:
+    lambertw in mpmath/_elem.py", and `close` completed that goal while no hidden test could be collected."""
+    if args.action != "start" or not args.gate_path:
+        return
+    try:
+        new = Path(args.gate_path).resolve()
+        target = new / "request.md"
+        if not target.is_file() or (new / "requirements.md").exists():
+            return
+        first = None
+        for path in paths.goals_dir().glob("*.json"):
+            if path.name.endswith(".leases.json"):
+                continue
+            try:
+                state = json.loads(path.read_text())
+                earlier = Path(state["gate_path"]).resolve()
+                started = str((state.get("used") or {}).get("started") or "")
+                text = (earlier / "request.md").read_text(errors="replace").split(EARLIER_REQUEST)[0].strip()
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+            if text and earlier != new and (first is None or started < first[0]):
+                first = (started, state.get("slug") or path.stem, text)
+        if first is None:
+            return
+        written = target.read_text(errors="replace")
+        if " ".join(first[2].split()) in " ".join(written.split()):
+            return
+        target.write_text(written.rstrip("\n") + f"\n\n{EARLIER_REQUEST}\n\n{first[2]}\n")
+        args.earlier_request = (f"Horizon added the request of this project's first goal ({first[1]}) to "
+                                f"{target}: this goal is done only when that request is met too.")
+    except Exception:
+        pass
+
 def _start_surface(args) -> None:
     """`start`: write the surface gate into the gate directory before the baseline runs. With `--surface-spec`, from
     that spec; otherwise from the spec the request names, when it gives a Python package's names (exp/surface-check:
     no build passed the flag, and two scored 0 on a module their spec named). A file already there is kept."""
+    _carry_request(args)
     if args.action != "start":
         return
     if args.surface_spec is None:

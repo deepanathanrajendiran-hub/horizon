@@ -44,7 +44,9 @@ python3 "$HARNESS" --runtime claude --project "$PROJECT" start "Requested outcom
 - **The gate** is one command, with no pipe or `;`, that runs the work's tests: the project's own and the ones you
   add beside them as you build. Name the Python that has the project's dependencies, as in
   `/path/to/venv/bin/python -m pytest tests -q`: Horizon runs its own three checks with that same Python. If there
-  are no tests yet, write one that imports the entry point the request names, then start.
+  are no tests yet, write one that imports the entry point the request names, then start. Once the entry point
+  works, the next test you add runs the deliverable's main use end to end on a real input, with the result the
+  request states: a gate of import tests passes while the product does nothing.
 - **What `start` writes:** from the request and the Markdown files it names, a test of every module and public name
   they give and a file of their code examples. Never edit either. `start` also runs the gate once and prints the
   baseline `observation`; read it, and do not run `check` for it.
@@ -99,14 +101,17 @@ The session-start message shows the next action, the gate's latest result with t
 notes, the files the last commit changed and every file with its line count. Do not run `status`, `ls` or `wc` to
 get these again, and do not re-read the request unless the next action needs a part of it. Make your first edit
 within your first 5 tool calls; never spend a session only reading. When the message says `Plateau`, do what it
-says in that session.
+says in that session. `Where the last session stopped` is the last thing that session said and ran before it was
+cut off, which no `check` saved: if it names a problem, that problem comes before the next action.
 
 ## Closing
 
 When every part of the request is built and run, run `close`. It completes the goal when the gate passes on the
 current files and Horizon's checks hold; otherwise `missing` says what to fix. Its output is long: `complete` and
-`missing` come first, and they are all you need. If it says a baseline test file changed, restore that file and fix
-the code instead, unless a person is there to approve the change with `approve-test-change`.
+`missing` come first, and they are all you need. If it says the gate ran too few tests (`check` says so earlier,
+as `small_gate`), add tests of the main use and of each part of the request, then fix what they find. If it says a
+baseline test file changed, restore that file and fix the code instead, unless a person is there to approve the
+change with `approve-test-change`.
 
 ```bash
 python3 "$HARNESS" --runtime claude --project "$PROJECT" close "$SLUG"
