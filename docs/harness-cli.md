@@ -181,15 +181,19 @@ cannot. A hook reads saved results; `check`, `observe` and `close` run the code.
   its parts, the files the last commit changed (relative to the repository root),
   and the project's files with their line counts, up to 40, tracked files and
   code files first; files in dot-directories, environments, `build`, `dist` and
-  `*.egg-info` are left out, and a file over 1 MB shows its size instead. Last,
+  `*.egg-info` are left out, and a file over 1 MB shows its size instead. A
+  project with more than 200 files is summed up instead: the file count of each
+  folder (two levels, the ten largest) and the files that differ from the last
+  commit, with their line counts. Last, while a goal is active,
   `Placeholders still to build:` lists source files with functions that have
   no body yet: a docstring at most, then `pass`, `...` or
   `raise NotImplementedError`, and either that raise or a docstring that says
   placeholder. Not listed: a function that does work and raises on one path, a
   method another class of the project overrides, a method of an abstract base,
   a special method other than `__init__`, a raise whose message says who
-  must supply the method ("must implement ..."), and a function a recorded fact
-  names, with its file, as "by design". More lines appear when they apply:
+  must supply the method ("must implement ..."), a function a recorded fact
+  names, with its file, as "by design", and a placeholder the project already
+  had when its first thin goal started. More lines appear when they apply:
   `The last close passed every check and asked for the work to be gone through
   against the request`, with the request's parts, from the `close` that asked
   until a `check` is saved (see **Request check**). After the missing
@@ -242,12 +246,21 @@ a `requirements.md` keeps needing it. Two more things hold for a thin goal:
 - **Request check.** The first `close` that would complete a thin goal does not:
   `missing` lists the parts of the request (the headings of `request.md` and of
   each Markdown file it names, at the deepest level that gives at most 30 per
-  file) and asks for the work to be used as each part describes and compared
-  with what the request states. A `check` saved after that releases it, and the
+  file) and asks for one pass through them: run the work as each part describes,
+  print what comes back, and read it against the request; where they differ the
+  code changes, never a test's expectation. A `check` saved after that releases it, and the
   next `close` completes. Not asked when the request has fewer than 2 headed
   parts, when the files are unchanged since the baseline, or when the budget is
   spent. The Stop hook's `close --if-ready` never starts it and never completes
   a goal that has not been through it.
+- **Other kinds of work.** The surface gate, the spec examples and the install
+  check are for Python work: the request shows Python (a Python code block, a
+  `>>>` prompt, a `.py` file, pip, pytest or the word), or the project has Python
+  source and the request's code blocks are not in another language. The install
+  check also needs the request itself to show Python, so "run `npm install`"
+  starts none. Placeholders are read from Python source only. A request for Go,
+  for a Node project or in one sentence gets the goal, its gate, the notes and
+  (with headed parts) the request check, and nothing else.
 - **Small gate.** When the surface gate lists N names and the gate's pytest run
   passed fewer than min(N, 10) tests, `close` does not complete and `missing` says
   how many tests ran; `check` reports the same as `small_gate`. A gate whose

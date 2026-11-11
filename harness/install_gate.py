@@ -43,8 +43,10 @@ PIP = ["-m", "pip", "install", "-e", ".", "--no-build-isolation", "--use-pep517"
 
 
 def applies(request_text: str) -> bool:
-    """Whether the request says the project gets installed (an install command, a packaging file, the word)."""
-    return bool(_INSTALL_WORDS.search(request_text or ""))
+    """Whether the request says the project gets installed (an install command, a packaging file, the word) and
+    shows that the work is Python. The word alone is not enough: "run `npm install`" and "do not install anything"
+    in a request for a change to an existing project are no reason to build it with pip."""
+    return bool(_INSTALL_WORDS.search(request_text or "")) and surface.python_text(request_text or "")
 
 
 def named_scripts(request_text: str) -> list[str]:

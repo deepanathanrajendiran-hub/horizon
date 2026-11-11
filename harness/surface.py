@@ -534,7 +534,45 @@ def write_gate(spec: Path, package: str, out: Path) -> int:
 FILE = "test_surface.py"
 RUN_TIMEOUT_S = 120
 # A name whose dotted references all end in one of these is a file (setup.sh, pyproject.toml), not a package.
-_FILE_SUFFIXES = _NOT_REFS | {"sh", "bat", "ps1", "lock", "json", "csv", "xml", "gz", "zip", "in", "log", "lst"}
+_FILE_SUFFIXES = _NOT_REFS | {"sh", "bat", "ps1", "lock", "json", "csv", "xml", "gz", "zip", "in", "log", "lst",
+                              # another language's source file (`index.js`, `parser.go`) is not a Python package
+                              "js", "jsx", "mjs", "cjs", "ts", "tsx", "go", "rs", "java", "kt", "rb", "php", "cpp",
+                              "hpp", "cs", "swift", "scala", "css", "scss", "sql", "proto", "vue", "lua"}
+# Markdown fence tags of other languages: a request whose code is all in these gives no Python names.
+_OTHER_LANGUAGES = {"go", "golang", "js", "javascript", "jsx", "ts", "typescript", "tsx", "rust", "rs", "java",
+                    "kotlin", "kt", "ruby", "rb", "php", "c", "cpp", "c++", "csharp", "cs", "swift", "scala",
+                    "elixir", "haskell", "lua", "zig", "dart"}
+_PYTHON_FENCE = re.compile(r"^\s{0,3}(?:`{3,}|~{3,})\s*(?:python|py|python3|pycon|ipython)\b", re.M | re.I)
+_ANY_FENCE = re.compile(r"^\s{0,3}(?:`{3,}|~{3,})[ \t]*([A-Za-z+#]+)", re.M)
+_PYTHON_WORDS = re.compile(r"^\s*>>>\s|\bpip3?\s+install\b|\bpyproject\.toml\b|\bpytest\b|\bPython\b|[\w/-]\.py\b",
+                           re.M)
+
+
+def python_text(text: str) -> bool:
+    """Whether the text itself shows the work is Python: a Python code block, a prompt, a `.py` file, pip, pytest
+    or the word."""
+    return bool(_PYTHON_FENCE.search(text or "") or _PYTHON_WORDS.search(text or ""))
+
+
+def _has_python_source(root) -> bool:
+    try:
+        out = subprocess.run(["git", "-C", str(root), "ls-files", "--cached", "--others", "--exclude-standard",
+                              "--", "*.py"], capture_output=True, timeout=10)
+        return out.returncode == 0 and bool(out.stdout.strip())
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def python_work(text: str, root) -> bool:
+    """Whether the checks of a Python package's names apply to this request in this project: the text shows Python,
+    or the project has Python source and the request's code blocks are not all in another language. A Go request's
+    `tool.Parse` is not a module to import, and a pip install says nothing about a Node project."""
+    if python_text(text):
+        return True
+    tags = {tag.lower() for tag in _ANY_FENCE.findall(text or "")}
+    if tags & _OTHER_LANGUAGES:
+        return False
+    return _has_python_source(root)
 _NOT_PACKAGES = set(getattr(sys, "stdlib_module_names", ())) | {"pytest", "__future__", "self", "cls"}
 _IMPORT_LINE = re.compile(r"^\s*(?:>>>\s*)?(?:from\s+([A-Za-z_]\w*)[\w.]*\s+import\b|import\s+([A-Za-z_]\w*))", re.M)
 _DOTTED = re.compile(r"(?<![\w.])([A-Za-z_]\w*)\.[A-Za-z_]\w*")
@@ -612,6 +650,9 @@ def find_spec(gate_path, root) -> tuple[Path, str] | None:
     Python package's names."""
     import sections
     found = sections._goal_inputs(str(gate_path) if gate_path else None, str(root))
+    whole = "\n".join(text for _, text in found)
+    if not python_work(whole, root):
+        return None
     for path, text in sorted(found, key=lambda pair: -len(pair[1].splitlines())):
         package = guess_package(text)
         if package:

@@ -54,10 +54,10 @@ python3 "$HARNESS" --runtime claude --project "$PROJECT" start "Requested outcom
 
 ## Working
 
-1. **Make the deliverable usable first.** In the first session, create the entry point a user calls (the package,
-   module or command the request names) and every module it imports, so that importing or running it works before
-   its parts are filled in. When the request says how the work is installed or run (an install script, a package
-   install, a command), make that work in a clean copy, never only through `PYTHONPATH` or the source tree.
+1. **Make the deliverable usable first.** For new work, create in the first session the entry point a user calls
+   (the package, module or command named) and every module it imports, so that it imports or runs before its
+   parts are filled in. For a change to existing code, run its tests before your first edit. When the request
+   says how the work is installed or run, make that work in a clean copy, never only through `PYTHONPATH`.
 2. **Write straight into the real files,** never into scratch parts to join later, and keep the work runnable after
    every write: a session can end at any call.
 3. **Run what you wrote, in the same session,** the way a user would. Code never run is a guess.
@@ -109,10 +109,10 @@ cut off, which no `check` saved: if it names a problem, that problem comes befor
 
 When every part of the request is built and run, run `close`. Its output is long: `complete` and `missing` come
 first, and they are all you need; `missing` says what to fix. The first `close` that passes every check does not
-complete the goal: it lists the request's parts, for you to use the work as each part describes and compare with
-what the request states. Do that, save it with `check`, and `close` again. If it says the gate ran too few tests
-(`small_gate` in `check`), add tests of the main use and of each part of the request, then fix what they find. If
-a baseline test file changed, restore it and fix the code, unless a person approves with `approve-test-change`.
+complete the goal: it lists the request's parts. Run the work as each part describes, print the result and read
+it against the request; where they differ, change the code, not a test. Then `check`, and `close` again. If the
+gate ran too few tests (`small_gate` in `check`), add tests of the main use and of each part of the request. If a
+baseline test file changed, restore it and fix the code, unless a person approves with `approve-test-change`.
 
 ```bash
 python3 "$HARNESS" --runtime claude --project "$PROJECT" close "$SLUG"

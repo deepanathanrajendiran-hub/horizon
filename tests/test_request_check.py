@@ -206,3 +206,16 @@ def test_a_note_about_another_file_covers_nothing_here(repo):
 def test_the_file_name_is_not_read_as_a_function_name(repo):
     (repo / "pkg" / "upload.py").write_text("def upload():\n    raise NotImplementedError\n")
     assert _names(repo, ["pkg/upload.py raises NotImplementedError by design"]) == {"pkg/upload.py": ["upload"]}
+
+# --- what the check asks for -----------------------------------------------------------------------------------
+
+def test_the_check_asks_for_printed_output_and_for_the_code_to_change(project):
+    # thin5 run: sessions turned the check into new tests and, where a test disagreed with the code, changed the
+    # test (django-modelcluster twice, dnachisel twice; dnachisel gained one hidden test in five sessions).
+    p, cli = project
+    _ready(p, cli)
+    asked = _asked(cli("close", SLUG)[1])[0]
+    assert "prints what comes back" in asked and "no expected values" in asked, asked
+    assert "change the code, never a test's expectation" in asked and "one pass" in asked, asked
+    context = _context(cli.new_session("s2"))
+    assert "never a test's expectation" in context, context

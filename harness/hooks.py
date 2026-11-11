@@ -28,6 +28,7 @@ import install_gate
 import hookguard
 import reviewing
 import stubs
+import collections
 
 MARK = "horizon-hook"
 # PostToolUse fires only after a tool succeeds; PostToolUseFailure after one fails (a Bash command exiting non-zero),
@@ -246,8 +247,53 @@ def _gate_digest(output: str) -> str:
     return ". " + " ".join(parts)
 
 
-def _files_line(root: Path, limit: int = 40) -> str:
-    """The project's files with their line counts, so a session need not list them. Never raises."""
+def _line_count(path: Path) -> str:
+    size = path.stat().st_size
+    if size > 1024 * 1024:
+        return f"({size // (1024 * 1024)} MB)"
+    data = path.read_bytes()
+    return str(data.count(b"\n") + (1 if data and not data.endswith(b"\n") else 0))
+
+
+def _folder(name: str) -> str:
+    parts = name.split("/")
+    if len(parts) == 1:
+        return "(top level)"
+    return "/".join(parts[:2]) if len(parts) > 2 else parts[0]
+
+
+def _files_summary(root: Path, names: list[str], folders: int = 10, touched: int = 20) -> str:
+    """A project too large to list: how many files each folder holds, and the files that differ from the last commit
+    (the work in hand), with their line counts. A list of the first 40 of 5,000 files says nothing about where the
+    work is."""
+    counts = collections.Counter(_folder(name) for name in names)
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    shown = ", ".join(f"{folder} ({count})" for folder, count in ranked[:folders])
+    more = f", and {len(ranked) - folders} more folders" if len(ranked) > folders else ""
+    out = f"Files: {len(names)} files, too many to list; by folder: {shown}{more}."
+    known = set(names)
+    try:
+        status = subprocess.run(["git", "-C", str(root), "status", "--porcelain", "-z", "--untracked-files=all"],
+                                capture_output=True, timeout=10)
+        changed = [entry[3:] for entry in status.stdout.decode(errors="replace").split("\0")
+                   if len(entry) > 3 and entry[:2].strip() and entry[3:] in known]
+    except (OSError, subprocess.SubprocessError):
+        changed = []
+    listed = []
+    for name in changed[:touched]:
+        try:
+            listed.append(f"{name} {_line_count(root / name)}")
+        except OSError:
+            continue
+    if listed:
+        extra = f" (and {len(changed) - touched} more)" if len(changed) > touched else ""
+        out += " Changed since the last commit (lines): " + ", ".join(listed) + extra + "."
+    return out
+
+
+def _files_line(root: Path, limit: int = 40, large: int = 200) -> str:
+    """The project's files with their line counts, so a session need not list them: up to `limit` of them, code
+    first. A project with more than `large` files is summed up by folder instead (`_files_summary`). Never raises."""
     try:
         listed = []
         for extra in ([], ["--others", "--exclude-standard"]):  # tracked files first
@@ -262,21 +308,14 @@ def _files_line(root: Path, limit: int = 40) -> str:
             if any(p.startswith(".") or p in _NOT_SOURCE or p.endswith(".egg-info") for p in parts[:-1]):
                 continue
             names.append(name)
+        if len(names) > large:
+            return _files_summary(root, names)
         more = ""
         if len(names) > limit:
             code = [n for n in names if n.endswith(_CODE)]
             more = f" (and {len(names) - limit} more)"
             names = (code + [n for n in names if n not in code])[:limit]
-        shown = []
-        for name in names:
-            path = root / name
-            size = path.stat().st_size
-            if size > 1024 * 1024:
-                shown.append(f"{name} ({size // (1024 * 1024)} MB)")
-                continue
-            data = path.read_bytes()
-            count = data.count(b"\n") + (1 if data and not data.endswith(b"\n") else 0)
-            shown.append(f"{name} {count}")
+        shown = [f"{name} {_line_count(root / name)}" for name in names]
         return ("Files (lines): " + ", ".join(shown) + more + ".") if shown else ""
     except Exception:
         return ""
@@ -306,11 +345,12 @@ def _resume_line(state: dict) -> str:
     return out
 
 
-def _placeholders(root: Path, limit: int = 10, facts=()) -> str:
+def _placeholders(root: Path, limit: int = 10, facts=(), skip=()) -> str:
     """Source files with functions that are still placeholders (NL2Repo bench6 deepdiff: a green gate over five
-    placeholder modules). What counts, and what is an interface or a deliberate raise, is in `stubs`."""
+    placeholder modules). What counts, and what is an interface or a deliberate raise, is in `stubs`; `skip` holds
+    the ones the project had before the goal."""
     try:
-        found = stubs.find(root, facts)
+        found = stubs.find(root, facts, skip=skip)
     except Exception:
         return ""
     if not found:
@@ -413,8 +453,9 @@ def _request_check_line(state: dict) -> str:
     if not parts:
         return ""
     return (" The last `close` passed every check and asked for the work to be gone through against the request, "
-            f"part by part, before the goal completes: {parts}. Carry on with the parts not yet run: use the work "
-            "the way each part describes and compare with what the request states. Save what you find with "
+            f"part by part, before the goal completes: {parts}. Carry on with the parts not yet run: run the "
+            "work the way each part describes, print what comes back, and read it against the request's own "
+            "words. Where they differ, change the code, never a test's expectation. Save what you find with "
             "`check`, then run `close`.")
 
 def _unfinished_line(state: dict) -> str:
@@ -804,7 +845,9 @@ def _session_start(session: str | None, source: str | None = None) -> dict | Non
     files = _files_line(paths.project_root())
     if files:
         lines.append(files)
-    stubs = _placeholders(paths.project_root(), facts=known)
+    # Only for a goal's work: with no goal, a codebase's own unfinished corners are nobody's next action here.
+    before = [key for state in active for key in state.get("placeholders_at_start") or []]
+    stubs = _placeholders(paths.project_root(), facts=known, skip=before) if active else ""
     if stubs:
         lines.append(stubs)
     return {"hookSpecificOutput": {"hookEventName": "SessionStart",

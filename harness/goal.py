@@ -360,6 +360,7 @@ def _initial_state(goal, cwd, gate_kind, gate_value, max_turns,
         if not (Path(gate_path) / "requirements.md").exists():
             # Fixed at start: a goal that began with requirement lines keeps them when the file goes missing.
             state["thin"] = True
+            state["placeholders_at_start"] = _placeholders_at_start(cwd)
         if not any(_covers(watch, gate_path) for watch in state["watch_paths"]):
             state["watch_paths"].append(gate_path)
     if gate_kind == "command":
@@ -387,6 +388,34 @@ def _validate_state_execution(state: dict) -> None:
     if (any(isinstance(turn, bool) or not isinstance(turn, int) for turn in checkpoint_turns)
             or checkpoint_turns != terminal_turns):
         raise task_state.StateError("terminal attempts must correspond one-to-one with checkpoint turns")
+
+def _placeholders_at_start(cwd) -> list[str]:
+    """The placeholder functions the project had before its first thin goal (`file::name`), which no goal is held
+    to: an existing codebase's own `raise NotImplementedError` is not the work of a goal that changes something
+    else. A later goal of the same project takes the first goal's list, so what an earlier goal left unbuilt still
+    counts."""
+    first = None
+    try:
+        for path in paths.goals_dir().glob("*.json"):
+            if path.name.endswith(".leases.json"):
+                continue
+            try:
+                earlier = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            if not isinstance(earlier, dict) or not earlier.get("thin"):
+                continue
+            started = str((earlier.get("used") or {}).get("started") or "")
+            if first is None or started < first[0]:
+                first = (started, list(earlier.get("placeholders_at_start") or []))
+    except Exception:
+        first = None
+    if first is not None:
+        return first[1]
+    try:
+        return stubs.keys(stubs.find(cwd))
+    except Exception:
+        return []
 
 def create(goal, cwd, gate_kind, gate_value,
            max_turns=20, max_minutes=None, watch_paths=None, review_criterion=None,
@@ -749,7 +778,8 @@ def placeholders(state: dict) -> str | None:
     if not state.get("thin"):
         return None
     try:
-        found = stubs.find(state["cwd"], [f.get("text", "") for f in state.get("facts") or []])
+        found = stubs.find(state["cwd"], [f.get("text", "") for f in state.get("facts") or []],
+                           skip=state.get("placeholders_at_start") or ())
     except Exception:
         return None
     if not found:
@@ -815,12 +845,15 @@ def request_check(state: dict, observed_hash: str | None = None) -> str | None:
         return None
     return ("The gate passes, and the gate is your own tests: they agree with your reading of the request, not "
             "with the request. Before this goal completes, go through the request once more, part by part: "
-            f"{parts}. For each part, read it, then use the work the way that part describes in a short script "
-            "run with the gate's Python, and compare what comes back with what the request states: names, "
-            "arguments and their order, defaults, returned values, error types, output format. Fix every "
-            "difference in the code and add it to the tests, with the expected value copied from the request. "
-            "Save where you are with `check` (`--did` naming the parts you ran and what differed); when every "
-            "part is done, run `close` again and it completes.")
+            f"{parts}. This is one pass through the request, not a new set of tests. For each part, read it, then "
+            "run a short script or command that uses the work the way that part describes and prints what comes "
+            "back; write no expected values into it. Read what it printed against the request's own words: "
+            "names, arguments and their order, defaults, returned values, error types, output format. Where they "
+            "differ, the request is right: change the code, never a test's expectation, and add one test for "
+            "each difference you fixed, its value copied from the request. Where the request does not settle a "
+            "point, leave the code and record it with `note --finding`. Save where you are with `check` "
+            "(`--did` naming the parts you ran and what differed); when every part is done, run `close` again "
+            "and it completes.")
 
 
 def _hold_request_check(state: dict, observed_hash: str) -> None:

@@ -23,6 +23,7 @@ NOT_SOURCE = {"venv", "env", "site-packages", "node_modules", "build", "dist", "
 _ABSTRACT_NAME = re.compile(r"(?:Abstract|Base)(?:[A-Z_]|$)")
 _MARKED = re.compile(r"\bplaceholder\b", re.I)
 _SPECIAL = re.compile(r"__\w+__$")
+MODULE = "module marked placeholder"
 
 
 # `raise NotImplementedError('%s must implement match()' % ...)`: the library's user supplies this method (big run,
@@ -109,9 +110,17 @@ def _strip_paths(fact: str) -> str:
     return re.sub(r"\S+\.py\b", " ", fact)
 
 
-def find(root, facts=()) -> list[tuple[str, list[str]]]:
-    """[(file, [placeholder names])] for the project's source files, tests left out."""
+def keys(found: list[tuple[str, list[str]]]) -> list[str]:
+    """`file::name` for each placeholder found, the form `find(skip=...)` takes."""
+    return [f"{name}::{hit}" for name, hits in found for hit in hits]
+
+
+def find(root, facts=(), skip=()) -> list[tuple[str, list[str]]]:
+    """[(file, [placeholder names])] for the project's source files, tests left out. `skip` holds the `file::name`
+    of placeholders that were in the project before the goal: a codebase's own unfinished corners are not the
+    work of a goal that changes something else in it."""
     root = Path(root)
+    skip = set(skip)
     trees = {}
     for name in _source_files(root):
         try:
@@ -159,13 +168,14 @@ def find(root, facts=()) -> list[tuple[str, list[str]]]:
                                 or overridden(owner, node.name)
                                 or any(_ref(d) == "abstractmethod" for d in node.decorator_list)):
                     continue
-                elif _waived(prefix + node.name, noted):
+                elif _waived(prefix + node.name, noted) or f"{name}::{prefix}{node.name}" in skip:
                     continue
                 else:
                     hits.append(prefix + node.name)
         # A module that calls itself a placeholder and defines nothing that does work.
-        if not real and not noted and _MARKED.search((ast.get_docstring(tree) or "").split("\n\n")[0]):
-            hits.append("module marked placeholder")
+        if not real and not noted and f"{name}::{MODULE}" not in skip \
+                and _MARKED.search((ast.get_docstring(tree) or "").split("\n\n")[0]):
+            hits.append(MODULE)
         if hits:
             found.append((name, hits))
     return found
