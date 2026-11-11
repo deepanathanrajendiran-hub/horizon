@@ -816,78 +816,6 @@ def _hold_placeholders(state: dict) -> None:
     if message:
         raise GateNotPassed(message)
 
-class RequestCheckDue(GateNotPassed):
-    """Every check holds, and the work has not yet been gone through against the request (see request_check)."""
-
-
-REQUEST_CHECK_PARTS = 2  # a request with fewer headed parts is read whole and needs no walk
-
-
-def _request_parts(state: dict) -> str:
-    """The request's parts by file, as `SPEC.md: Parsing (line 40), Errors (line 88)`, or "" when it has too few."""
-    try:
-        found = sections.request_parts(state.get("gate_path"), state["cwd"], state.get("request_inputs"))
-    except Exception:
-        return ""
-    if sum(len(parts) for _, parts in found) < REQUEST_CHECK_PARTS:
-        return ""
-    return "; ".join(f"{name}: " + ", ".join(f"{_clip(heading, 60)} (line {number})" for number, heading in parts)
-                     for name, parts in found)
-
-
-def request_check_open(state: dict) -> bool:
-    """True from the `close` that asked for the request check until a `check` saves what it found."""
-    asked = state.get("request_check")
-    return bool(asked) and state["used"]["turns"] <= asked.get("turn", 0)
-
-
-def request_check(state: dict, observed_hash: str | None = None) -> str | None:
-    """What to say when a thin goal would complete and its work has not been gone through against the request since
-    the gate first passed everything, or None. The first `close` that would complete asks for it; a `check` saved
-    after that releases it.
-
-    E2E-SWE thin4 run: 14 of 31 builds closed the goal with hidden tests still failing and sessions left (plain: 8
-    of 62). websockets closed after 4 of 10 sessions at 27 of 35, its own 25 tests passing; pgqueuer after 4 at 19
-    of 21. The gate is the build's own tests, so it agrees with the build's own reading of the request. The big
-    run's reading found what closed that gap for plain: short scripts written from the request late in the work."""
-    if not state.get("thin") or state["status"] != "active" or budget_exhausted(state):
-        return None
-    asked = state.get("request_check")
-    if asked and not request_check_open(state):
-        return None
-    if observed_hash is not None and _unchanged_since_baseline(state, observed_hash):
-        return None
-    parts = _request_parts(state)
-    if not parts:
-        return None
-    return ("The gate passes, and the gate is your own tests: they agree with your reading of the request, not "
-            "with the request. Before this goal completes, go through the request once more, part by part: "
-            f"{parts}. This is one pass through the request, not a new set of tests. For each part, read it, then "
-            "run a short script or command that uses the work the way that part describes and prints what comes "
-            "back; write no expected values into it. Read what it printed against the request's own words: "
-            "names, arguments and their order, defaults, returned values, error types, output format. Where they "
-            "differ, the request is right: change the code, never a test's expectation, and add one test for "
-            "each difference you fixed, its value copied from the request. Where the request does not settle a "
-            "point, leave the code and record it with `note --finding`. Save where you are with `check` "
-            "(`--did` naming the parts you ran and what differed); when every part is done, run `close` again "
-            "and it completes.")
-
-
-def _hold_request_check(state: dict, observed_hash: str) -> None:
-    message = request_check(state, observed_hash)
-    if message:
-        raise RequestCheckDue(message)
-
-
-def _ask_request_check(slug: str) -> None:
-    """Record that `close` asked for the request check, so the `check` that follows releases it."""
-    with filelock.goal_locked(_path(slug)):
-        state = load(slug)
-        if state["status"] != "active" or state.get("request_check"):
-            return
-        state["request_check"] = {"at": _now(), "turn": state["used"]["turns"]}
-        _persist_mutation_locked(state)
-
 
 def advisory_sections(state: dict) -> str:
     """The `close` note listing unbuilt or unquoted sections, or "" when there are none or they cannot be read."""
@@ -1092,13 +1020,7 @@ def close(slug: str, *, run_gate: bool = True, timeout: int = gate.DEFAULT_TIMEO
         return result
     except (GateNotPassed, AttemptOpen, RevisionConflict) as exc:
         missing = [str(exc)]
-        if isinstance(exc, RequestCheckDue):
-            if run_gate:  # only a close the session ran itself: the Stop hook's is never read as the request
-                try:
-                    _ask_request_check(slug)
-                except Exception:
-                    pass
-        elif observed_now and isinstance(exc, GateNotPassed):
+        if observed_now and isinstance(exc, GateNotPassed):
             latest = latest_observation(load(slug))
             if latest and latest["gate"] != "pass":
                 missing = ["The gate failed on the current files; see observation."]
@@ -1327,7 +1249,6 @@ def _apply_completion(state: dict, observed_hash: str, gate_output: str, allow_u
                                       + "; ".join(earlier) + "." if earlier else "")
                                    + (" Lines the reviewer could not check: " + "; ".join(unverified) + "."
                                       if unverified else ""))
-    _hold_request_check(state, observed_hash)
     text = (record.get("gate_output") or "").strip() or (
         f"{state['gate']['value']} -> exit 0 (gate produced no output)")
     state["status"] = "complete"

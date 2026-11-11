@@ -1,6 +1,6 @@
 """Work that is not a new Python package built from a spec: another language, a change to an existing codebase, a
 request in a sentence. Horizon's checks of the request (names import, the package installs, no placeholders, the gate
-is not too small, the request check) were written from spec-to-package builds; here they have nothing to say, and a
+is not too small) were written from spec-to-package builds; here they have nothing to say, and a
 false report costs a session what a true one saves (E2E-SWE big run: 32 of 62 builds were told to build interface
 methods, and one spent a whole session on them).
 
@@ -85,18 +85,14 @@ def test_a_go_project_gets_no_python_reports(project):
         context
 
 
-def test_a_go_goal_closes_after_the_request_check_alone(project):
-    # The request has headed parts, so the request check applies in any language; nothing else holds the goal.
+def test_a_go_goal_closes_on_its_gate(project):
     p, cli = project
     cli.new_session("s1")
     _go_project(p)
     _goal(p, cli, GO_REQUEST)
     (p / "parser.go").write_text("package tool\n\nfunc Parse(line string) string {\n\treturn line\n}\n")
     code, out = cli("close", SLUG)
-    assert code == 1 and len(out["missing"]) == 1 and "part by part" in out["missing"][0], out
-    assert cli("check", SLUG, "--did", "Ran each part", "--next", "Close")[0] == 0
-    code, out = cli("close", SLUG)
-    assert code == 0 and out["complete"], out
+    assert code == 0 and out["complete"] and not _said(out), out
 
 
 # --- a change to an existing codebase --------------------------------------------------------------------------

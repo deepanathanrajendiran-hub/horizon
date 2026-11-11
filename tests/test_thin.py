@@ -61,12 +61,7 @@ def _build(p, reader=True):
         (p / "toolpkg" / "reader.py").write_text("class Reader:\n    pass\n")
 
 def _close(cli):
-    """`close`, through the request check its first passing call asks for (tests/test_request_check.py)."""
-    code, out = cli("close", SLUG)
-    if code and any("part by part" in m for m in out.get("missing") or []):
-        assert cli("check", SLUG, "--did", "Ran each part of the request", "--next", "Close")[0] == 0
-        code, out = cli("close", SLUG)
-    return code, out
+    return cli("close", SLUG)
 
 
 # --- a goal from the request alone ----------------------------------------------------------------------------
