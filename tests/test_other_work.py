@@ -203,3 +203,20 @@ def test_a_large_project_still_lists_the_files_the_work_touched(large):
 def test_a_small_project_is_still_listed_file_by_file(project):
     p, _ = project
     assert hooks._files_line(p) == "Files (lines): src/tool.py 2."
+
+# --- what the session wrote before `start` is the goal's work --------------------------------------------------
+
+def test_placeholders_written_before_start_are_still_held(project):
+    # thin6 run, barf: 29 placeholder functions laid out two calls before `start` were taken as the project's own,
+    # and the goal completed with 12 of them unbuilt (56.5; the version before scored 78.3).
+    p, cli = project
+    cli.new_session("s1")
+    _existing(p)
+    (p / "src" / "scaffold.py").write_text("def build(rows):\n    raise NotImplementedError\n")
+    (p / "src" / "tool.py").write_text(
+        "def parse(line):\n    return line\n\n\ndef parse_all(lines):\n    raise NotImplementedError\n")
+    _goal(p, cli, FIX_REQUEST, gate=PYTEST)
+    code, out = cli("close", SLUG)
+    assert code == 1, out
+    held = out["missing"][0]
+    assert "src/scaffold.py (build)" in held and "src/tool.py (parse_all)" in held and "legacy" not in held, out

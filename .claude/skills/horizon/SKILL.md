@@ -55,9 +55,9 @@ python3 "$HARNESS" --runtime claude --project "$PROJECT" start "Requested outcom
 ## Working
 
 1. **Make the deliverable usable first.** For new work, create in the first session the entry point a user calls
-   (the package, module or command named) and every module it imports, so that it imports or runs before its
-   parts are filled in. For a change to existing code, run its tests before your first edit. When the request
-   says how the work is installed or run, make that work in a clean copy, never only through `PYTHONPATH`.
+   (package, module or command) and every module it imports, so it imports or runs before its parts are filled
+   in. For existing code, run its tests before your first edit. When the request says how the work is installed
+   or run (an install script, a package install, a command), make that work in a clean copy, not via `PYTHONPATH`.
 2. **Write straight into the real files,** never into scratch parts to join later, and keep the work runnable after
    every write: a session can end at any call.
 3. **Run what you wrote, in the same session,** the way a user would. Code never run is a guess.

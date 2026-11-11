@@ -389,11 +389,25 @@ def _validate_state_execution(state: dict) -> None:
             or checkpoint_turns != terminal_turns):
         raise task_state.StateError("terminal attempts must correspond one-to-one with checkpoint turns")
 
+def _uncommitted(cwd) -> set[str] | None:
+    """Files that are new or differ from the last commit, or None when git cannot say."""
+    try:
+        out = subprocess.run(["git", "-C", str(cwd), "status", "--porcelain", "-z", "--untracked-files=all"],
+                             capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode:
+        return None
+    return {entry[3:] for entry in out.stdout.decode(errors="replace").split("\0") if len(entry) > 3}
+
+
 def _placeholders_at_start(cwd) -> list[str]:
     """The placeholder functions the project had before its first thin goal (`file::name`), which no goal is held
     to: an existing codebase's own `raise NotImplementedError` is not the work of a goal that changes something
-    else. A later goal of the same project takes the first goal's list, so what an earlier goal left unbuilt still
-    counts."""
+    else. Only committed files count: what the session wrote before it called `start` is the goal's own work
+    (E2E-SWE thin6 run, barf: the session laid out 29 placeholder functions two calls before `start`, they were
+    taken as the project's own, and the goal completed with 12 of them unbuilt). A later goal of the same project
+    takes the first goal's list, so what an earlier goal left unbuilt still counts."""
     first = None
     try:
         for path in paths.goals_dir().glob("*.json"):
@@ -413,7 +427,10 @@ def _placeholders_at_start(cwd) -> list[str]:
     if first is not None:
         return first[1]
     try:
-        return stubs.keys(stubs.find(cwd))
+        changed = _uncommitted(cwd)
+        if changed is None:
+            return []
+        return stubs.keys([(name, hits) for name, hits in stubs.find(cwd) if name not in changed])
     except Exception:
         return []
 
