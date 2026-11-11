@@ -19,7 +19,7 @@ import pytest
 
 from installable_project import installable
 from test_e2eswe_fixes import project  # noqa: F401  (the fixture is used by name)
-from test_thin import SLUG, _build, _context, _thin
+from test_thin import SLUG, _build, _close, _context, _thin
 
 import gate
 import stubs
@@ -139,7 +139,7 @@ def test_close_waits_while_a_named_module_only_raises(project):
     assert any("still placeholders" in m and "toolpkg/reader.py (Reader.read)" in m for m in out["missing"]), out
     (p / "toolpkg" / "reader.py").write_text(
         "class Reader:\n    def read(self, path):\n        return open(path).read()\n")
-    code, out = cli("close", SLUG)
+    code, out = _close(cli)
     assert code == 0 and out["complete"], out
 
 
@@ -164,7 +164,7 @@ def test_a_fact_that_a_raise_is_by_design_lets_close_complete(project):
     installable(p)
     assert cli("close", SLUG)[0] == 1
     cli("note", SLUG, "--fact", "toolpkg/reader.py Reader.on_line raises NotImplementedError by design")
-    code, out = cli("close", SLUG)
+    code, out = _close(cli)
     assert code == 0 and out["complete"], out
 
 

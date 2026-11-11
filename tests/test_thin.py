@@ -60,6 +60,14 @@ def _build(p, reader=True):
     if reader:
         (p / "toolpkg" / "reader.py").write_text("class Reader:\n    pass\n")
 
+def _close(cli):
+    """`close`, through the request check its first passing call asks for (tests/test_request_check.py)."""
+    code, out = cli("close", SLUG)
+    if code and any("part by part" in m for m in out.get("missing") or []):
+        assert cli("check", SLUG, "--did", "Ran each part of the request", "--next", "Close")[0] == 0
+        code, out = cli("close", SLUG)
+    return code, out
+
 
 # --- a goal from the request alone ----------------------------------------------------------------------------
 
@@ -105,7 +113,7 @@ def test_close_completes_a_thin_goal_with_no_review(project):
     _thin(p, cli)
     _build(p)
     installable(p)
-    code, out = cli("close", SLUG)
+    code, out = _close(cli)
     assert code == 0 and out["complete"], out
     assert "review_brief" not in out and "unreviewed" not in out, out
 
@@ -338,7 +346,7 @@ def test_close_completes_once_the_gate_runs_a_test_for_each_name(project):
     assert cli("close", SLUG)[0] == 1
     (p / "tests" / "test_more.py").write_text(
         "".join(f"def test_use_{i}():\n    assert True\n\n" for i in range(_surface_names(gates))))
-    code, out = cli("close", SLUG)
+    code, out = _close(cli)
     assert code == 0 and out["complete"], out
 
 
@@ -348,7 +356,7 @@ def test_a_gate_that_is_not_pytest_is_not_counted(project):
     _thin(p, cli, gate="true")
     _build(p)
     installable(p)
-    code, out = cli("close", SLUG)
+    code, out = _close(cli)
     assert code == 0 and out["complete"], out
 
 
@@ -464,7 +472,7 @@ def test_a_later_goal_keeps_the_first_goals_request(project):
     _thin(p, cli)
     _build(p)
     installable(p)
-    assert cli("close", SLUG)[0] == 0
+    assert _close(cli)[0] == 0
     later = p / ".claude" / "gates" / "later"
     later.mkdir(parents=True)
     (later / "request.md").write_text("Remaining placeholder: Reader.read\n")
@@ -482,7 +490,7 @@ def test_a_later_goal_with_the_same_request_is_left_alone(project):
     _thin(p, cli)
     _build(p)
     installable(p)
-    assert cli("close", SLUG)[0] == 0
+    assert _close(cli)[0] == 0
     later = p / ".claude" / "gates" / "later"
     later.mkdir(parents=True)
     (later / "request.md").write_text("Build the library  described in SPEC.md\n\n")

@@ -188,8 +188,11 @@ cannot. A hook reads saved results; `check`, `observe` and `close` run the code.
   placeholder. Not listed: a function that does work and raises on one path, a
   method another class of the project overrides, a method of an abstract base,
   a special method other than `__init__`, a raise whose message says who
-  must supply the method ("must implement ..."), and a file a recorded fact calls
-  "by design". Three more lines appear when they apply. After the missing
+  must supply the method ("must implement ..."), and a function a recorded fact
+  names, with its file, as "by design". More lines appear when they apply:
+  `The last close passed every check and asked for the work to be gone through
+  against the request`, with the request's parts, from the `close` that asked
+  until a `check` is saved (see **Request check**). After the missing
   names (all of them, by module): `The last gate run ... never finished`, when
   a gate run was killed before it returned (its call's time limit, or the end
   of the session), with the `check --timeout 100` that saves the session's
@@ -233,7 +236,18 @@ a `requirements.md` keeps needing it. Two more things hold for a thin goal:
   placeholder functions (the rule above); `check` reports them as
   `placeholders`. A name that imports passes the surface gate even when its
   function only raises. Build each, or record a deliberate one with
-  `note --fact "<file> <name> raises NotImplementedError by design"`.
+  `note --fact "<file> <name> raises NotImplementedError by design"`: the fact
+  covers the functions it names in that file, and one that names only the file
+  covers none.
+- **Request check.** The first `close` that would complete a thin goal does not:
+  `missing` lists the parts of the request (the headings of `request.md` and of
+  each Markdown file it names, at the deepest level that gives at most 30 per
+  file) and asks for the work to be used as each part describes and compared
+  with what the request states. A `check` saved after that releases it, and the
+  next `close` completes. Not asked when the request has fewer than 2 headed
+  parts, when the files are unchanged since the baseline, or when the budget is
+  spent. The Stop hook's `close --if-ready` never starts it and never completes
+  a goal that has not been through it.
 - **Small gate.** When the surface gate lists N names and the gate's pytest run
   passed fewer than min(N, 10) tests, `close` does not complete and `missing` says
   how many tests ran; `check` reports the same as `small_gate`. A gate whose

@@ -89,8 +89,8 @@ What `check`, `close` and the session-start message report, and what to do:
 - `spec_examples`: how many of the request's own examples agree with the work, and which disagree. For each, read
   the request's prose: fix the code when the prose agrees with the example. If the example itself is wrong, skip
   it with `waive-example`, citing the line.
-- `placeholders`: functions with no body yet; `close` waits for them. Fill each in. If one is meant (a hook the
-  library's user fills in), record it once with `note --fact "<file> <name> raises NotImplementedError by design"`.
+- `placeholders`: functions with no body yet; `close` waits for them. Fill each in. Only if the request says the
+  caller supplies one, record it with `note --fact "<file> <name> raises NotImplementedError by design"`.
 
 ```bash
 python3 "$HARNESS" --runtime claude --project "$PROJECT" waive-example "$SLUG" "$EXAMPLE_ID" --reason "Line 40 of the request says the opposite"
@@ -107,12 +107,12 @@ cut off, which no `check` saved: if it names a problem, that problem comes befor
 
 ## Closing
 
-When every part of the request is built and run, run `close`. It completes the goal when the gate passes on the
-current files and Horizon's checks hold; otherwise `missing` says what to fix. Its output is long: `complete` and
-`missing` come first, and they are all you need. If it says the gate ran too few tests (`check` says so earlier,
-as `small_gate`), add tests of the main use and of each part of the request, then fix what they find. If it says a
-baseline test file changed, restore that file and fix the code instead, unless a person is there to approve the
-change with `approve-test-change`.
+When every part of the request is built and run, run `close`. Its output is long: `complete` and `missing` come
+first, and they are all you need; `missing` says what to fix. The first `close` that passes every check does not
+complete the goal: it lists the request's parts, for you to use the work as each part describes and compare with
+what the request states. Do that, save it with `check`, and `close` again. If it says the gate ran too few tests
+(`small_gate` in `check`), add tests of the main use and of each part of the request, then fix what they find. If
+a baseline test file changed, restore it and fix the code, unless a person approves with `approve-test-change`.
 
 ```bash
 python3 "$HARNESS" --runtime claude --project "$PROJECT" close "$SLUG"

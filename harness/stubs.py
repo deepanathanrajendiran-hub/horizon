@@ -11,7 +11,7 @@ A placeholder is a function with no body of its own: a docstring at most, then `
   on them and authlib calls in ten);
 - a special method other than `__init__` (wrapt: `__copy__` raises by the request's own design), or a raise whose
   message says who must supply the method ("must implement match()");
-- a file a recorded fact names as "by design".
+- a function a recorded fact names, with its file, as "by design".
 """
 
 import ast
@@ -91,14 +91,29 @@ def _abstract(node: ast.ClassDef) -> bool:
                 or any(_ref(k.value) == "ABCMeta" for k in node.keywords))
 
 
+def _by_design(name: str, facts) -> list[str]:
+    """The recorded facts that call something in this file "by design"."""
+    return [fact for fact in facts if "by design" in fact.lower()
+            and re.search(r"(?<![\w/.-])" + re.escape(name) + r"(?![\w/.-])", fact)]
+
+
+def _waived(hit: str, noted: list[str]) -> bool:
+    """A "by design" fact covers the functions it names, as `Class.method` or by the last name alone; one that
+    names only the file covers nothing (thin4 run, mapillary_tools: the note is the way past `close`, so it has to
+    say which function is meant)."""
+    leaf = re.escape(hit.rsplit(".", 1)[-1])
+    return any(re.search(r"(?<!\w)" + leaf + r"(?!\w)", _strip_paths(fact)) for fact in noted)
+
+
+def _strip_paths(fact: str) -> str:
+    return re.sub(r"\S+\.py\b", " ", fact)
+
+
 def find(root, facts=()) -> list[tuple[str, list[str]]]:
     """[(file, [placeholder names])] for the project's source files, tests left out."""
     root = Path(root)
     trees = {}
     for name in _source_files(root):
-        if any("by design" in fact.lower() and re.search(r"(?<![\w/.-])" + re.escape(name) + r"(?![\w/.-])", fact)
-               for fact in facts):
-            continue
         try:
             trees[name] = ast.parse((root / name).read_text(errors="replace"))
         except (OSError, SyntaxError, ValueError):
@@ -128,6 +143,7 @@ def find(root, facts=()) -> list[tuple[str, list[str]]]:
     found = []
     for name, tree in trees.items():
         hits, real = [], False
+        noted = _by_design(name, facts)
         stack = [(node, "", None) for node in tree.body]
         while stack:
             node, prefix, owner = stack.pop(0)
@@ -143,10 +159,12 @@ def find(root, facts=()) -> list[tuple[str, list[str]]]:
                                 or overridden(owner, node.name)
                                 or any(_ref(d) == "abstractmethod" for d in node.decorator_list)):
                     continue
+                elif _waived(prefix + node.name, noted):
+                    continue
                 else:
                     hits.append(prefix + node.name)
         # A module that calls itself a placeholder and defines nothing that does work.
-        if not real and _MARKED.search((ast.get_docstring(tree) or "").split("\n\n")[0]):
+        if not real and not noted and _MARKED.search((ast.get_docstring(tree) or "").split("\n\n")[0]):
             hits.append("module marked placeholder")
         if hits:
             found.append((name, hits))
