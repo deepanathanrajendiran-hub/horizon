@@ -196,6 +196,14 @@ def _with_examples(report: dict, state: dict) -> dict:
         unbuilt = None
     if unbuilt:
         report["placeholders"] = unbuilt
+    try:  # advice, never a hold: names the request gives in code that no source file defines
+        fresh = goal.load(state["slug"])
+        said = any("defines them nowhere" in str(m) for m in report.get("missing") or [])
+        names = goal.unbuilt_names(fresh) if fresh["status"] == "active" and not said else None
+    except Exception:
+        names = None
+    if names:
+        report["unbuilt_names"] = names
     return report
 
 

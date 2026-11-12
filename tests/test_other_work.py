@@ -17,7 +17,7 @@ from test_thin import _context
 import hooks
 
 SLUG = "do-the-work"
-QUIET = ("surface_missing", "install_problem", "placeholders", "small_gate")
+QUIET = ("surface_missing", "install_problem", "placeholders", "small_gate", "unbuilt_names")
 TRUE = f"{shlex.quote(sys.executable)} -c pass"
 
 

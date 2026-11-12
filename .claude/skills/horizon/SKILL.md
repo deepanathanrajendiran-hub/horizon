@@ -81,14 +81,14 @@ python3 "$HARNESS" --runtime claude --project "$PROJECT" note "$SLUG" --fact "Te
 
 What `check`, `close` and the session-start message report, and what to do:
 
-- `surface_missing`: modules and names the request gives that do not import. Give each a working first version
-  before you deepen what exists. If the request does not mean one (a file name, an example's variable), delete it
-  from the surface file and say why with `note --finding`.
+- `surface_missing`: names the request gives that do not import. Give each a working first version before you
+  deepen what exists; delete one the request does not mean (a file name) from the surface file, with `note --finding`.
+- `unbuilt_names`: names the request gives in code that no source file defines. Find each in the request and build
+  the ones it asks for; another library's name, or an example's own, needs nothing.
 - `install_problem`: the package does not install in a clean copy, offline. Fix the project's own files (its
   `pyproject.toml`, the setup script the request names); never build an environment of your own for it.
-- `spec_examples`: how many of the request's own examples agree with the work, and which disagree. For each, read
-  the request's prose: fix the code when the prose agrees with the example. If the example itself is wrong, skip
-  it with `waive-example`, citing the line.
+- `spec_examples`: which of the request's own examples disagree with the work. Fix the code when the request's
+  prose agrees with the example; if the example itself is wrong, skip it with `waive-example`, citing the line.
 - `placeholders`: functions with no body yet; `close` waits for them. Fill each in. Only if the request says the
   caller supplies one, record it with `note --fact "<file> <name> raises NotImplementedError by design"`.
 

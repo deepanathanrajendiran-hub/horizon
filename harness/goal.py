@@ -28,6 +28,7 @@ import surface
 import install_gate
 import hookguard
 import stubs
+import unbuilt
 
 MAX_GATE_OUTPUT = 4000
 
@@ -808,6 +809,29 @@ def placeholders(state: dict) -> str | None:
             "have not got to is not by design.")
 
 
+def unbuilt_list(state: dict) -> list[str]:
+    """The names a thin goal's request gives in code that the work defines nowhere (see `unbuilt`). Read from the
+    request and the source; nothing is run. Never raises."""
+    if not state.get("thin") or not state.get("gate_path"):
+        return []
+    try:
+        inputs = sections._goal_inputs(state.get("gate_path"), state["cwd"], state.get("request_inputs"))
+        text = "\n".join(body for _, body in inputs)
+        found = surface.find_spec(state.get("gate_path"), state["cwd"])
+        return unbuilt.find(text, state["cwd"], found[1] if found else None)
+    except Exception:
+        return []
+
+
+def unbuilt_names(state: dict) -> str | None:
+    """What `check`, `close` and the session-start message say about them, or None. Advice: it never stops `close`."""
+    names = unbuilt_list(state)
+    if not names:
+        return None
+    return (f"The request gives these names in code and the work defines them nowhere ({len(names)}): "
+            f"{unbuilt.listing(names)}. Find each in the request and build the ones it asks for. One that belongs "
+            "to another library, or is only an example's own name, needs nothing.")
+
 def _hold_placeholders(state: dict) -> None:
     """Stop completion while the work has placeholder functions."""
     if state["status"] != "active":
@@ -860,6 +884,7 @@ def request_check(state: dict, observed_hash: str | None = None) -> str | None:
     parts = _request_parts(state)
     if not parts:
         return None
+    names = unbuilt_names(state)
     return ("The gate passes, and the gate is your own tests: they agree with your reading of the request, not "
             "with the request. Before this goal completes, go through the request once more, part by part: "
             f"{parts}. This is one pass through the request, not a new set of tests. For each part, read it, then "
@@ -870,7 +895,7 @@ def request_check(state: dict, observed_hash: str | None = None) -> str | None:
             "each difference you fixed, its value copied from the request. Where the request does not settle a "
             "point, leave the code and record it with `note --finding`. Save where you are with `check` "
             "(`--did` naming the parts you ran and what differed); when every part is done, run `close` again "
-            "and it completes.")
+            "and it completes." + (f" Start with these: {names}" if names else ""))
 
 
 def _hold_request_check(state: dict, observed_hash: str) -> None:

@@ -204,8 +204,39 @@ def _entries(lines: list[str], package: str) -> list[tuple[int, str, str | None]
         if in_class and not entry.group(1)[:1].isupper():
             continue
         elsewhere = re.search(rf"\bimportable\s+from\s+`({pkg}(?:\.[A-Za-z_]\w*)+)`", line, re.I)
-        out.append((i, entry.group(1), elsewhere.group(1) if elsewhere else None))
+        where = elsewhere.group(1) if elsewhere else None
+        out.append((i, entry.group(1), where))
+        out += [(i, name, where) for name in _listed_with(line)
+                if name != entry.group(1) and (name[:1].isupper() or not in_class)]
     return out
+
+
+_BULLET = re.compile(r"^\s{0,3}[-*+]\s+")
+_SPAN = r"(?:\*\*|__)?`([^`\n]+)`(?:\*\*|__)?"
+_FIRST_SPAN = re.compile(_SPAN)
+# The next name of the run: a separator has to come between ("`FeedSort` `StrEnum`: ..." names one class and its base).
+_NEXT_SPAN = re.compile(r"\s*(?:[,;/]\s*(?:(?:and|or)\b\s*)?|(?:and|or)\b\s*)" + _SPAN)
+
+
+def _listed_with(line: str) -> list[str]:
+    """The names a list entry opens with, when it opens with several: "- `besselj(n, z)`, `bessely(n, z)`,
+    `besseli(n, z)` — the Bessel functions" documents three functions, not one. Only the run of code that opens
+    the entry is read, and in it a call (`name(...)`) or a class-like name; code further into the sentence is an
+    argument or an example.
+
+    E2E-SWE, mpmath: the surface gate held `besselj` and `airyai` from two such entries and not `bessely`,
+    `besseli`, `besselk` or `airybi`. All 8 graded builds without those four scored 0 (plain's too): the hidden
+    tests import them."""
+    bullet = _BULLET.match(line)
+    if not bullet:
+        return []
+    names, span = [], _FIRST_SPAN.match(line, bullet.end())
+    while span:
+        named = re.match(r"([A-Za-z_]\w*)\s*(\(|$)", span.group(1).strip())
+        if named and (named.group(2) == "(" or named.group(1)[:1].isupper()):
+            names.append(named.group(1))
+        span = _NEXT_SPAN.match(line, span.end())
+    return names
 
 
 def _blanket_exports(lines: list[str], package: str) -> set[str]:

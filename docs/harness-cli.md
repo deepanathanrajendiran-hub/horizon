@@ -252,7 +252,21 @@ a `requirements.md` keeps needing it. Two more things hold for a thin goal:
   next `close` completes. Not asked when the request has fewer than 2 headed
   parts, when the files are unchanged since the baseline, or when the budget is
   spent. The Stop hook's `close --if-ready` never starts it and never completes
-  a goal that has not been through it.
+  a goal that has not been through it. When the work has unbuilt names (next
+  item), the message ends with them.
+- **Unbuilt names.** `check`, `close` and the session-start message list, as
+  `unbuilt_names`, the names the request gives in code that no source file of the
+  project defines: a call (`name(...)`) or a class-like word in a code span of
+  `request.md` or a Markdown file it names, outside code blocks. Left out:
+  builtins, typing names, names that start with `_`, one-letter and ALL_CAPS
+  names, and a dotted name whose first part is not the package, a class or
+  `self`. A function, class, assignment, attribute, import or parameter of that
+  name defines it, and so does the name as a string; in a file that is not
+  Python, the word anywhere. Tests do not count. This is advice and never stops
+  `close`: a name may be another library's or an example's own. Nothing is
+  listed before the project has source, or for a project of more than 3,000
+  source files. The surface gate also reads every name of a list entry that
+  opens with several ("- `besselj(n, z)`, `bessely(n, z)` — ...").
 - **Other kinds of work.** The surface gate, the spec examples and the install
   check are for Python work: the request shows Python (a Python code block, a
   `>>>` prompt, a `.py` file, pip, pytest or the word), or the project has Python

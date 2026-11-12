@@ -458,6 +458,12 @@ def _request_check_line(state: dict) -> str:
             "words. Where they differ, change the code, never a test's expectation. Save what you find with "
             "`check`, then run `close`.")
 
+def _unbuilt_line(state: dict) -> str:
+    """Names the request gives in code that the work defines nowhere (read from the source; nothing is run). Not
+    said before the work has any source, when the whole request is still to build."""
+    names = goal.unbuilt_names(state)
+    return f" {names}" if names else ""
+
 def _unfinished_line(state: dict) -> str:
     """A gate run that never returned (from the note `gate` leaves while it runs; the hook runs nothing)."""
     left = gate.unfinished(state["slug"])
@@ -815,7 +821,7 @@ def _session_start(session: str | None, source: str | None = None) -> dict | Non
             except Exception:
                 pass
             try:
-                line += (_unfinished_line(state) + _request_check_line(state)
+                line += (_unbuilt_line(state) + _unfinished_line(state) + _request_check_line(state)
                          + (_repeat_line(state, session) if startup else ""))
             except Exception:
                 pass
