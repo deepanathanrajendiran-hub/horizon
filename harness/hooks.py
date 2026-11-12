@@ -444,6 +444,19 @@ def _surface_line(state: dict) -> str:
             f"{surface.grouped(last['failed'])}. A test that imports a missing one fails whatever else works, so "
             "give each a working first version before you deepen what exists; `close` waits for them.")
 
+def _request_check_line(state: dict) -> str:
+    """The request check a `close` asked for and no `check` has answered yet: a session that ends in the middle of
+    it leaves nothing else to say it was under way."""
+    if not goal.request_check_open(state):
+        return ""
+    parts = goal._request_parts(state)
+    if not parts:
+        return ""
+    return (" The last `close` passed every check and asked for the work to be gone through against the request, "
+            f"part by part, before the goal completes: {parts}. Carry on with the parts not yet run: run the "
+            "work the way each part describes, print what comes back, and read it against the request's own "
+            "words. Where they differ, change the code, never a test's expectation. Save what you find with "
+            "`check`, then run `close`.")
 
 def _unfinished_line(state: dict) -> str:
     """A gate run that never returned (from the note `gate` leaves while it runs; the hook runs nothing)."""
@@ -802,7 +815,8 @@ def _session_start(session: str | None, source: str | None = None) -> dict | Non
             except Exception:
                 pass
             try:
-                line += _unfinished_line(state) + (_repeat_line(state, session) if startup else "")
+                line += (_unfinished_line(state) + _request_check_line(state)
+                         + (_repeat_line(state, session) if startup else ""))
             except Exception:
                 pass
             plateau = _plateau_line(state) if startup else ""

@@ -116,8 +116,31 @@ def _all_sections(text: str) -> list[tuple[int, str, str, bool]]:
             for i, ((level, number, heading), end) in enumerate(zip(found, ends))]
 
 
+def outline(text: str, limit: int = 30) -> list[tuple[int, str]]:
+    """(line number, heading) for the headings of the deepest level that still gives at most `limit` parts, so a
+    long input is listed by its chapters and a short one by every section. Empty when there are no headings."""
+    _, found = _headings(text)
+    if not found:
+        return []
+    chosen = []
+    for depth in sorted({level for level, _, _ in found}):
+        within = [(number, heading) for level, number, heading in found if level <= depth]
+        if chosen and len(within) > limit:
+            break
+        chosen = within
+    return chosen[:limit]
 
 
+def request_parts(gate_path: str | None, root: str, at_start: dict | None = None,
+                  limit: int = 30) -> list[tuple[str, list[tuple[int, str]]]]:
+    """[(file name, its outline)] for the goal's request and each Markdown file it names, files without headings
+    left out."""
+    out = []
+    for path, text in _goal_inputs(gate_path, root, at_start):
+        parts = outline(text, limit)
+        if parts:
+            out.append((path.name, parts))
+    return out
 
 
 def leaf_sections(text: str) -> list[tuple[int, str, str]]:
