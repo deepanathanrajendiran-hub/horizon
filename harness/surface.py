@@ -485,6 +485,19 @@ def _deepest_module(parts):
     pytest.fail(f"package {{PACKAGE}} does not import")
 
 
+def _in_project(found):
+    """Whether a package without an __init__.py has a directory in this project. One that is only installed
+    (site-packages) is a dependency's: an __init__.py written for it here would hide that library."""
+    for entry in getattr(found, "__path__", ()):
+        try:
+            inside = Path(entry).resolve().relative_to(_PROJECT.resolve()).parts
+        except ValueError:
+            continue
+        if not {{"site-packages", "dist-packages"}} & set(inside):
+            return True
+    return False
+
+
 @pytest.mark.parametrize("name", NAMES, ids=NAMES)
 def test_spec_name_exists(name):
     if _PACKAGE_ERROR:
@@ -493,7 +506,11 @@ def test_spec_name_exists(name):
     module, depth = _deepest_module(parts)
     for i in range(1, depth + 1):
         prefix = ".".join(parts[:i])
-        if getattr(importlib.import_module(prefix), "__file__", None) is None:
+        found = importlib.import_module(prefix)
+        if getattr(found, "__file__", None) is None:
+            if not _in_project(found):
+                pytest.fail(f"{{prefix}} is another library's package, not this project's: delete {{name}} from "
+                            "NAMES in this file, and add no __init__.py for it")
             pytest.fail(f"{{prefix}} is a namespace package: add {{prefix.replace('.', '/')}}/__init__.py")
     if depth < len(parts):
         assert hasattr(module, parts[depth]), f"{{'.'.join(parts[:depth])}} has no attribute {{parts[depth]}}"
@@ -638,14 +655,32 @@ def _unalias(text: str, package: str) -> str:
 # that: it is as often a dependency.) E2E-SWE big run, grappa: the spec says so, but writes `should.<chain>` in
 # fifty code spans, so the surface test was written for a package called `should` and two builds spent sessions
 # on it.
-_STATED_PACKAGE = re.compile(r"(?:top-level|top level)\s+`([A-Za-z_]\w*)`\s+(?:package|module)\b")
+_STATED_PACKAGE = re.compile(r"(?:top-level|top level)\s+`([A-Za-z_]\w*)`\s+(?:package|module)\b"
+                             r"|\bimportable\s+as\s+`([A-Za-z_]\w*)`")
+# Where a title's name ends: "tremolo — pure-Python server", "HojiChar: Text Processing", "RPyC (Remote Python Call)".
+_TITLE_REST = re.compile(r"\s+(?:—|–|--|-)\s+|\s*[:(]")
+
+
+def _title_name(text: str) -> str:
+    """The name a document's title gives, as one lower-case word: `# protobuf-to-pydantic` is `protobuftopydantic`,
+    which is how `protobuf_to_pydantic` reads too. Empty when the first line is not a heading."""
+    title = _HEADING.match(next((line for line in text.splitlines() if line.strip()), ""))
+    if not title:
+        return ""
+    return "".join(re.findall(r"[A-Za-z0-9]+", _TITLE_REST.split(title.group(2), maxsplit=1)[0])).lower()
+
 
 def guess_package(text: str) -> str | None:
-    """The import name a spec builds: the name it imports from most, and whose dotted names it gives most in code
-    spans, the title counting extra; never a standard module, never a name whose dotted references are all files
-    (`setup.sh`), and never an alias or a name taken from a module: an alias's spans count for its module. A name
-    the spec states as the package (`_STATED_PACKAGE`) comes before any count. None when nothing qualifies (a prose
-    request for no Python package)."""
+    """The import name a spec builds. In order: a name the spec states as the package (`_STATED_PACKAGE`); the name
+    its title gives, when the spec writes that name in code; then the name it imports from most and whose dotted
+    names it gives most in code spans. Never a standard module, never a name whose dotted references are all files
+    (`setup.sh`), and never an alias or a name taken from a module: an alias's spans count for its module. None when
+    nothing qualifies (a prose request for no Python package).
+
+    The count alone took a variable of the examples or a dependency for 12 of E2E-SWE's 96 specs (`request` for
+    tremolo, `google` for protobuf-to-pydantic: thin11 run), and the title named the right package in ten of them.
+    When the titled package has no dotted names to check (a command-line tool), only a name the spec imports can
+    still be the package: what is left in the count is the examples' variables."""
     counts, imported = collections.Counter(), set()
     aliases, bound = _aliases(text)
     for a, b in _IMPORT_LINE.findall(text):
@@ -662,17 +697,25 @@ def guess_package(text: str) -> str | None:
     for span in re.findall(r"`([A-Za-z_]\w*)`", title):
         if span in counts:
             counts[span] += 5
-    stated = set(_STATED_PACKAGE.findall(text))
-    for name in stated:
+    titled_as = _title_name(text)
+    titled = {name for name in set(counts) | set(re.findall(r"`([A-Za-z_]\w*)`", text))
+              if titled_as and name.replace("_", "").lower() == titled_as}
+    for name in titled:
+        counts[name] += 500
+    for name in {a or b for a, b in _STATED_PACKAGE.findall(text)}:
         imported.add(name)
         counts[name] += 1000
+    title_only = False  # the titled package gave no names: no variable takes its place
     for name, _ in counts.most_common():
         if name in _NOT_PACKAGES or (name[:1].isupper() and name not in imported):
             continue
         if name in aliases and name not in imported:
             continue
+        if title_only and name not in imported:
+            continue
         if [r for r in refs(text, name) if r.split(".")[-1] not in _FILE_SUFFIXES]:
             return name
+        title_only = title_only or name in titled
     return None
 
 

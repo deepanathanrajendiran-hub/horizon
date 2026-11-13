@@ -679,9 +679,13 @@ never silently migrated between Codex and Claude.
 **Written and held by `start` and `close` (exp/surface-check):**
 
 - **Where it comes from:** with no `--surface-spec`, `start` takes the longest of `request.md` and the Markdown files
-  it names that gives a Python package's names. The package is the one the spec imports from most and gives most
-  dotted names of in code spans, with the title's name counting extra; never a standard module or a file
-  (`setup.sh`).
+  it names that gives a Python package's names. The package is, in order: the name the spec states ("the top-level
+  `x` package", "importable as `x`"); the name its title gives, when the spec writes that name in code
+  (`# protobuf-to-pydantic` names `protobuf_to_pydantic`); then the name it imports from most and gives most dotted
+  names of in code spans. Never a standard module or a file (`setup.sh`). When the titled package has no dotted
+  names (a command-line tool), only an imported name can still be the package, so no surface test is written for a
+  variable of the examples. (The count alone was wrong for 12 of E2E-SWE's 96 specs: `google` for
+  protobuf-to-pydantic, `request` for tremolo.)
 - **What it writes:** `$GATES/test_surface.py`, reported as `surface_gate`. A file already there is kept.
 - **How it is held:** `close` runs the file with the Python the gate command names, or one a script the command
   runs names, and does not complete while a name fails to import. An absolute path wins; without one, a `python` or
@@ -732,7 +736,10 @@ prose in backticks, doctests, comments), `import NAME.mod`, and the names of an
 `__all__` given within 30 lines after a mention of `__init__`. Each test imports
 the deepest module on the name's path and checks the next name on it, no deeper;
 it fails when a package directory on the path has no `__init__.py` (a namespace
-package), and a missing dependency is an error, not a missing name. URLs, file
+package), and a missing dependency is an error, not a missing name. A namespace
+package with no directory in the project is another library's: the failure says
+to delete the name from `NAMES` and to add no `__init__.py`, which would hide
+that library. URLs, file
 names and domains (`NAME.dev.py`, `NAME.readthedocs.io`), Python keywords, test
 modules and names within two lines above a mention of `AttributeError` are left
 out. A public name the spec gives in a private module (`NAME._mod.name`) is also
