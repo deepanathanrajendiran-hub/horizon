@@ -782,6 +782,22 @@ def _trail_line(session: str | None) -> str:
             f"{said} its last call was `{record['command']}`{printed}. If that left a problem open, take it up "
             "first.")
 
+def _start_first_line() -> str:
+    """For a project that has never had a goal: say that nothing is saved or checked until `start` runs. Not said
+    once a goal has existed here, when a session with no active goal is one after the work was finished.
+
+    E2E-SWE thin10 run, protobuf-to-pydantic: the skill was loaded in session 1 and `start` first ran in session 3.
+    Sessions 1 and 2 read the request and wrote files with no goal, so nothing was saved (session 2 listed the
+    files and read the request again) and no check ran: the missing setup script was first reported in session 4,
+    and the hidden score was 0 until then. 6 of that run's 15 builds first ran `check` in session 3 or later."""
+    try:
+        if any(not path.name.endswith(".leases.json") for path in paths.goals_dir().glob("*.json")):
+            return ""
+    except Exception:
+        return ""
+    return (" If this session's request is work for Horizon, run `start` before you build anything: until a goal "
+            "exists nothing is saved or checked, and the next session begins from nothing.")
+
 def _session_start(session: str | None, source: str | None = None) -> dict | None:
     if session:
         root = paths.harness_root()
@@ -843,7 +859,7 @@ def _session_start(session: str | None, source: str | None = None) -> dict | Non
             pass
     if not lines:
         # Session 1 of a goal still needs the paths and the files (bench4 pilot: `doctor`, `status`, `ls`).
-        lines.append("No active Horizon goal.")
+        lines.append("No active Horizon goal." + _start_first_line())
     lines.insert(0, _paths_line())
     changed = _last_commit_files()
     if changed:

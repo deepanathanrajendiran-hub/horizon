@@ -164,7 +164,9 @@ cannot. A hook reads saved results; `check`, `observe` and `close` run the code.
 - `SessionStart` records the session id and reclaims a stale attempt
   automatically. It then
   reports the `HARNESS`, `PROJECT` and `GATES_ROOT` values to use (also when no goal is
-  active, with `No active Horizon goal.` and the files line), each goal's budget, deadline,
+  active, with `No active Horizon goal.` and the files line; in a project that
+  has never had a goal the line adds that nothing is saved or checked until
+  `start` runs), each goal's budget, deadline,
   gate directory, next action, gate command and newest gate result, whether
   from an `observe` or a `check` (`Last gate run:`), and, for a conversation-mode
   goal with a command gate when no observation, checkpoint or pass covers the
@@ -242,7 +244,10 @@ a `requirements.md` keeps needing it. Two more things hold for a thin goal:
   function only raises. Build each, or record a deliberate one with
   `note --fact "<file> <name> raises NotImplementedError by design"`: the fact
   covers the functions it names in that file, and one that names only the file
-  covers none.
+  covers none. A function that makes placeholders (it defines a function that
+  only raises NotImplementedError and returns it) is listed as
+  `name: makes placeholders, each one still to build`, since the functions it
+  stands in for are in no source file.
 - **Request check.** The first `close` that would complete a thin goal does not:
   `missing` lists the parts of the request (the headings of `request.md` and of
   each Markdown file it names, at the deepest level that gives at most 30 per

@@ -12,6 +12,9 @@ A placeholder is a function with no body of its own: a docstring at most, then `
 - a special method other than `__init__` (wrapt: `__copy__` raises by the request's own design), or a raise whose
   message says who must supply the method ("must implement match()");
 - a function a recorded fact names, with its file, as "by design".
+
+A function that makes placeholders is listed too (`_makes_placeholders`): the functions it stands in for are in no
+source file to be found.
 """
 
 import ast
@@ -110,9 +113,39 @@ def _strip_paths(fact: str) -> str:
     return re.sub(r"\S+\.py\b", " ", fact)
 
 
+FACTORY = ": makes placeholders, each one still to build"
+
+
+def _makes_placeholders(node) -> bool:
+    """Whether a function hands out placeholders: it defines a function that only raises NotImplementedError and
+    returns it.
+
+    E2E-SWE thin10 run, mpmath: `_todo.py` made about 50 of the request's functions this way, from a list of their
+    names (`globals()[name] = _placeholder(name)`). Every one imported, so the surface gate passed them, and none
+    was a function in the source, so none was listed here: `close` would have completed the goal."""
+    made = set()
+    for child in node.body:
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            bare, raises = _bare(child)
+            if bare and raises:
+                made.add(child.name)
+    if not made:
+        return False
+    stack = list(node.body)
+    while stack:
+        statement = stack.pop()
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue  # a nested function's own return is not this one's
+        if isinstance(statement, ast.Return) and isinstance(statement.value, ast.Name) \
+                and statement.value.id in made:
+            return True
+        stack += list(ast.iter_child_nodes(statement))
+    return False
+
+
 def keys(found: list[tuple[str, list[str]]]) -> list[str]:
     """`file::name` for each placeholder found, the form `find(skip=...)` takes."""
-    return [f"{name}::{hit}" for name, hits in found for hit in hits]
+    return [f"{name}::{hit.removesuffix(FACTORY)}" for name, hits in found for hit in hits]
 
 
 def find(root, facts=(), skip=()) -> list[tuple[str, list[str]]]:
@@ -164,6 +197,9 @@ def find(root, facts=(), skip=()) -> list[tuple[str, list[str]]]:
             elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 if not _is_placeholder(node):
                     real = True
+                    label = prefix + node.name
+                    if _makes_placeholders(node) and not _waived(label, noted) and f"{name}::{label}" not in skip:
+                        hits.append(label + FACTORY)
                 elif owner and ((_SPECIAL.match(node.name) and node.name != "__init__")
                                 or overridden(owner, node.name)
                                 or any(_ref(d) == "abstractmethod" for d in node.decorator_list)):

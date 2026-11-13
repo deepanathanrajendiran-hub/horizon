@@ -237,3 +237,104 @@ def test_the_surface_gate_holds_every_name_of_such_an_entry():
     names = set(surface.refs(BLANKET, "mathpkg"))
     assert {"mathpkg.besselj", "mathpkg.bessely", "mathpkg.besseli", "mathpkg.besselk", "mathpkg.airyai",
             "mathpkg.airybi", "mathpkg.struveh"} <= names, names
+
+# --- placeholders made by a function ---------------------------------------------------------------------------
+
+TODO = '''"""Names from the request that are not implemented yet."""
+
+
+def _placeholder(name):
+    def fn(*args, **kwargs):
+        raise NotImplementedError("%s is not implemented yet" % name)
+
+    fn.__name__ = name
+    return fn
+
+
+_NAMES = """
+lambertw
+hyp2f1 hyp1f1
+quad findroot
+""".split()
+
+for _n in _NAMES:
+    globals()[_n] = _placeholder(_n)
+'''
+
+
+def _placeholders(root, facts=(), skip=()):
+    import stubs
+    return {name: hits for name, hits in stubs.find(root, facts, skip=skip)}
+
+
+def test_a_function_that_makes_placeholders_is_listed(repo):
+    # thin10 run, mpmath: about 50 of the request's functions were made this way. Each imported, so the surface
+    # gate passed them, and none was a function in the source, so `close` had nothing to wait for.
+    root, write = repo
+    write("pkg/_todo.py", TODO)
+    assert _placeholders(root) == {"pkg/_todo.py": ["_placeholder: makes placeholders, each one still to build"]}
+
+
+def test_a_function_that_returns_a_working_function_is_not_listed(repo):
+    root, write = repo
+    write("pkg/make.py",
+          "def adder(n):\n    def add(x):\n        return x + n\n    return add\n\n\n"
+          # defines a function that raises, but hands out a working one
+          "def guarded(f):\n    def refuse(*a):\n        raise NotImplementedError\n"
+          "    def call(*a):\n        return f(*a)\n    return call\n")
+    assert _placeholders(root) == {}
+
+
+def test_a_factory_whose_raise_says_who_must_supply_it_is_not_listed(repo):
+    root, write = repo
+    write("pkg/hooks.py",
+          "def required(name):\n    def hook(*a):\n"
+          "        raise NotImplementedError('%s must be implemented by the plugin' % name)\n    return hook\n")
+    assert _placeholders(root) == {}
+
+
+def test_a_by_design_note_or_the_projects_own_factory_is_left_out(repo):
+    import stubs
+    root, write = repo
+    write("pkg/_todo.py", TODO)
+    assert _placeholders(root, ["pkg/_todo.py _placeholder raises NotImplementedError by design"]) == {}
+    # what the project had before the goal, as `goal` records it at `start`
+    assert stubs.keys(stubs.find(root)) == ["pkg/_todo.py::_placeholder"]
+    assert _placeholders(root, skip=stubs.keys(stubs.find(root))) == {}
+
+
+def test_close_waits_for_placeholders_a_function_made(project):
+    p, cli = project
+    cli.new_session("s1")
+    _goal(p, cli)
+    (p / "toolpkg" / "__init__.py").write_text(
+        "def parse(line):\n    return line\n\n\ndef _placeholder(name):\n    def fn(*args):\n"
+        "        raise NotImplementedError(name)\n    return fn\n\n\n"
+        "parse_all = _placeholder('parse_all')\nTokenizer = _placeholder('Tokenizer')\n")
+    code, out = cli("close", SLUG)
+    assert code == 1 and len(out["missing"]) == 1, out
+    assert "toolpkg/__init__.py (_placeholder: makes placeholders" in out["missing"][0], out
+
+
+# --- a project with no goal yet --------------------------------------------------------------------------------
+
+def test_a_session_with_no_goal_yet_is_told_to_start_one_first(project):
+    # thin10 run, protobuf-to-pydantic: `start` first ran in session 3, so two sessions saved and checked nothing.
+    p, cli = project
+    context = _context(cli.new_session("s1"))
+    assert "No active Horizon goal." in context and "run `start` before you build anything" in context, context
+
+
+def test_a_project_whose_goal_is_finished_is_not_told_to_start_one(project):
+    p, cli = project
+    cli.new_session("s1")
+    _goal(p, cli)
+    (p / "toolpkg" / "__init__.py").write_text(
+        "def parse(line):\n    return line\n\n\ndef parse_all(lines):\n    return [parse(x) for x in lines]\n\n\n"
+        "class Tokenizer:\n    def split(self, line):\n        return line.split()\n")
+    assert cli("close", SLUG)[0] == 1  # the request check
+    assert cli("check", SLUG, "--did", "Ran each part", "--next", "Close")[0] == 0
+    code, out = cli("close", SLUG)
+    assert code == 0 and out["complete"], out
+    context = _context(cli.new_session("s2"))
+    assert "No active Horizon goal." in context and "before you build anything" not in context, context
