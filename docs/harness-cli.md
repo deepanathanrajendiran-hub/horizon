@@ -24,7 +24,7 @@ when operating from an otherwise unmarked nested directory.
 | `status [SLUG]` | List short goal rows, or inspect one goal (budget, deadline, latest checkpoint, notes file) |
 | `start OBJECTIVE --gate COMMAND [--review CRITERION] [--gate-path DIR] [--timeout N]` | Command verification with optional independent review |
 | `start OBJECTIVE --coverage CRITERION [--gate-path DIR]` | Independent artifact review without a command |
-| `check SLUG --did TEXT --next TEXT` | Run one check and checkpoint completed work; prints `review_brief` and `review_file` when a review is due |
+| `check SLUG --did TEXT --next TEXT [--parts 1-4,7]` | Run one check and checkpoint completed work; `--parts` saves parts of an open request check as run; prints `review_brief` and `review_file` when a review is due |
 | `review SLUG --result pass\|fail --judge HANDLE --hash HASH --evidence-file PATH` | Record the actual review of the checkpoint's snapshot |
 | `complete SLUG` | Require all configured checks on current artifacts |
 | `observe SLUG [--role baseline\|resume\|final] [--timeout N] [--next TEXT]` | Run the gate now and record the result; charges no turn |
@@ -197,8 +197,8 @@ cannot. A hook reads saved results; `check`, `observe` and `close` run the code.
   names, with its file, as "by design", and a placeholder the project already
   had when its first thin goal started. More lines appear when they apply:
   `The last close passed every check and asked for the work to be gone through
-  against the request`, with the request's parts, from the `close` that asked
-  until a `check` is saved (see **Request check**). After the missing
+  against the request`, with the parts still to run, from the `close` that asked
+  until `check --parts` has saved every part (see **Request check**). After the missing
   names (all of them, by module): `The last gate run ... never finished`, when
   a gate run was killed before it returned (its call's time limit, or the end
   of the session), with the `check --timeout 100` that saves the session's
@@ -253,8 +253,15 @@ a `requirements.md` keeps needing it. Two more things hold for a thin goal:
   each Markdown file it names, at the deepest level that gives at most 30 per
   file) and asks for one pass through them: run the work as each part describes,
   print what comes back, and read it against the request; where they differ the
-  code changes, never a test's expectation. A `check` saved after that releases it, and the
-  next `close` completes. Not asked when the request has fewer than 2 headed
+  code changes, never a test's expectation. The parts are numbered, and the goal
+  keeps the list: `check --parts 1-4,7` saves the parts that were run (ranges and
+  single numbers; a number past the end names nothing, anything else is an
+  error). Until none is left, `check` reports the rest as `request_check`,
+  `close` lists them in `missing`, and the session-start message shows them, so
+  the pass can span sessions. (Before the thin12 run any `check` after the ask
+  released it: protobuf-to-pydantic saved an ordinary checkpoint and closed at 22
+  of 42 hidden tests without the pass; of 44 builds asked, 9 ran the work at
+  most once before the releasing `check`.) Not asked when the request has fewer than 2 headed
   parts, when the files are unchanged since the baseline, or when the budget is
   spent. The Stop hook's `close --if-ready` never starts it and never completes
   a goal that has not been through it. When the work has unbuilt names (next

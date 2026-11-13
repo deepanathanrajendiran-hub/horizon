@@ -5,10 +5,12 @@ one build of each of 31 tasks).
 websockets closed after 4 of 10 sessions at 27 of 35 hidden tests with its own 25 tests passing, and pgqueuer after
 4 at 19 of 21. The gate is the build's own tests, so a passing gate agrees with the build's reading of the request.
 The first `close` that would complete a thin goal now asks for the work to be gone through against the request, part
-by part, and a `check` saved after that releases it.
+by part. `check --parts` saves the parts that were run, and `close` completes when none is left (thin12 run: any
+`check` used to release it, and protobuf-to-pydantic closed without the pass).
 
 mapillary_tools recorded its last two unbuilt functions as "by design" and closed: the note now covers only the
 functions it names."""
+import re
 import subprocess
 
 import pytest
@@ -48,16 +50,73 @@ def test_a_second_close_with_no_check_between_asks_again(project):
     _ready(p, cli)
     assert cli("close", SLUG)[0] == 1
     code, out = cli("close", SLUG)
-    assert code == 1 and _asked(out), out
+    assert code == 1 and "still to run" in out["missing"][0] and "Parsing (line " in out["missing"][0], out
 
 
-def test_a_check_after_the_ask_lets_close_complete(project):
+def _numbers(message):
+    """The part numbers a request-check message lists (`SPEC.md: 1 Build (line 1), 2 Parsing (line 5)`)."""
+    return [int(n) for n in re.findall(r"(?:: |, )(\d+) [^,;:]*?\(line \d+\)", message)]
+
+
+def test_a_check_that_names_every_part_lets_close_complete(project):
+    p, cli = project
+    _ready(p, cli)
+    code, out = cli("close", SLUG)
+    numbers = _numbers(_asked(out)[0])
+    assert code == 1 and len(numbers) >= 2 and numbers == list(range(1, len(numbers) + 1)), out
+    code, out = cli("check", SLUG, "--did", "Ran Parsing: parse('a') gives a", "--next", "Close",
+                    "--parts", f"1-{len(numbers)}")
+    assert code == 0 and "request_check" not in out, out
+    code, out = cli("close", SLUG)
+    assert code == 0 and out["complete"], out
+
+
+def test_a_check_that_names_no_part_does_not_release_it(project):
+    # thin12 run, protobuf-to-pydantic (52.4): `close` asked at session 5 with few calls left; the build went on
+    # with its own tests, saved an ordinary `check` in session 7 whose next action was still "close-check spec
+    # parts", and ran `close` "to see which spec parts remain". It completed: any `check` after the ask released
+    # it. Of 44 builds asked since the thin5 run, 9 ran the work at most once before the releasing `check`.
     p, cli = project
     _ready(p, cli)
     assert cli("close", SLUG)[0] == 1
-    assert cli("check", SLUG, "--did", "Ran Parsing: parse('a') gives a", "--next", "Close")[0] == 0
+    code, out = cli("check", SLUG, "--did", "Fixed a test fixture", "--next", "Close-check the spec parts")
+    assert code == 0 and "still to run" in out["request_check"], out
+    code, out = cli("close", SLUG)
+    assert code == 1 and not out["complete"] and "still to run" in out["missing"][0], out
+
+
+def test_close_then_lists_only_the_parts_still_to_run(project):
+    p, cli = project
+    _ready(p, cli)
+    first = _asked(cli("close", SLUG)[1])[0]
+    numbers = _numbers(first)
+    code, out = cli("check", SLUG, "--did", "Ran part 1", "--next", "Run the rest", "--parts", "1")
+    assert code == 0 and _numbers(out["request_check"]) == numbers[1:], out
+    code, out = cli("close", SLUG)
+    assert code == 1 and _numbers(out["missing"][0]) == numbers[1:], out
+    assert len(out["missing"][0]) < len(first), "the second message is the list, not the whole instruction again"
+    assert _numbers(_context(cli.new_session("s2"))) == numbers[1:]
+    cli("check", SLUG, "--did", "Ran the rest", "--next", "Close", "--parts", ",".join(map(str, numbers[1:])))
     code, out = cli("close", SLUG)
     assert code == 0 and out["complete"], out
+
+
+def test_part_numbers_are_ranges_and_lists_and_nothing_else(project):
+    p, cli = project
+    _ready(p, cli)
+    assert cli("close", SLUG)[0] == 1
+    code, out = cli("check", SLUG, "--did", "Ran them", "--next", "Close", "--parts", "every one")
+    assert code != 0 and "--parts" in str(out), out
+    # a number past the end of the list names nothing
+    code, out = cli("check", SLUG, "--did", "Ran them", "--next", "Close", "--parts", "40-45")
+    assert code == 0 and "still to run" in out["request_check"], out
+
+
+def test_a_goal_asked_before_parts_were_kept_is_released_by_its_next_check():
+    import goal
+    asked = {"status": "active", "used": {"turns": 3}, "request_check": {"at": "x", "turn": 3}}
+    assert goal.request_check_open(asked)
+    assert not goal.request_check_open({**asked, "used": {"turns": 4}})
 
 
 def test_a_check_before_the_first_close_does_not_count(project):
@@ -129,7 +188,7 @@ def test_the_session_is_not_told_once_a_check_answered(project):
     p, cli = project
     _ready(p, cli)
     assert cli("close", SLUG)[0] == 1
-    assert cli("check", SLUG, "--did", "Ran each part", "--next", "Close")[0] == 0
+    assert cli("check", SLUG, "--did", "Ran each part", "--next", "Close", "--parts", "1-99")[0] == 0
     assert "gone through against the request" not in _context(cli.new_session("s2"))
 
 

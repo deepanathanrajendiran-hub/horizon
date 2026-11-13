@@ -107,12 +107,12 @@ cut off, which no `check` saved: if it names a problem, that problem comes befor
 
 ## Closing
 
-When every part of the request is built and run, run `close`. Its output is long: `complete` and `missing` come
-first, and they are all you need; `missing` says what to fix. The first `close` that passes every check does not
-complete the goal: it lists the request's parts. Run the work as each part describes, print the result and read
-it against the request; where they differ, change the code, not a test. Then `check`, and `close` again. If the
-gate ran too few tests (`small_gate` in `check`), add tests of the main use and of each part of the request. If a
-baseline test file changed, restore it and fix the code, unless a person approves with `approve-test-change`.
+When every part of the request is built and run, run `close`: `complete` and `missing` come first in its output,
+and `missing` says what to fix. The first `close` that passes every check does not complete the goal: it lists the
+request's parts by number. Run the work as each part describes, print the result and read it against the request;
+where they differ, change the code, not a test. Save the parts you ran with `check --parts 1-4,7`; `close`
+completes when none is left. If the gate ran too few tests (`small_gate`), add tests of the main use and of each
+part of the request. If a baseline test file changed, restore it and fix the code, unless a person approves with `approve-test-change`.
 
 ```bash
 python3 "$HARNESS" --runtime claude --project "$PROJECT" close "$SLUG"

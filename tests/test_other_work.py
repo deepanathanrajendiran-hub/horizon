@@ -94,7 +94,7 @@ def test_a_go_goal_closes_after_the_request_check_alone(project):
     (p / "parser.go").write_text("package tool\n\nfunc Parse(line string) string {\n\treturn line\n}\n")
     code, out = cli("close", SLUG)
     assert code == 1 and len(out["missing"]) == 1 and "part by part" in out["missing"][0], out
-    assert cli("check", SLUG, "--did", "Ran each part", "--next", "Close")[0] == 0
+    assert cli("check", SLUG, "--did", "Ran each part", "--next", "Close", "--parts", "1-99")[0] == 0
     code, out = cli("close", SLUG)
     assert code == 0 and out["complete"], out
 

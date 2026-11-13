@@ -551,19 +551,21 @@ def load(slug: str) -> dict:
 
 
 def checkpoint(slug, did, next_action, tree_hash_value,
-               gate_result, gate_output="") -> dict:
+               gate_result, gate_output="", parts=None) -> dict:
     """Append a checkpoint. Serialised: this is a read-modify-write, and two
     concurrent turns would otherwise each read turn N and both write N+1,
-    losing one turn's record entirely."""
+    losing one turn's record entirely. `parts` (`1-4,7`) marks parts of an
+    open request check as run."""
     if gate_result not in ("pass", "fail", "skipped"):
         raise ValueError(f"gate_result must be pass|fail|skipped, got {gate_result!r}")
+    numbers = _part_numbers(parts) if parts else set()
     with filelock.goal_locked(_path(slug)):
         return _checkpoint_locked(slug, did, next_action, tree_hash_value,
-                                  gate_result, gate_output)
+                                  gate_result, gate_output, numbers)
 
 
 def _checkpoint_locked(slug, did, next_action, tree_hash_value,
-                       gate_result, gate_output) -> dict:
+                       gate_result, gate_output, parts=()) -> dict:
     state = load(slug)
     if execution_mode(state) == "state":
         raise AttemptOpen(
@@ -581,6 +583,10 @@ def _checkpoint_locked(slug, did, next_action, tree_hash_value,
         "gate": gate_result, "gate_output": _bounded(gate_output),
         "gate_spec": dict(state["gate"]), "source_hash": _work_digest(state),
     })
+    asked = state.get("request_check")
+    if parts and asked and "parts" in asked:
+        known = set(range(1, len(asked["parts"]) + 1))
+        asked["done"] = sorted(set(asked.get("done") or ()) | (set(parts) & known))
     state["used"]["turns"] += 1
     return _save(state)
 
@@ -847,33 +853,79 @@ class RequestCheckDue(GateNotPassed):
 REQUEST_CHECK_PARTS = 2  # a request with fewer headed parts is read whole and needs no walk
 
 
-def _request_parts(state: dict) -> str:
-    """The request's parts by file, as `SPEC.md: Parsing (line 40), Errors (line 88)`, or "" when it has too few."""
+def _request_part_list(state: dict) -> list[dict]:
+    """The request's headed parts in order, each `{"file", "line", "heading"}`; [] when it has too few to walk."""
     try:
         found = sections.request_parts(state.get("gate_path"), state["cwd"], state.get("request_inputs"))
     except Exception:
-        return ""
-    if sum(len(parts) for _, parts in found) < REQUEST_CHECK_PARTS:
-        return ""
-    return "; ".join(f"{name}: " + ", ".join(f"{_clip(heading, 60)} (line {number})" for number, heading in parts)
-                     for name, parts in found)
+        return []
+    parts = [{"file": name, "line": number, "heading": heading} for name, listed in found for number, heading in listed]
+    return parts if len(parts) >= REQUEST_CHECK_PARTS else []
+
+
+def _numbered(parts: list[dict], only=None) -> str:
+    """`SPEC.md: 1 Parsing (line 40), 2 Errors (line 88); README.md: 3 Usage (line 5)`, the numbers being the ones
+    `check --parts` takes; `only` keeps those numbers."""
+    by_file = {}
+    for number, part in enumerate(parts, 1):
+        if only is None or number in only:
+            by_file.setdefault(part["file"], []).append(
+                f"{number} {_clip(part['heading'], 60)} (line {part['line']})")
+    return "; ".join(f"{name}: " + ", ".join(listed) for name, listed in by_file.items())
+
+
+def request_parts_left(state: dict) -> list[int]:
+    """The numbers of the parts the request check still has to run."""
+    asked = state.get("request_check") or {}
+    done = set(asked.get("done") or ())
+    return [n for n in range(1, len(asked.get("parts") or ()) + 1) if n not in done]
+
+
+def _part_numbers(text: str) -> set[int]:
+    """`1-4,7` as {1, 2, 3, 4, 7}."""
+    numbers = set()
+    for item in re.split(r"[,\s]+", text.strip()):
+        found = re.fullmatch(r"(\d+)(?:-(\d+))?", item)
+        if not found:
+            raise ValueError(f"--parts takes the numbers of the request's parts, such as 1-4,7; got {text!r}")
+        first, last = int(found.group(1)), int(found.group(2) or found.group(1))
+        numbers.update(range(first, min(last, first + 1000) + 1))
+    return numbers
+
+
+def _request_parts_note(state: dict) -> str:
+    """What is left of the request check, for `check`, `close` and the session start."""
+    asked = state.get("request_check") or {}
+    left = request_parts_left(state)
+    return (f"{len(left)} of {len(asked.get('parts') or ())} parts of the request are still to run: "
+            f"{_numbered(asked['parts'], set(left))}") if left else ""
 
 
 def request_check_open(state: dict) -> bool:
-    """True from the `close` that asked for the request check until a `check` saves what it found."""
+    """True from the `close` that asked for the request check until `check --parts` has saved every part. (A goal
+    asked before parts were kept is released by its next `check`, as it was then.)"""
     asked = state.get("request_check")
-    return bool(asked) and state["used"]["turns"] <= asked.get("turn", 0)
+    if not asked:
+        return False
+    if "parts" not in asked:
+        return state["used"]["turns"] <= asked.get("turn", 0)
+    return bool(request_parts_left(state))
 
 
 def request_check(state: dict, observed_hash: str | None = None) -> str | None:
     """What to say when a thin goal would complete and its work has not been gone through against the request since
-    the gate first passed everything, or None. The first `close` that would complete asks for it; a `check` saved
-    after that releases it.
+    the gate first passed everything, or None. The first `close` that would complete asks for it and keeps the list
+    of parts; `check --parts` saves the ones that were run, and `close` completes when none is left.
 
     E2E-SWE thin4 run: 14 of 31 builds closed the goal with hidden tests still failing and sessions left (plain: 8
     of 62). websockets closed after 4 of 10 sessions at 27 of 35, its own 25 tests passing; pgqueuer after 4 at 19
     of 21. The gate is the build's own tests, so it agrees with the build's own reading of the request. The big
-    run's reading found what closed that gap for plain: short scripts written from the request late in the work."""
+    run's reading found what closed that gap for plain: short scripts written from the request late in the work.
+
+    thin12 run: any `check` after the ask used to release it. protobuf-to-pydantic was asked late in session 5,
+    went on with its own tests, saved an ordinary `check` in session 7 and ran `close` "to see which spec parts
+    remain": it completed, at 22 of 42. Nothing on disk said which parts had been run, so each session was shown
+    the whole list again."""
     if not state.get("thin") or state["status"] != "active" or budget_exhausted(state):
         return None
     asked = state.get("request_check")
@@ -881,21 +933,29 @@ def request_check(state: dict, observed_hash: str | None = None) -> str | None:
         return None
     if observed_hash is not None and _unchanged_since_baseline(state, observed_hash):
         return None
-    parts = _request_parts(state)
+    if asked and "parts" in asked:
+        return ("The request check is under way: " + _request_parts_note(state) + ". Run the work the way each "
+                "describes, print what comes back and read it against the request's own words; where they differ, "
+                "change the code, never a test's expectation. Save the ones you ran with `check --parts NUMBERS` "
+                "(such as `--parts 3-6,9`); a part with nothing to run is done once read. `close` completes when "
+                "none is left.")
+    parts = _request_part_list(state)
     if not parts:
         return None
     names = unbuilt_names(state)
     return ("The gate passes, and the gate is your own tests: they agree with your reading of the request, not "
             "with the request. Before this goal completes, go through the request once more, part by part: "
-            f"{parts}. This is one pass through the request, not a new set of tests. For each part, read it, then "
-            "run a short script or command that uses the work the way that part describes and prints what comes "
-            "back; write no expected values into it. Read what it printed against the request's own words: "
-            "names, arguments and their order, defaults, returned values, error types, output format. Where they "
-            "differ, the request is right: change the code, never a test's expectation, and add one test for "
-            "each difference you fixed, its value copied from the request. Where the request does not settle a "
-            "point, leave the code and record it with `note --finding`. Save where you are with `check` "
-            "(`--did` naming the parts you ran and what differed); when every part is done, run `close` again "
-            "and it completes." + (f" Start with these: {names}" if names else ""))
+            f"{_numbered(parts)}. This is one pass through the request, not a new set of tests. For each part, "
+            "read it, then run a short script or command that uses the work the way that part describes and "
+            "prints what comes back; write no expected values into it. Read what it printed against the "
+            "request's own words: names, arguments and their order, defaults, returned values, error types, "
+            "output format. Where they differ, the request is right: change the code, never a test's "
+            "expectation, and add one test for each difference you fixed, its value copied from the request. "
+            "Where the request does not settle a point, leave the code and record it with `note --finding`. "
+            "Save the parts you ran with `check --parts NUMBERS` (such as `--parts 1-4,7`, with `--did` saying "
+            "what differed); a part with nothing to run is done once read. The pass need not fit in this "
+            "session: the next one is shown the parts still to run. When none is left, `close` completes."
+            + (f" Start with these: {names}" if names else ""))
 
 
 def _hold_request_check(state: dict, observed_hash: str) -> None:
@@ -905,12 +965,13 @@ def _hold_request_check(state: dict, observed_hash: str) -> None:
 
 
 def _ask_request_check(slug: str) -> None:
-    """Record that `close` asked for the request check, so the `check` that follows releases it."""
+    """Record that `close` asked for the request check, with the parts it listed: `check --parts` marks them."""
     with filelock.goal_locked(_path(slug)):
         state = load(slug)
         if state["status"] != "active" or state.get("request_check"):
             return
-        state["request_check"] = {"at": _now(), "turn": state["used"]["turns"]}
+        state["request_check"] = {"at": _now(), "turn": state["used"]["turns"],
+                                  "parts": _request_part_list(state), "done": []}
         _persist_mutation_locked(state)
 
 

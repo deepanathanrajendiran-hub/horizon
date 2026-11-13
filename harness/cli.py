@@ -64,6 +64,7 @@ def parser() -> argparse.ArgumentParser:
     check.add_argument("--next", required=True, dest="next_action")
     check.add_argument("--timeout", type=int, default=gate.DEFAULT_TIMEOUT)
     check.add_argument("--force", action="store_true", help="Rerun a command whose inputs are external")
+    check.add_argument("--parts", help="Request check: the numbers of the parts you ran, such as 1-4,7")
     review = commands.add_parser("review", help="Record a fresh reviewer's verdict for the printed snapshot")
     review.add_argument("slug")
     review.add_argument("--result", choices=("pass", "fail"), required=True)
@@ -336,6 +337,8 @@ def check(args) -> tuple[dict, int]:
         raise goal.BudgetExhausted("Turn budget exhausted; no new increment may start.")
     if args.timeout <= 0:
         raise ValueError("Timeout must be positive")
+    if args.parts:
+        goal._part_numbers(args.parts)  # a mistyped list is an error before the gate runs, not after
     evaluated = dict(state, checkpoints=[]) if args.force else state
     error = None
     try:
@@ -351,9 +354,12 @@ def check(args) -> tuple[dict, int]:
         error = "Watched inputs could not be fingerprinted; verification is incomplete."
         result, output = "fail", error + "\n" + output
     state = goal.checkpoint(
-        args.slug, args.did, args.next_action, digest, result, output
+        args.slug, args.did, args.next_action, digest, result, output, parts=args.parts
     )
     report = status(state)
+    if goal.request_check_open(state) and goal._request_parts_note(state):
+        report["request_check"] = (goal._request_parts_note(state) + ". Save the ones you run with "
+                                   "`check --parts NUMBERS`; `close` completes when none is left.")
     report["review_required"] = not error and (
         state["gate"]["kind"] == "coverage"
         or (result == "pass"

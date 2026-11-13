@@ -445,18 +445,20 @@ def _surface_line(state: dict) -> str:
             "give each a working first version before you deepen what exists; `close` waits for them.")
 
 def _request_check_line(state: dict) -> str:
-    """The request check a `close` asked for and no `check` has answered yet: a session that ends in the middle of
-    it leaves nothing else to say it was under way."""
+    """The request check a `close` asked for, and the parts of it still to run: a session that ends in the middle
+    of it leaves nothing else to say it was under way, or how far it got."""
     if not goal.request_check_open(state):
         return ""
-    parts = goal._request_parts(state)
-    if not parts:
-        return ""
+    left = goal._request_parts_note(state)
+    if not left:  # asked by a version that kept no list of parts
+        parts = goal._numbered(goal._request_part_list(state))
+        if not parts:
+            return ""
+        left = f"the parts are {parts}"
     return (" The last `close` passed every check and asked for the work to be gone through against the request, "
-            f"part by part, before the goal completes: {parts}. Carry on with the parts not yet run: run the "
-            "work the way each part describes, print what comes back, and read it against the request's own "
-            "words. Where they differ, change the code, never a test's expectation. Save what you find with "
-            "`check`, then run `close`.")
+            f"part by part, before the goal completes: {left}. Run the work the way each part describes, print "
+            "what comes back, and read it against the request's own words. Where they differ, change the code, "
+            "never a test's expectation. Save the parts you ran with `check --parts NUMBERS`, then run `close`.")
 
 def _unbuilt_line(state: dict) -> str:
     """Names the request gives in code that the work defines nowhere (read from the source; nothing is run). Not

@@ -182,7 +182,7 @@ def test_the_names_are_advice_and_close_does_not_wait_for_them(project):
     assert code == 1 and len(out["missing"]) == 1, out
     assert "part by part" in out["missing"][0] and "Start with these" in out["missing"][0], out
     assert "parse_all, Tokenizer" in out["missing"][0] and "unbuilt_names" not in out, out
-    assert cli("check", SLUG, "--did", "Ran each part", "--next", "Close")[0] == 0
+    assert cli("check", SLUG, "--did", "Ran each part", "--next", "Close", "--parts", "1-99")[0] == 0
     code, out = cli("close", SLUG)
     assert code == 0 and out["complete"], out
 
@@ -333,7 +333,7 @@ def test_a_project_whose_goal_is_finished_is_not_told_to_start_one(project):
         "def parse(line):\n    return line\n\n\ndef parse_all(lines):\n    return [parse(x) for x in lines]\n\n\n"
         "class Tokenizer:\n    def split(self, line):\n        return line.split()\n")
     assert cli("close", SLUG)[0] == 1  # the request check
-    assert cli("check", SLUG, "--did", "Ran each part", "--next", "Close")[0] == 0
+    assert cli("check", SLUG, "--did", "Ran each part", "--next", "Close", "--parts", "1-99")[0] == 0
     code, out = cli("close", SLUG)
     assert code == 0 and out["complete"], out
     context = _context(cli.new_session("s2"))
