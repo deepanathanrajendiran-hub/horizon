@@ -202,6 +202,44 @@ def _doctest_source(body: str) -> str:
     return "\n".join(line[4:] for line in body.splitlines() if line.startswith((">>> ", "... ")))
 
 
+def _stated(text: str) -> bool:
+    """Whether a comment's text states a value: `m.state == 'B'`, `len(queue) == 0`, `result is None`. The left
+    side is an expression that names something; the right side is a literal. Prose ("x == 3 when ready") and a
+    comparison of two names say nothing that can be checked."""
+    try:
+        node = ast.parse(text, mode="eval").body
+    except (SyntaxError, ValueError):
+        return False
+    if not isinstance(node, ast.Compare) or len(node.ops) != 1 or not isinstance(node.ops[0], (ast.Eq, ast.Is)):
+        return False
+    left, right = node.left, node.comparators[0]
+    if not any(isinstance(n, ast.Name) for n in ast.walk(left)):
+        return False
+    try:
+        value = ast.literal_eval(right)
+    except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+        return False
+    if isinstance(value, float):
+        return False  # a float in a comment is as often rounded (`# area == 12.57`), and `==` would call that wrong
+    return not isinstance(node.ops[0], ast.Is) or value is None or isinstance(value, bool)
+
+
+def _comment_checks(source: str) -> str:
+    """The block with each comment line that states a value turned into the `assert` it describes, line for line.
+
+    Several specs give an example's results this way and no other (`# m.state == 'B'`), so no example of theirs was
+    read: in the thin8 to thin12 builds that were looked at, the examples check ran nothing at all."""
+    stated = {line for line, text, alone in _comments(source) if alone and _stated(text)}
+    if not stated:
+        return source
+    out = []
+    for number, line in enumerate(source.splitlines(), 1):
+        if number in stated:
+            indent = line[:len(line) - len(line.lstrip())]
+            line = f"{indent}assert {line.lstrip()[1:].strip()}"
+        out.append(line)
+    return "\n".join(out)
+
 def extract(text: str, package: str) -> tuple[list[dict], list[dict]]:
     """The spec's checkable examples and listed signatures for `package`."""
     found, sigs, n = [], [], 0
@@ -218,6 +256,10 @@ def extract(text: str, package: str) -> tuple[list[dict], list[dict]]:
             sigs += _signatures(tree, imported, line)
         if not imported:
             continue
+        if not doctest:
+            checked = _comment_checks(source)
+            if checked != source and _parse(checked) is not None:
+                source, tree = checked, _parse(checked)
         expect = {} if doctest else _expectations(tree, source)
         calls = []
         for node in tree.body:

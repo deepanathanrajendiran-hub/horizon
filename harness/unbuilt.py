@@ -38,9 +38,30 @@ _SOURCE = (".py", ".pyi", ".js", ".jsx", ".mjs", ".ts", ".tsx", ".go", ".rs", ".
            ".h", ".cpp", ".hpp", ".cs", ".swift", ".scala", ".lua")
 
 
+# A symbol with a subscript, as mathematics writes it in a code span: `B_n`, `Li_s(z)`, `T_0`. thin10 and thin11
+# mpmath listed `B_n` and `Li_s` in every session to the end.
+_NOTATION = re.compile(r"[A-Z][a-z]?_[a-z0-9]")
+# How a recorded fact says a listed name is not the work's to build. `Not ours: A, B` is the form the message
+# gives; the rest are words sessions used before there was one, kept only where they say outright that nothing is
+# to be built. "not built", "belongs to", "notation" and "not code" were read this way at first, and a fact such as
+# "parse_header is not built yet; Reader waits for it" took both names off the list.
+_DISMISSAL = re.compile(r"\bnot ours\b|\bneeds? (?:nothing|no building|no work)\b|\bnone needs\b"
+                        r"|\banother library'?s?\b|\bgenerated at runtime\b|\bexample'?s? own\b", re.I)
+
+
+def dismissed(names: list[str], facts) -> set[str]:
+    """The names a recorded fact both mentions and says are not the work's own to build."""
+    out = set()
+    for fact in facts or ():
+        if not isinstance(fact, str) or not _DISMISSAL.search(fact):
+            continue
+        words = set(re.findall(r"[A-Za-z_]\w*", fact))
+        out |= {name for name in names if name in words}
+    return out
+
 def _wanted(name: str) -> bool:
     return (len(name) > 1 and not name.startswith("_") and name not in _NOT_NAMES
-            and not (name.isupper() and len(name) > 1))
+            and not (name.isupper() and len(name) > 1) and not _NOTATION.fullmatch(name))
 
 
 def _ours(head: str, package: str | None) -> bool:

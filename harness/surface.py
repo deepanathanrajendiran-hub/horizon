@@ -45,12 +45,20 @@ def _keep(segments: list[str]) -> list[str]:
     return kept
 
 
+# thin5 and thin6 django-modelcluster: the spec lists the check ids `modelcluster.E001` and `modelcluster.E002`; one
+# build deleted them from the surface file, the other added fake `E001` constants to the package to pass.
+# One letter and three or four digits, written straight after the package (`pkg.E001`): the first, wider pattern
+# also took real names for ids (NL2Repo six: `six.PY34`; it would have taken `SHA256` and `X509` too).
+_MESSAGE_CODE = re.compile(r"[A-Z]\d{3,4}")
+
 def _line_refs(line: str, package: str, pkg: str) -> set[str]:
     found = set()
     for chain in re.findall(rf"(?<![\w./-]){pkg}((?:\.[A-Za-z_]\w*)+)(?![\w/-])", line):
         whole = chain.strip(".").split(".")
         if whole[0] in _NOT_REFS or whole[-1] in _NOT_REFS:
             continue  # a file name or a domain: pkg.dev.py, pkg.readthedocs.io
+        if len(whole) == 1 and _MESSAGE_CODE.fullmatch(whole[0]):
+            continue  # the id of a message, such as a system check's `pkg.E001`: a string, not a name
         segments = _keep(whole)
         if segments:
             found.add(".".join([package, *segments]))
@@ -387,6 +395,28 @@ def spec_files(text: str) -> list[str]:
     README.rst, and a build without it failed to install)."""
     return sorted({p for depth, p in _tree_paths(text) if depth == 0 and _PACKAGING_FILE.match(p)})
 
+# Functions that are handed a module as readily as an object
+_TAKES_A_MODULE = {"getattr", "hasattr", "setattr", "delattr", "dir", "vars", "help", "reload", "getmembers",
+                   "import_module", "isinstance", "type", "id", "repr", "print", "object", "getsource", "getdoc",
+                   "getfile", "getmodule", "signature", "callable", "ismodule"}
+
+def _object_named_like(lines: list[str], pkg: str) -> bool:
+    """Whether the spec uses the package's name for a value: a statement that assigns it from a call
+    (`pkg = Maker()`), or a call that is passed it by position (`Consumer(pkg, workers=1)`). A keyword argument
+    (`Machine(states, pkg=None)`) and an entry point (`pkg = pkg.cli:main`) are neither.
+
+    Being passed says less than being assigned, since a module is passed too: it does not count when the callee is
+    one that takes a module (`getattr(pkg, name)`, `inspect.getmembers(pkg)`), nor in a spec whose code writes
+    `import pkg`, where the name is the module. NL2Repo fsutil, with those two calls and `import fsutil`, lost 42
+    real functions (`fsutil.copy_file`, ...) to the first version of this rule."""
+    assigned = re.compile(rf"^\s*{pkg}\s*=\s*(?!{pkg}\b)[A-Za-z_][\w.]*\(")
+    if any(assigned.search(line) for line in lines):
+        return True
+    if any(re.match(rf"\s*import\s+(?:[\w.]+\s*,\s*)*{pkg}\b(?!\s*\.)", line) for line in lines):
+        return False
+    passed = re.compile(rf"([A-Za-z_]\w*)\(\s*(?:[^()=]*,\s*)?{pkg}\s*[,)]")
+    return any(found.group(1) not in _TAKES_A_MODULE for line in lines for found in passed.finditer(line))
+
 def refs(text: str, package: str) -> list[str]:
     text = _unalias(text, package)
     pkg = re.escape(package)
@@ -394,16 +424,33 @@ def refs(text: str, package: str) -> list[str]:
     text = _URL.sub(" ", text)
     # Prose in backticks, doctest prompts and comments hold imports too.
     lines = [re.sub(r"^\s*(?:>>>|\.\.\.|#)\s?", "", line).replace("`", " ") for line in text.splitlines()]
-    kept = set(modules)
+    dotted = set()
     for i, line in enumerate(lines):
         # `try: x = pkg.missing` / `except AttributeError:` shows a name that must not exist.
         if any("AttributeError" in near for near in lines[i:i + 3]):
             continue
-        kept |= _line_refs(line, package, pkg)
-    kept |= _from_imports(lines, package, pkg)
-    kept |= _init_all(text.splitlines(), package)  # with its backticks: headings name the module in code
-    kept |= _blanket_exports(text.splitlines(), package)
-    kept |= _heading_modules(text.splitlines(), package)
+        dotted |= _line_refs(line, package, pkg)
+    placed = set(modules)
+    placed |= _from_imports(lines, package, pkg)
+    placed |= _init_all(text.splitlines(), package)  # with its backticks: headings name the module in code
+    placed |= _blanket_exports(text.splitlines(), package)
+    placed |= _heading_modules(text.splitlines(), package)
+    if _object_named_like(lines, pkg):
+        # The spec also uses the package's name for an object (`Consumer(huey)`, `huey = Huey()`), so a call
+        # `huey.task()` is as likely that object's method as a function of the package. A name the spec only ever
+        # calls that way is kept only when the spec places it some other way: an import, an `__all__`, a module
+        # that holds other names. A name it writes without a call (`pkg.exceptions`) may be a module and stays.
+        # thin10 huey: ten methods of the `Huey` class were listed as names of the package, and the build added
+        # ten module-level functions the request never asks for.
+        for ref in list(dotted):
+            parts = ref.split(".")
+            called = re.compile(rf"(?<![\w.]){pkg}\.{re.escape(parts[-1])}\s*\(")
+            if (len(parts) == 2 and not parts[1][:1].isupper() and ref not in placed
+                    and any(called.search(line) for line in lines)
+                    and not any(other.startswith(ref + ".") for other in dotted | placed)
+                    and not any(re.match(rf"\s*import\s+{re.escape(ref)}\b", line) for line in lines)):
+                dotted.discard(ref)
+    kept = placed | dotted
     # A private module's public names are reached through the package (NL2Repo structlog: the spec gave
     # `from structlog._config import reset_defaults`, and callers used `structlog.reset_defaults`).
     for ref in list(kept):
@@ -913,5 +960,11 @@ def grouped(failed: list[dict], limit: int = 200) -> str:
 def message(found: dict) -> str:
     return ("Names and modules the request gives that do not import: " + listing(found["failed"]) + ". A test "
             "that imports a missing one fails, whatever else works. Build each one; if the request does not mean "
-            f"one (a file name, an example's variable), delete it from {found['file']} and say why with "
-            "`note --finding`.")
+            "one as a name to import (a file name, an example's variable, a method of a class, a message's id), "
+            f"{how_to_delete(found['file'])}")
+
+
+def how_to_delete(file: str) -> str:
+    """The one edit a session may make to the surface file, said the same way wherever missing names are listed."""
+    return (f"delete its line from {file} and say why with `note --finding`: never add a name to the work only "
+            "to pass this check.")

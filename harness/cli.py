@@ -101,7 +101,8 @@ def parser() -> argparse.ArgumentParser:
     abandon = commands.add_parser("abandon")
     abandon.add_argument("slug")
     abandon.add_argument("--reason", required=True)
-    reopen = commands.add_parser("reopen")
+    reopen = commands.add_parser("reopen", help="Make an abandoned goal active again, or a complete one whose "
+                                 "request is carried on; keeps its gate, facts and checks")
     reopen.add_argument("slug")
     reopen.add_argument("--reason", required=True)
     reopen.add_argument("--extra-turns", type=int)
@@ -173,14 +174,22 @@ def _with_examples(report: dict, state: dict) -> dict:
         key, found = None, None
     if found and found["failed"] and "surface_advisory" not in report:
         report["surface_missing"] = (surface.grouped(found["failed"]) + ". `close` waits for these: a test that "
-                                     "imports a missing one fails, whatever else works.")
+                                     "imports a missing one fails, whatever else works. One the request does not "
+                                     "mean as a name to import (a method of a class, a message's id, a file name): "
+                                     + surface.how_to_delete(found.get("file") or surface.FILE))
     try:
         installed = goal.install_check(goal.load(state["slug"]), key)
     except Exception:
         installed = None
     if installed and not installed.get("ok") and not installed.get("error") and "install_advisory" not in report:
-        report["install_problem"] = (install_gate.problem(installed) + ". `close` waits for it: until the package "
-                                     "installs, every test that imports it fails.")
+        try:
+            waived = goal.install_waived(goal.load(state["slug"]), installed)
+        except Exception:
+            waived = False
+        report["install_problem"] = install_gate.problem(installed) + (
+            ". A recorded fact answers for this, so `close` does not wait for it: name it in "
+            "the final report." if waived else
+            ". `close` waits for it: until the package installs, every test that imports it fails.")
     try:  # `check` says it before `close` holds on it
         fresh = goal.load(state["slug"])
         last = (fresh.get("checkpoints") or [None])[-1]
@@ -205,6 +214,15 @@ def _with_examples(report: dict, state: dict) -> dict:
         names = None
     if names:
         report["unbuilt_names"] = names
+    try:  # advice: tests the gate's latest run skipped check nothing
+        fresh = goal.load(state["slug"])
+        standing = goal.standing_gate(fresh)
+        skipped = (goal.skipped_tests(standing.get("gate_output") or "")
+                   if standing and fresh["status"] == "active" and "skipped_tests" not in report else None)
+    except Exception:
+        skipped = None
+    if skipped:
+        report["skipped_tests"] = skipped
     return report
 
 
@@ -223,6 +241,13 @@ def goal_rows(exclude: str | None = None) -> list[dict]:
         except (goal.GoalStateError, KeyError, TypeError, ValueError) as exc:
             rows.append({"slug": path.stem, "error": f"unreadable goal: {exc}"})
     return rows
+
+def _completed_at(slug: str) -> str:
+    """When a goal completed, as saved; "" when that cannot be read."""
+    try:
+        return str(goal.load(slug).get("completed_at") or "")
+    except Exception:
+        return ""
 
 
 
@@ -353,13 +378,28 @@ def check(args) -> tuple[dict, int]:
     if digest == gate.UNKNOWN_HASH and error is None:
         error = "Watched inputs could not be fingerprinted; verification is incomplete."
         result, output = "fail", error + "\n" + output
+    was_open = goal.request_check_open(state)
     state = goal.checkpoint(
         args.slug, args.did, args.next_action, digest, result, output, parts=args.parts
     )
     report = status(state)
+    standing = None
+    if result == "skipped":
+        # No file changed since the last check, so the gate was not run again. That is no failure: the result
+        # it gave on these same files stands, and so does its exit code. Before, this printed `"gate": "skipped"`
+        # with exit code 1, as a failed command (and `check --parts`, after a pass that changed nothing, always did).
+        standing = goal.standing_gate(state)
+        stands = standing["gate"] if standing else "none yet"
+        report["gate_skipped"] = (f"No file changed since the last gate run, so the gate was not run again: its "
+                                  f"result ({stands}) stands. What you did and the next action are saved.")
     if goal.request_check_open(state) and goal._request_parts_note(state):
+        over = (state["checkpoints"][-1].get("parts_left_over") or 0) if args.parts else 0
         report["request_check"] = (goal._request_parts_note(state) + ". Save the ones you run with "
-                                   "`check --parts NUMBERS`; `close` completes when none is left.")
+                                   "`check --parts NUMBERS`; `close` completes when none is left."
+                                   + (f" One `check` saves at most {goal.PARTS_PER_CHECK} parts: {over} more that "
+                                      "this one named are still to run. Run them, then save them." if over else ""))
+    elif was_open and args.parts:
+        report["parts_saved"] = "Every part of the request check is saved: run `close` now."
     report["review_required"] = not error and (
         state["gate"]["kind"] == "coverage"
         or (result == "pass"
@@ -377,7 +417,8 @@ def check(args) -> tuple[dict, int]:
     if error:
         report["error"] = error
     _with_examples(report, state)
-    return report, (2 if error else 0 if result == "pass" else 1)
+    passed = result == "pass" or (standing is not None and standing["gate"] == "pass")
+    return report, (2 if error else 0 if passed else 1)
 
 def _step_error(args, error: Exception) -> dict:
     """Translate a failed state-mode command without inventing an outcome."""
@@ -495,6 +536,16 @@ def dispatch(args) -> tuple[dict, int]:
         report = status(state)
         report["observation"] = goal.latest_observation(state)
         report["other_goals"] = goal_rows(exclude=state["slug"])
+        finished = [row["slug"] for row in report["other_goals"] if row.get("status") == "complete"]
+        if finished:
+            # thin10 claripy, thin12 tremolo: sessions after a goal completed started another on the same files.
+            # The goal named is the one completed last, the same one the session-start message names.
+            latest = max(finished, key=_completed_at)
+            report["earlier_goal"] = (
+                f"This project's goal {latest} is complete. If this request carries that work on, abandon "
+                f"this goal and run `reopen {latest} --reason \"<what is asked>\"` instead: it keeps that "
+                "goal's gate and checks. Either way, `close` asks for the request to be gone through part by part "
+                "before it completes: the files here are the earlier goal's work.")
         report.update(installed)
         if getattr(args, "earlier_request", None):
             report["earlier_request"] = args.earlier_request

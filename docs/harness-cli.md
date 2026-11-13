@@ -36,7 +36,7 @@ when operating from an otherwise unmarked nested directory.
 | `step-reclaim SLUG --attempt A --expected-revision N [--session S]` | Close a state-mode attempt whose lease went stale |
 | `hook SessionStart\|PostToolUse\|Stop`, `install-hooks`, `uninstall-hooks` | Claude Code hooks and their installation |
 | `abandon SLUG --reason TEXT` | Close incomplete work honestly |
-| `reopen SLUG --reason TEXT [--extra-turns N] [--extra-minutes N]` | Resume with an authorized budget extension |
+| `reopen SLUG --reason TEXT [--extra-turns N] [--extra-minutes N]` | Make an abandoned goal active again with an authorized budget extension, or a complete goal whose request is carried on (it keeps its gate, facts and checks; its request check is asked again; one whose time limit is spent needs `--extra-minutes`) |
 
 `status` without a slug returns `{"goals": [...]}` with one short row per goal:
 slug, status, goal, gate, review criterion, gate path, next action, abandon
@@ -106,7 +106,12 @@ finalizes). Otherwise it returns `missing`, with `observation`. Rules:
   `[unverifiable]` or `[judgment]`. When one is required and a pass covers the
   tree, the report includes `review_file` and `review_brief`; record the verdict
   with `review`, then run `close` again.
-- A changed baseline test file blocks completion until `approve-test-change`.
+- A changed baseline test file blocks completion until `approve-test-change`. A baseline test is one the project had
+  when the session that started the goal began, committed or not: the SessionStart hook records the test files of a
+  session that begins with no active goal, and `start` reads that record. A test file the session wrote before
+  `start`, or one an earlier goal added (recorded when that goal completes or is abandoned), is the goal's own work
+  and is not held. With no such record (no hook ran), every test file there at `start` is baseline. The message
+  gives the command that puts a committed file back from the commit the goal began on.
 - A goal with a gate directory and a command gate completes only when every
   requirement line tagged `[gate]` is named by a check: its id as written (`R3`,
   `R03`, `R1.2`, `# R3`) or inside an identifier after an underscore
@@ -876,3 +881,17 @@ The session-start message adds `Plateau: ...` when the project's source (every f
 and build folders and the gate directory, in any language, documentation excluded: doc folders and `.md`,
 `.rst`, `.adoc` files) is unchanged across three session starts in a row. Two whole sessions
 changed nothing, so the message sends the agent back to running and building the work.
+
+## Recorded facts that change a check
+
+- `note SLUG --fact "Not ours: NAME, NAME"`: the names are left out of `unbuilt_names` from then on (another
+  library's name, an example's own, a name made at run time).
+- `note SLUG --fact "install check: <the request's words>"`: the request itself says who else supplies a file the
+  install check asks for, or the check's failure is a permission error of the sandbox it runs in. `close` then
+  reports the install problem without waiting for it. The fact answers only for those two: a package that does not
+  build, a script that hangs or installs nothing, and an import that fails are held whatever was recorded.
+- A later goal of the same project starts with the earlier goals' facts, except the ones that release a hold
+  (`install check: ...` and `... by design`): those answer for one goal's request.
+- `check` on files that have not changed since the last gate run does not run the gate again (`gate_skipped`): the
+  last result and its exit code stand.
+- One `check --parts` saves at most 8 parts of the request check.

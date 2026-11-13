@@ -48,7 +48,7 @@ python3 "$HARNESS" --runtime claude --project "$PROJECT" start "Requested outcom
   works, the next test you add runs the deliverable's main use end to end on a real input, with the result the
   request states: a gate of import tests passes while the product does nothing.
 - **What `start` writes:** from the request and the Markdown files it names, a test of every module and public name
-  they give and a file of their code examples. Never edit either. `start` also runs the gate once and prints the
+  they give and a file of their code examples. Edit neither, but see `surface_missing`. `start` also runs the gate once and prints the
   baseline `observation`; read it, and do not run `check` for it.
 - When the request gives a time limit, pass it as `--max-minutes N`.
 
@@ -82,11 +82,11 @@ python3 "$HARNESS" --runtime claude --project "$PROJECT" note "$SLUG" --fact "Te
 What `check`, `close` and the session-start message report, and what to do:
 
 - `surface_missing`: names the request gives that do not import. Give each a working first version before you
-  deepen what exists; delete one the request does not mean (a file name) from the surface file, with `note --finding`.
+  deepen what exists; delete one the request does not mean as an import (a file name, a class's method) from the surface file, with `note --finding`.
 - `unbuilt_names`: names the request gives in code that no source file defines. Find each in the request and build
-  the ones it asks for; another library's name, or an example's own, needs nothing.
+  the ones it asks for; another library's name, or an example's own, needs nothing: `note --fact "Not ours: NAME, NAME"`.
 - `install_problem`: the package does not install in a clean copy, offline. Fix the project's own files (its
-  `pyproject.toml`, the setup script the request names); never build an environment of your own for it.
+  `pyproject.toml`, the setup script the request names); never build an environment of your own for it. If the request says who else supplies a file: `note --fact "install check: <its words>"`.
 - `spec_examples`: which of the request's own examples disagree with the work. Fix the code when the request's
   prose agrees with the example; if the example itself is wrong, skip it with `waive-example`, citing the line.
 - `placeholders`: functions with no body yet; `close` waits for them. Fill each in. Only if the request says the
@@ -103,16 +103,16 @@ notes, the files the last commit changed and every file with its line count. Do 
 get these again, and do not re-read the request unless the next action needs a part of it. Make your first edit
 within your first 5 tool calls; never spend a session only reading. When the message says `Plateau`, do what it
 says in that session. `Where the last session stopped` is the last thing that session said and ran before it was
-cut off, which no `check` saved: if it names a problem, that problem comes before the next action.
+cut off, which no `check` saved: if it names a problem in the work, that problem comes before the next action. If the message names a complete goal and you are asked to carry its work on, `reopen` it; never `start` another.
 
 ## Closing
 
 When every part of the request is built and run, run `close`: `complete` and `missing` come first in its output,
 and `missing` says what to fix. The first `close` that passes every check does not complete the goal: it lists the
 request's parts by number. Run the work as each part describes, print the result and read it against the request;
-where they differ, change the code, not a test. Save the parts you ran with `check --parts 1-4,7`; `close`
+where they differ, change the code, not a test. Save the parts you ran with `check --parts 1-4,7` (at most 8 a `check`); `close`
 completes when none is left. If the gate ran too few tests (`small_gate`), add tests of the main use and of each
-part of the request. If a baseline test file changed, restore it and fix the code, unless a person approves with `approve-test-change`.
+part of the request. If a baseline test (one the project had before the goal, not one you wrote) changed, restore it, fix the code and put your tests in a new file, unless a person approves with `approve-test-change`.
 
 ```bash
 python3 "$HARNESS" --runtime claude --project "$PROJECT" close "$SLUG"
@@ -127,4 +127,4 @@ the gate, and keep building.
 
 Only when the goal is complete, its budget is spent or a person ends the work, end with one report: what the
 request asked for and what is built, the parts not met or not checked first; any `surface_missing`,
-`install_problem` or disagreeing example left open; every test you removed or waived; the slug and status.
+`install_problem` or disagreeing example left open; every test you removed, waived or left skipped; the slug and status.

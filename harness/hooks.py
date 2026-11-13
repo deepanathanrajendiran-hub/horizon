@@ -389,17 +389,30 @@ def _goal_line(state: dict) -> str:
         line += f" Gate command: {state['gate']['value']}."
     observed = goal.latest_observation(state)
     last = state["checkpoints"][-1] if state["checkpoints"] else None
-    # The newest gate result, whether an `observe` or a `check`.
+    # The newest gate run, whether an `observe` or a `check`.
     record = None
     if observed and (last is None or observed["at"] > (last.get("at") or "")):
         record = (observed["gate"], observed["role"], observed["at"], observed["gate_output"])
     elif last and last.get("gate") is not None:
         record = (last["gate"], "check", last.get("at") or "", last.get("gate_output") or "")
+        if last["gate"] == "skipped":
+            # A `check` on unchanged files ran nothing: the result before it stands, with its failing tests
+            # (9 session starts in the thin8 to thin11 runs said only "Last gate run: skipped.").
+            standing = goal.standing_gate(state)
+            if standing:
+                record = (standing["gate"], standing.get("role") or "check", standing.get("at") or "",
+                          standing.get("gate_output") or "")
     if record:
         result, role, at, output = record
         line += f" Last gate run: {result} ({role}, {at[:16]}){_gate_digest(output)}"
         if _files_changed_since_gate(state):
             line += " The files changed after that run: `check` runs the gate on them."
+    did = " ".join(str((last or {}).get("did") or "").split())
+    if did:
+        # thin10 mpmath: session 2 saved its diagnosis of a wrong constant with `check --did`, no later session was
+        # shown it, and session 3 spent nine calls working it out again
+        line += f" The last check recorded: {goal._clip(did, 300)}"
+        line += "" if line.endswith((".", "!", "?")) else "."
     return line + _resume_line(state)
 
 
@@ -440,9 +453,12 @@ def _surface_line(state: dict) -> str:
     last = surface._last(surface.record_path(state["slug"]))
     if not last or not last.get("failed"):
         return ""
+    file = Path(state.get("gate_path") or "") / surface.FILE
     return (f" Names the request gives that did not import at the last check ({len(last['failed'])}): "
             f"{surface.grouped(last['failed'])}. A test that imports a missing one fails whatever else works, so "
-            "give each a working first version before you deepen what exists; `close` waits for them.")
+            "give each a working first version before you deepen what exists; `close` waits for them. One the "
+            "request does not mean as a name to import (a method of a class, a message's id, a file name): "
+            f"{surface.how_to_delete(str(file))}")
 
 def _request_check_line(state: dict) -> str:
     """The request check a `close` asked for, and the parts of it still to run: a session that ends in the middle
@@ -514,9 +530,10 @@ def _repeat_line(state: dict, session: str | None) -> str:
             "do that, and record it as the next action with `check`.")
 
 def _install_line(state: dict) -> str:
-    """What the goal's last install check found wrong (from its saved result; the hook runs nothing more)."""
+    """What the goal's last install check found wrong (from its saved result; the hook runs nothing more). Not said
+    once a fact records that the check does not apply (`install_gate.waived`): it is in the final report then."""
     last = install_gate.last(state["slug"])
-    if not last or last.get("ok") or last.get("error"):
+    if not last or last.get("ok") or last.get("error") or goal.install_waived(state, last):
         return ""
     return f" The package does not install the way the request says: {install_gate.problem(last)}; `close` waits for it."
 
@@ -541,13 +558,22 @@ PLATEAU = ("Plateau: no source file changed in the last 2 sessions while this go
            "(1) Start with the next action: NEXT. (2) Build the largest part of the request that is still unbuilt "
            "or a placeholder. (3) Run the work the way a user would, on the request's own examples and inputs, and "
            "fix what differs from what the request asks.")
+# The same, for a next action that has itself opened NEXT_REPEATS sessions: it is what is not moving, so it is not
+# given as the first step (thin11 protobuf, session 10: "(1) Start with the next action: A person corrects
+# test_surface.py ...", in a run with no person; thin6 fiddle, session 4: "... Blocked on install_problem only").
+PLATEAU_STUCK = ("Plateau: no source file changed in the last 2 sessions while this goal is open, and the recorded "
+                 "next action has not moved it. LEAD (1) Build the largest part of the request that is still "
+                 "unbuilt or a placeholder. (2) Run the work the way a user would, on the request's own examples "
+                 "and inputs, and fix what differs from what the request asks. If the next action waits for a "
+                 "decision, make it yourself, record it with `note --fact`, and go on.")
 
 # NL2Repo given fix: resumed sessions re-read the request, the gate and their own code until the 15-call cap
 RESUME = (" Resume from the next action and the notes: change a file of the work within your first 5 tool calls "
           "this session, and read only what that change needs.")
 REMIND_AT = (6, 11)  # tool calls into a resumed session at which an unchanged work gets a reminder
-REMINDER = ("Horizon: {calls} tool calls this session and no file of the work has changed. Write now{next}; read "
-            "only what that edit needs.")
+REMINDER = ("Horizon: {calls} tool calls this session and no file of the work has changed. If a part of the request "
+            "is still unbuilt, write it now{next}; read only what that edit needs. If the work is built and you "
+            "are checking it, run it and save what you find with `check`: do not add a file only to change one.")
 
 
 def _plateau_line(state: dict) -> str:
@@ -580,7 +606,8 @@ def _plateau_line(state: dict) -> str:
             "Build this session; do not start a review. Make your first tool call this session an edit to the work, "
             "and read only what that edit needs.")
     next_action = goal.row(state)["next_action"] or "the part of the request you would write first"
-    return " " + PLATEAU.replace("SLUG", state["slug"]).replace("LEAD", lead).replace("NEXT", next_action)
+    text = PLATEAU_STUCK if _next_repeats(state) >= NEXT_REPEATS else PLATEAU
+    return " " + text.replace("SLUG", state["slug"]).replace("LEAD", lead).replace("NEXT", next_action)
 
 def _work_fingerprint() -> str | None:
     """Every project file a session can change, tests, docs, hidden files and the gate directory included, but not
@@ -624,9 +651,30 @@ def _mark_session(session: str | None, states: list[dict]) -> None:
                                     "goals": resumed}))
 
 
+def _next_repeats(state: dict) -> int:
+    """How many sessions in a row the goal's current next action has opened (as `_repeat_line` recorded them)."""
+    text = (goal.row(state)["next_action"] or "").strip()
+    try:
+        record = json.loads(goal.notes_path(state["slug"]).with_suffix(".next.json").read_text())
+    except (OSError, ValueError):
+        return 0
+    if not text or not isinstance(record, dict) or record.get("next") != text:
+        return 0
+    seen = record.get("sessions")
+    return len(seen) if isinstance(seen, list) else 0
+
 def _reading_reminder(session: str | None, payload: dict | None = None) -> str:
     """After REMIND_AT tool calls in a resumed session that has changed no file of the work, a reminder that
-    names the next action. A subagent's calls (a reviewer's reads) are not counted and get no reminder."""
+    names the next action. A subagent's calls (a reviewer's reads) are not counted and get no reminder.
+
+    No reminder once the session's goals are complete, or while a request check is under way: running the work and
+    reading it against the request changes no file, and that is the work. thin8 sapp, session 3: "The Horizon hook
+    needs a file of the work changed now, so I'll add a regression test file"; in the thin10 run 16.5% of sessions
+    changed only tests (plain: 3.3%), and none of the scored ones gained a hidden test.
+
+    The next action is left out when it has opened NEXT_REPEATS sessions (it is not moving) and marked when files
+    changed after it was recorded (it may be done): repeated as an order it sent thin10 mpmath to build `gamma`
+    two sessions after it was built, and thin11 protobuf to "Write now: A person corrects test_surface.py"."""
     if not session or (isinstance(payload, dict) and (payload.get("agent_id") or payload.get("agent_type"))):
         return ""
     path = _progress_path()
@@ -644,9 +692,17 @@ def _reading_reminder(session: str | None, payload: dict | None = None) -> str:
                 record["changed"] = True
             else:
                 states = {s["slug"]: s for s in _active_goals()}
-                actions = [goal.row(states[g])["next_action"] for g in record.get("goals", []) if g in states]
-                actions = [a for a in actions if a]
-                out = REMINDER.format(calls=record["calls"], next=f": {'; '.join(actions)}" if actions else "")
+                goals = [states[g] for g in record.get("goals", []) if g in states]
+                if goals and not any(goal.request_check_open(s) for s in goals):
+                    actions = []
+                    for state in goals:
+                        action = goal.row(state)["next_action"]
+                        if not action or _next_repeats(state) >= NEXT_REPEATS:
+                            continue
+                        stale = " (recorded before files changed: it may be done)" if goal.changed_since_next(
+                            state) else ""
+                        actions.append(action + stale)
+                    out = REMINDER.format(calls=record["calls"], next=f": {'; '.join(actions)}" if actions else "")
         path.write_text(json.dumps(record))
     return out
 
@@ -677,12 +733,15 @@ def _paths_line() -> str:
 
 
 def _last_commit_files(limit: int = 12) -> list[str]:
+    """The files the last commit changed, compiled files left out: a project with no .gitignore commits its
+    `__pycache__`, and twelve `.pyc` names hid the source files (thin6 fiddle and django-modelcluster)."""
     try:
         out = subprocess.run(["git", "-C", str(paths.project_root()), "show", "--name-only", "--format=", "HEAD"],
                              capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.SubprocessError):
         return []
     names = [n for n in out.stdout.splitlines() if n.strip()] if out.returncode == 0 else []
+    names = [n for n in names if "__pycache__/" not in n and not n.endswith((".pyc", ".pyo"))]
     return names[:limit] + (["…"] if len(names) > limit else [])
 
 
@@ -733,7 +792,13 @@ def _last_said(transcript) -> str:
 
 
 def _call_text(payload: dict) -> tuple[str, str]:
-    """A tool call as (what was run, what came back)."""
+    """A tool call as (what was run, what came back). Only a command's printed output comes back as text: the
+    result of a Write, Edit or Read is the tool's own record of the call (a Write's holds the file as it was
+    before the write), and quoting its tail told the next session nothing true.
+
+    thin12 protobuf, session 2: the line ended with the placeholder the last Write had just replaced, and the
+    session spent three calls making sure its 762-line file was still there. 41 of 133 such lines in the thin10 to
+    thin12 runs quoted a tool's raw record."""
     given = payload.get("tool_input")
     if isinstance(given, dict):
         ran = given.get("command") or given.get("file_path") or given.get("pattern") or json.dumps(given)
@@ -745,7 +810,7 @@ def _call_text(payload: dict) -> tuple[str, str]:
     back = payload.get("error") or payload.get("tool_response")
     if isinstance(back, dict):
         parts = [back.get(k) for k in ("stdout", "stderr") if isinstance(back.get(k), str) and back.get(k).strip()]
-        back = "\n".join(parts) if parts else ("" if "stdout" in back else json.dumps(back))
+        back = "\n".join(parts)
     return str(ran), str(back or "")
 
 
@@ -779,26 +844,49 @@ def _trail_line(session: str | None) -> str:
     if not isinstance(record, dict) or record.get("session") == session or not record.get("command"):
         return ""
     said = f' it said "{record["said"]}";' if record.get("said") else ""
-    printed = f', which gave: {record["output"]}' if record.get("output") else ""
-    return ("Where the last session stopped (it ended after this call, before `check` could save it):"
-            f"{said} its last call was `{record['command']}`{printed}. If that left a problem open, take it up "
-            "first.")
+    line = ("Where the last session stopped (it ended after this call, before `check` could save it):"
+            f"{said} its last call was `{record['command']}`")
+    if not record.get("output"):
+        return line + "."
+    # thin8 and thin10 transitions: sessions took up an error of the last session's own throwaway script first
+    return (f"{line}, which gave: {record['output']}. If that left a problem open in the work itself, take it up "
+            "first; an error in a throwaway script is not one.")
 
 def _start_first_line() -> str:
-    """For a project that has never had a goal: say that nothing is saved or checked until `start` runs. Not said
-    once a goal has existed here, when a session with no active goal is one after the work was finished.
+    """For a session with no active goal. In a project that has never had one: say that nothing is saved or
+    checked until `start` runs. In one whose goal is complete: name that goal and say how its work is carried on.
 
     E2E-SWE thin10 run, protobuf-to-pydantic: the skill was loaded in session 1 and `start` first ran in session 3.
     Sessions 1 and 2 read the request and wrote files with no goal, so nothing was saved (session 2 listed the
     files and read the request again) and no check ran: the missing setup script was first reported in session 4,
-    and the hidden score was 0 until then. 6 of that run's 15 builds first ran `check` in session 3 or later."""
+    and the hidden score was 0 until then. 6 of that run's 15 builds first ran `check` in session 3 or later.
+
+    thin10 claripy, thin12 tremolo: after the goal completed, a session was told "No active Horizon goal." and
+    nothing else. It ran `start` again on the finished files; that goal closed at once, with no request check and
+    none of the first goal's facts. claripy's sessions 8, 9 and 10 each did this and committed nothing."""
     try:
-        if any(not path.name.endswith(".leases.json") for path in paths.goals_dir().glob("*.json")):
-            return ""
+        states = []
+        for path in paths.goals_dir().glob("*.json"):
+            if path.name.endswith(".leases.json"):
+                continue
+            try:
+                states.append(goal.load(path.stem))
+            except Exception:
+                states.append(None)
     except Exception:
         return ""
-    return (" If this session's request is work for Horizon, run `start` before you build anything: until a goal "
-            "exists nothing is saved or checked, and the next session begins from nothing.")
+    if not states:
+        return (" If this session's request is work for Horizon, run `start` before you build anything: until a goal "
+                "exists nothing is saved or checked, and the next session begins from nothing.")
+    done = [s for s in states if s and s["status"] == "complete"]
+    if not done:
+        return ""
+    last = max(done, key=lambda s: str(s.get("completed_at") or ""))
+    return (f" This project's goal {last['slug']} ({goal._clip(last['goal'], 120)}) is complete. If this session is "
+            f"asked to carry that work on, run `reopen {last['slug']} --reason \"<what is asked>\"`: it keeps the "
+            "goal's gate, facts and checks. Then go through the request again part by part, running the work and "
+            "fixing what differs; `close` asks for that pass before it completes. Run `start` only for a request "
+            "that is a different piece of work.")
 
 def _session_start(session: str | None, source: str | None = None) -> dict | None:
     if session:
@@ -817,6 +905,11 @@ def _session_start(session: str | None, source: str | None = None) -> dict | Non
     startup = source in (None, "startup")
     known = []
     active = _active_goals()
+    if not active and source in (None, "startup", "resume"):
+        # The test files as they are before this session writes any: `start` reads this to tell the session's own
+        # tests from the ones that were there (`goal._baseline_tests`). Not on a clear or a compaction, which come
+        # in the middle of the work.
+        goal.save_tests_before()
     for state in active:
         try:
             note = ""

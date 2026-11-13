@@ -341,6 +341,132 @@ def _requirements(state: dict) -> dict | None:
     return lines
 
 
+def _earlier_goals(cwd) -> list[dict]:
+    """The other goals this project already has, oldest first, as saved. Never raises."""
+    found = []
+    try:
+        here = os.path.abspath(str(cwd))
+        for path in paths.goals_dir().glob("*.json"):
+            if path.name.endswith(".leases.json"):
+                continue
+            try:
+                earlier = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            if isinstance(earlier, dict) and os.path.abspath(str(earlier.get("cwd") or here)) == here:
+                found.append(earlier)
+    except Exception:
+        return []
+    return sorted(found, key=lambda state: str((state.get("used") or {}).get("started") or ""))
+
+
+TESTS_BEFORE = "tests-before.json"  # in Horizon's state folder: the test files as a session with no goal began
+
+def save_tests_before(cwd=None) -> None:
+    """Record the project's test files, with their digests, as a session that has no goal yet begins. The
+    SessionStart hook calls this: it reads files and runs nothing. `_baseline_tests` reads it back at `start`, so the
+    tests the session then writes before it calls `start` are told apart from the ones that were already there,
+    whoever wrote those and whether or not they were committed. Never raises."""
+    try:
+        root = os.path.abspath(str(cwd or paths.project_root()))
+        record = {"at": _now(), "cwd": root, "tests": evidence.test_manifest(root, None)}
+        path = paths.harness_root() / TESTS_BEFORE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(record))
+    except Exception:
+        pass
+
+
+def _tests_before(cwd) -> dict | None:
+    """The record `save_tests_before` made for this project folder, or None."""
+    try:
+        record = json.loads((paths.harness_root() / TESTS_BEFORE).read_text())
+    except (OSError, ValueError):
+        return None
+    if (not isinstance(record, dict) or not isinstance(record.get("tests"), dict)
+            or not isinstance(record.get("at"), str)
+            or os.path.abspath(str(record.get("cwd") or "")) != os.path.abspath(str(cwd))):
+        return None
+    return record
+
+
+def _watched(cwd, rel: str, watch_paths) -> bool:
+    """Whether a project-relative path lies in the watched paths."""
+    path = (Path(cwd) / rel).resolve()
+    for watch in watch_paths or [cwd]:
+        base = Path(watch).resolve()
+        if path == base or base in path.parents:
+            return True
+    return False
+
+
+def _own_tests(state: dict) -> list[str]:
+    """The test files a goal's work added: the ones there now that its baseline does not hold. Recorded when the
+    goal completes or is abandoned, so a later goal of the project does not take them as baseline. A goal that
+    kept no baseline (a coverage gate) records none."""
+    if not isinstance(state.get("test_manifest"), dict):
+        return []
+    try:
+        return sorted(set(evidence.test_manifest(state["cwd"], state.get("watch_paths")))
+                      - set(state["test_manifest"]))
+    except Exception:
+        return []
+
+
+def _baseline_tests(cwd, watch_paths) -> dict[str, str]:
+    """The test files a goal may not change without approval: the ones the project had before the work began.
+
+    A test file the session wrote before it called `start` is the goal's own work, and so is one an earlier goal of
+    the project added. What was there before is read from the record the SessionStart hook made when the session
+    began with no goal (`save_tests_before`), with the digests the files had then:
+
+    - no such record (no hook ran): every test file there now is baseline, as before;
+    - a goal of the project began after the record was made: the files the record names, as they are now. What was
+      added since is that goal's work;
+    - otherwise: the files the record names, as they were when the session began. One the session changed or
+      deleted before `start` shows as changed.
+
+    Less, in each case, the tests an earlier goal recorded as its own (`_own_tests`).
+
+    Git is not asked: a test a person wrote and has not committed is theirs all the same, and the first version of
+    this rule, which took every uncommitted file for the session's work, let such a test be weakened with no hold.
+    Nor is the first goal's list taken for good: a test added to the project after that goal is baseline for the
+    next one.
+
+    E2E-SWE thin6 run, django-modelcluster: the session wrote tests/models.py and a smoke test, then called `start`.
+    Marking its own smoke test `django_db` in session 2 made `close` ask for "a reviewer's or the user's approval"
+    in a run with neither; sessions 5 to 8 went on that, and the build ended at 82.4 (plain 93.4). thin12 tremolo:
+    goal 2 took the test file goal 1 had written as baseline. Also thin8 protobuf, thin9 huey and inline-snapshot."""
+    manifest = evidence.test_manifest(cwd, watch_paths)
+    earlier = _earlier_goals(cwd)
+    own = {rel for g in earlier for rel in g.get("own_tests") or () if isinstance(rel, str)}
+    before = _tests_before(cwd)
+    if before is None:
+        base = manifest
+    elif any(str((g.get("used") or {}).get("started") or "") >= before["at"] for g in earlier):
+        base = {rel: digest for rel, digest in manifest.items() if rel in before["tests"]}
+    else:
+        base = {rel: digest for rel, digest in before["tests"].items()
+                if rel in manifest or (not (Path(cwd) / rel).exists() and _watched(cwd, rel, watch_paths))}
+    return {rel: digest for rel, digest in base.items() if rel not in own}
+
+
+def _carried_facts(cwd, limit: int = 20) -> list[dict]:
+    """The facts earlier goals of this project recorded: an environment fact holds for the next goal too (thin12
+    tremolo: a fact of goal 1 was worked out again in sessions 8, 9 and 10 under goal 2).
+
+    A fact that releases a hold is not carried: `install check: ...` and `... by design` answer for one goal's
+    request, and the next goal's request may say otherwise."""
+    seen, out = set(), []
+    for earlier in _earlier_goals(cwd):
+        for fact in earlier.get("facts") or []:
+            text = fact.get("text") if isinstance(fact, dict) else None
+            if not text or text in seen or install_gate.waived([text]) or "by design" in text.lower():
+                continue
+            seen.add(text)
+            out.append({"at": fact.get("at") or _now(), "text": text})
+    return out[-limit:]
+
 def _initial_state(goal, cwd, gate_kind, gate_value, max_turns,
                    max_minutes, watch_paths, review_criterion, gate_path=None):
     cwd = os.path.abspath(str(cwd))
@@ -367,8 +493,18 @@ def _initial_state(goal, cwd, gate_kind, gate_value, max_turns,
     if gate_kind == "command":
         # Recorded before any gate run, so a later edit to a test or to the
         # gate's own scripts shows up as a change rather than as the baseline.
-        state["test_manifest"] = evidence.test_manifest(cwd, state["watch_paths"])
+        state["test_manifest"] = _baseline_tests(cwd, state["watch_paths"])
         state["gate_manifest"] = evidence.gate_manifest(cwd, str(gate_value), state["watch_paths"])
+        head = _git_head()
+        if head:
+            state["base_head"] = head  # the commit the goal began on: where a changed baseline test is put back from
+    facts = _carried_facts(cwd)
+    if facts:
+        state["facts"] = facts
+    if any(g.get("thin") for g in _earlier_goals(cwd)):
+        # Not the project's first goal: its files at `start` are an earlier goal's work, so a `close` on them
+        # unchanged still goes through the request check (`request_check`).
+        state["follows_goal"] = True
     return state
 
 
@@ -586,7 +722,10 @@ def _checkpoint_locked(slug, did, next_action, tree_hash_value,
     asked = state.get("request_check")
     if parts and asked and "parts" in asked:
         known = set(range(1, len(asked["parts"]) + 1))
-        asked["done"] = sorted(set(asked.get("done") or ()) | (set(parts) & known))
+        done = set(asked.get("done") or ())
+        new = sorted((set(parts) & known) - done)
+        asked["done"] = sorted(done | set(new[:PARTS_PER_CHECK]))
+        state["checkpoints"][-1]["parts_left_over"] = len(new[PARTS_PER_CHECK:])
     state["used"]["turns"] += 1
     return _save(state)
 
@@ -816,15 +955,23 @@ def placeholders(state: dict) -> str | None:
 
 
 def unbuilt_list(state: dict) -> list[str]:
-    """The names a thin goal's request gives in code that the work defines nowhere (see `unbuilt`). Read from the
-    request and the source; nothing is run. Never raises."""
+    """The names a thin goal's request gives in code that the work defines nowhere (see `unbuilt`), less the ones a
+    recorded fact says are not the work's own (`unbuilt.dismissed`). Read from the request and the source; nothing
+    is run. Never raises.
+
+    thin10 and thin11 runs: in the 8 builds where the session recorded such a fact, all 20 later session starts
+    listed the same names again (wrapt: `Signature`, in sessions 4 to 8; protobuf: `IntEnum`, `Timestamp`)."""
     if not state.get("thin") or not state.get("gate_path"):
         return []
     try:
         inputs = sections._goal_inputs(state.get("gate_path"), state["cwd"], state.get("request_inputs"))
         text = "\n".join(body for _, body in inputs)
         found = surface.find_spec(state.get("gate_path"), state["cwd"])
-        return unbuilt.find(text, state["cwd"], found[1] if found else None)
+        names = unbuilt.find(text, state["cwd"], found[1] if found else None)
+        if not names:
+            return []
+        gone = unbuilt.dismissed(names, [f.get("text", "") for f in state.get("facts") or [] if isinstance(f, dict)])
+        return [name for name in names if name not in gone]
     except Exception:
         return []
 
@@ -836,7 +983,8 @@ def unbuilt_names(state: dict) -> str | None:
         return None
     return (f"The request gives these names in code and the work defines them nowhere ({len(names)}): "
             f"{unbuilt.listing(names)}. Find each in the request and build the ones it asks for. One that belongs "
-            "to another library, or is only an example's own name, needs nothing.")
+            "to another library, or is only an example's own name, needs nothing: record those once, with "
+            "`note --fact \"Not ours: NAME, NAME\"`, and they are not listed again.")
 
 def _hold_placeholders(state: dict) -> None:
     """Stop completion while the work has placeholder functions."""
@@ -853,13 +1001,20 @@ class RequestCheckDue(GateNotPassed):
 REQUEST_CHECK_PARTS = 2  # a request with fewer headed parts is read whole and needs no walk
 
 
+KEPT_BY_HORIZON = "(kept by Horizon)"  # how the heading over a carried-over request ends
+# One `check` saves this many parts of the request check at most. A pass that is really run saves as it goes; before
+# this, `check --parts 1-99` saved every part in one call, with nothing run (`close` then completed).
+PARTS_PER_CHECK = 8
+
 def _request_part_list(state: dict) -> list[dict]:
-    """The request's headed parts in order, each `{"file", "line", "heading"}`; [] when it has too few to walk."""
+    """The request's headed parts in order, each `{"file", "line", "heading"}`; [] when it has too few to walk.
+    The heading Horizon itself writes above a carried-over request (`cli.EARLIER_REQUEST`) is not a part of it."""
     try:
         found = sections.request_parts(state.get("gate_path"), state["cwd"], state.get("request_inputs"))
     except Exception:
         return []
-    parts = [{"file": name, "line": number, "heading": heading} for name, listed in found for number, heading in listed]
+    parts = [{"file": name, "line": number, "heading": heading} for name, listed in found for number, heading in listed
+             if not heading.endswith(KEPT_BY_HORIZON)]
     return parts if len(parts) >= REQUEST_CHECK_PARTS else []
 
 
@@ -925,20 +1080,25 @@ def request_check(state: dict, observed_hash: str | None = None) -> str | None:
     thin12 run: any `check` after the ask used to release it. protobuf-to-pydantic was asked late in session 5,
     went on with its own tests, saved an ordinary `check` in session 7 and ran `close` "to see which spec parts
     remain": it completed, at 22 of 42. Nothing on disk said which parts had been run, so each session was shown
-    the whole list again."""
+    the whole list again.
+
+    A goal that needed no change (its files are the ones its baseline run saw) completes without the pass, but not
+    one that follows another goal of the project or was reopened: those files are the earlier work, and the pass
+    is what a session asked to carry it on has to do (thin10 claripy: three sessions of start, close, complete)."""
     if not state.get("thin") or state["status"] != "active" or budget_exhausted(state):
         return None
     asked = state.get("request_check")
     if asked and not request_check_open(state):
         return None
-    if observed_hash is not None and _unchanged_since_baseline(state, observed_hash):
+    carried_on = state.get("follows_goal") or state.get("reopened_complete")
+    if observed_hash is not None and not carried_on and _unchanged_since_baseline(state, observed_hash):
         return None
     if asked and "parts" in asked:
         return ("The request check is under way: " + _request_parts_note(state) + ". Run the work the way each "
                 "describes, print what comes back and read it against the request's own words; where they differ, "
                 "change the code, never a test's expectation. Save the ones you ran with `check --parts NUMBERS` "
-                "(such as `--parts 3-6,9`); a part with nothing to run is done once read. `close` completes when "
-                "none is left.")
+                f"(such as `--parts 3-6,9`; one `check` saves at most {PARTS_PER_CHECK}); a part with nothing to "
+                "run is done once read. `close` completes when none is left.")
     parts = _request_part_list(state)
     if not parts:
         return None
@@ -953,7 +1113,8 @@ def request_check(state: dict, observed_hash: str | None = None) -> str | None:
             "expectation, and add one test for each difference you fixed, its value copied from the request. "
             "Where the request does not settle a point, leave the code and record it with `note --finding`. "
             "Save the parts you ran with `check --parts NUMBERS` (such as `--parts 1-4,7`, with `--did` saying "
-            "what differed); a part with nothing to run is done once read. The pass need not fit in this "
+            f"what differed; one `check` saves at most {PARTS_PER_CHECK} parts, so save as you go); a part with "
+            "nothing to run is done once read. The pass need not fit in this "
             "session: the next one is shown the parts still to run. When none is left, `close` completes."
             + (f" Start with these: {names}" if names else ""))
 
@@ -1116,6 +1277,42 @@ def latest_observation(state: dict) -> dict | None:
     return {"role": last["role"], "at": last["at"], "gate": last["gate"],
             "gate_output": last["gate_output"], "tree_hash": last["tree_hash"]}
 
+def fresh_observation(state: dict) -> dict | None:
+    """The latest observation, unless a checkpoint is newer: then the checkpoint is the result to read.
+
+    `check` and `close` used to print the latest observation whatever its age, so the baseline run of session 1 sat
+    beside every later passing check. thin12 tremolo, session 10: the session read that old failure as a live one
+    ("the baseline run also failed one SIGTERM test") and reported a bug it had fixed in session 7 as open."""
+    observed = latest_observation(state)
+    last = state["checkpoints"][-1] if state.get("checkpoints") else None
+    if observed and last and (last.get("at") or "") > observed["at"]:
+        return None
+    return observed
+
+
+def standing_gate(state: dict) -> dict | None:
+    """The newest gate run that gave a result (pass or fail), checkpoint or observation: a `check` on unchanged
+    files runs nothing (`skipped`), and the result before it still stands."""
+    records = [r for r in (state.get("checkpoints") or []) + (state.get("observations") or [])
+               if r.get("gate") in ("pass", "fail")]
+    return max(records, key=lambda r: r.get("at") or "", default=None)
+
+
+_TESTS_SKIPPED = re.compile(r"\b(\d+) skipped\b")
+
+
+def skipped_tests(gate_output: str) -> str | None:
+    """What to say when the gate's test run skipped tests (a pytest count), or None. Advice: it never stops `close`.
+
+    thin11 pgqueuer closed on "25 passed, 10 skipped": the ten were every test of the PostgreSQL backend."""
+    found = _TESTS_SKIPPED.findall(gate_output or "")
+    if not found or int(found[-1]) == 0:
+        return None
+    count = int(found[-1])
+    return (f"The gate skipped {count} test{'' if count == 1 else 's'}: a skipped test checks nothing, so the part "
+            "of the work it covers is unchecked. Make it run here if it can; if the environment cannot run it, say "
+            "in the final report which part of the request that leaves unchecked.")
+
 def _unchanged_since_baseline(state: dict, observed: str) -> bool:
     """True when the files are exactly those a baseline observation recorded."""
     return (isinstance(observed, str) and observed != gate.UNKNOWN_HASH
@@ -1133,12 +1330,14 @@ def close(slug: str, *, run_gate: bool = True, timeout: int = gate.DEFAULT_TIMEO
     `unchanged_since_baseline`. When the budget is spent, the current tree is
     recorded as the deliverable (anytime semantics) instead of being left open.
     Sections of a long request the work has not built are listed in `sections_advisory` and never stop it.
+    `observation` is the gate run this call made, or one newer than the last `check`; an older one is not printed
+    (`fresh_observation`).
     """
     state = load(slug)
     if state["status"] != "active":
         return {"complete": state["status"] == "complete", "missing": [],
                 "summary": summary(state), "finalized": state.get("finalized"),
-                "observation": latest_observation(state)}
+                "observation": fresh_observation(state)}
     advisory = advisory_sections(state)
     try:
         observed = tree_hash.compute(state["cwd"], state.get("watch_paths"))
@@ -1159,7 +1358,7 @@ def close(slug: str, *, run_gate: bool = True, timeout: int = gate.DEFAULT_TIMEO
             observed_now = True
         done = complete(slug, "", allow_unreviewed=run_gate)
         result = {"complete": True, "missing": [], "summary": summary(done), "finalized": None,
-                  "observation": latest_observation(done)}
+                  "observation": fresh_observation(done)}
         if done.get("unreviewed"):
             result["unreviewed"] = done["unreviewed"]
         if unchanged:
@@ -1173,8 +1372,11 @@ def close(slug: str, *, run_gate: bool = True, timeout: int = gate.DEFAULT_TIMEO
                                           f"{found['python']}, not the project's own Python (the gate command "
                                           "names none): run the surface gate with it.")
         found = install_check(done, observed)
-        if found and not found.get("ok") and not found.get("blocking"):
+        if found and not found.get("ok") and (not found.get("blocking") or install_waived(done, found)):
             result["install_advisory"] = install_gate.problem(found) or found.get("error") or ""
+        skipped = skipped_tests(done.get("gate_evidence") or "")
+        if skipped:
+            result["skipped_tests"] = skipped
         return result
     except (GateNotPassed, AttemptOpen, RevisionConflict) as exc:
         missing = [str(exc)]
@@ -1204,7 +1406,7 @@ def close(slug: str, *, run_gate: bool = True, timeout: int = gate.DEFAULT_TIMEO
                                           "gate": record["gate"] if record else "not passed"}
                     state = _persist_mutation_locked(state)
     result = {"complete": False, "missing": missing, "summary": summary(state),
-              "finalized": state.get("finalized"), "observation": latest_observation(state)}
+              "finalized": state.get("finalized"), "observation": fresh_observation(state)}
     if advisory:
         result["sections_advisory"] = advisory
     unchecked = unchecked_gate_lines(state)
@@ -1351,6 +1553,29 @@ def _apply_coverage_completion(state: dict, observed_hash: str, gate_output: str
     state["gate_evidence"] = _bounded(evidence)
     state["completed_at"] = _now()
 
+def _baseline_changed(state: dict, changed: list[str]) -> str:
+    """What `close` says when baseline test files changed. The first sentence is the one earlier versions gave; the
+    rest is what a session can do with no one there.
+
+    The command names the commit the goal began on: `git checkout -- FILE` puts back the last commit's version,
+    which is the changed one as soon as anything has been committed since `start`."""
+    first = shlex.quote(changed[0])
+    head = state.get("base_head")
+    back = (f"`git checkout {head[:12]} -- {first}` restores a file that was committed when this goal began"
+            if isinstance(head, str) and head else
+            f"`git log --oneline -- {first}` lists the versions of a file that was committed")
+    return ("Baseline test files changed: " + ", ".join(changed) + ". Completion needs a reviewer's or the user's "
+            "approval: approve-test-change. These are tests the project had before this goal, so with no one to "
+            f"approve, put them back as they were ({back}), fix the code they test, and put your own tests in a new "
+            "test file.")
+
+
+def install_waived(state: dict, found: dict | None) -> bool:
+    """Whether a recorded fact answers for what the install check found: there is an `install check:` fact
+    (`install_gate.waived`) and the problem is one such a fact can answer for (`install_gate.waivable`)."""
+    return bool(found) and install_gate.waivable(found) and install_gate.waived(
+        [f.get("text", "") for f in state.get("facts") or [] if isinstance(f, dict)])
+
 def _apply_completion(state: dict, observed_hash: str, gate_output: str, allow_unreviewed: bool = False) -> None:
     _hold_small_gate(state, observed_hash)
     if state["status"] != "active":
@@ -1363,9 +1588,7 @@ def _apply_completion(state: dict, observed_hash: str, gate_output: str, allow_u
             "No passing gate result covers the current files; run close (or observe) first.")
     changed = evidence.changed_baseline_tests(state)
     if changed:
-        raise GateNotPassed(
-            "Baseline test files changed: " + ", ".join(changed)
-            + ". Completion needs a reviewer's or the user's approval: approve-test-change.")
+        raise GateNotPassed(_baseline_changed(state, changed))
     differing = differing_sections(state)
     if differing:
         raise GateNotPassed(sections.message(differing))
@@ -1376,7 +1599,7 @@ def _apply_completion(state: dict, observed_hash: str, gate_output: str, allow_u
     if found and found["blocking"] and found["failed"]:
         raise GateNotPassed(surface.message(found))
     found = install_check(state, observed_hash)
-    if found and found.get("blocking") and not found.get("ok"):
+    if found and found.get("blocking") and not found.get("ok") and not install_waived(state, found):
         raise GateNotPassed(install_gate.message(found))
     _hold_placeholders(state)
     reasons = evidence.review_reasons(state, _requirements(state))
@@ -1419,6 +1642,7 @@ def _apply_completion(state: dict, observed_hash: str, gate_output: str, allow_u
     state["status"] = "complete"
     state["gate_evidence"] = _bounded(text)
     state["completed_at"] = _now()
+    state["own_tests"] = _own_tests(state)
 
 def record_review(slug: str, result: str, evidence: str, judge: str,
                   digest: str) -> dict:
@@ -1465,13 +1689,23 @@ def _abandon_locked(slug: str, reason: str) -> dict:
     state["status"] = "abandoned"
     state["abandoned_reason"] = reason
     state["abandoned_at"] = _now()
+    state["own_tests"] = _own_tests(state)
     return _persist_mutation_locked(state)
 
+
+REOPEN_TURNS = 10  # the turns a complete goal has, at the least, once it is reopened
 
 def _reopen_locked(slug: str, reason: str,
                    extra_turns: int | None = None,
                    extra_minutes: int | None = None) -> dict:
-    """Return an abandoned goal to active without implicitly refreshing its budget."""
+    """Return an abandoned goal to active without implicitly refreshing its budget, or a complete one when its
+    request is carried on.
+
+    A complete goal that is reopened keeps its gate, facts, findings and checks. Its request check is asked again
+    at the next `close` that would complete it, and it is left at least REOPEN_TURNS turns to work with.
+
+    E2E-SWE thin10 run, claripy: the goal completed in session 7, the run went on, and sessions 8, 9 and 10 each
+    started a new goal on the finished files, closed it at once and committed nothing."""
     for name_, value in (("extra_turns", extra_turns),
                          ("extra_minutes", extra_minutes)):
         if value is None:
@@ -1482,21 +1716,39 @@ def _reopen_locked(slug: str, reason: str,
             )
 
     state = load(slug)
-    if state["status"] != "abandoned":
+    # A complete goal reopens only when it is thin: its next `close` then asks for the request check again. Any
+    # other complete goal stays closed, so its passing gate and review never stand for work they did not judge.
+    if state["status"] != "abandoned" and not (state["status"] == "complete" and state.get("thin")):
         raise GoalClosed(
             f"cannot reopen: goal status is {state['status']!r}, not abandoned"
         )
     require_idle(state)
+    was = state["status"]
+    if was == "complete" and extra_minutes is None and state["budget"].get("max_minutes") is not None:
+        started = datetime.fromisoformat(state["used"]["started"])
+        if (datetime.now(timezone.utc) - started).total_seconds() / 60 >= state["budget"]["max_minutes"]:
+            # With its time spent, the goal's next `close` would finish it at once, with no request check.
+            raise GoalClosed("cannot reopen: this goal's time limit is spent, so it would close again at once; "
+                             "pass --extra-minutes N to give it time")
     state["status"] = "active"
     now = _now()
     state.setdefault("reopen_history", []).append({
         "at": now,
         "reason": reason,
+        "was": was,
         "was_abandoned_for": state.pop("abandoned_reason", ""),
         "extra_turns": extra_turns,
         "extra_minutes": extra_minutes,
     })
     state.pop("abandoned_at", None)
+    if was == "complete":
+        state.pop("completed_at", None)
+        state.pop("request_check", None)
+        state.pop("finalized", None)
+        state["reopened_complete"] = True
+        turns = state["budget"].get("max_turns")
+        if extra_turns is None and turns is not None and turns - state["used"]["turns"] < REOPEN_TURNS:
+            state["budget"]["max_turns"] = state["used"]["turns"] + REOPEN_TURNS
     if extra_turns is not None:
         if state["budget"].get("max_turns") is None:
             state["budget"]["max_turns"] = state["used"]["turns"] + extra_turns
@@ -1687,7 +1939,7 @@ def summary(state: dict, compact: bool = False) -> dict:
         item = next(a for a in block["attempts"] if a["id"] == block["active_attempt"])
         active = {key: item[key] for key in ("id", "status", "worker", "packet")}
     end = deadline(state)
-    observed = latest_observation(state)
+    observed = fresh_observation(state)
     return {
         "slug": state["slug"], "goal": state["goal"], "status": state["status"],
         "runtime": paths.runtime(), "gate": state["gate"], "gate_path": state.get("gate_path"),
@@ -1703,7 +1955,7 @@ def summary(state: dict, compact: bool = False) -> dict:
                             if compact and last else last),
         "reviews": ([_compact_review(r) for r in state.get("reviews", [])[-1:]] if compact
                     else state.get("reviews", [])[-1:]),
-        # The newest gate run, checkpoint or not: a session cut off before `check` leaves only this.
+        # The newest gate run when no checkpoint is newer: a session cut off before `check` leaves only this.
         "last_observation": (dict(observed, gate_output=observed["gate_output"][-600:])
                              if observed else None),
         "gate_evidence": ((state.get("gate_evidence") or "")[-600:] or None) if compact
