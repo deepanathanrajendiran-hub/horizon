@@ -228,13 +228,9 @@ _PERMISSION = re.compile(r"Operation not permitted|Permission denied|Read-only f
 
 
 def waived(facts) -> bool:
-    """Whether a recorded fact says the install check does not apply to this project: one that begins
-    `install check:` and gives the reason. `close` then reports the problem and no longer waits for it.
-
-    E2E-SWE thin6 run, fiddle (0, against 96.6 with a461068): the request said a setup.sh installs the project and
-    "do not write any install steps yourself"; the check said `close` waits for a setup.sh. There was no way to
-    record which of the two held, so sessions 2 to 4 changed no file, searched the commands for a waiver, and ended
-    asking a person who was not there."""
+    """Whether a recorded fact says what the install check found is not the project's doing: one that begins
+    `install check:` and gives the reason. `close` then reports the problem and no longer waits for it, where the
+    problem is one a fact can answer for (`waivable`: a script the sandbox refused)."""
     return any(isinstance(fact, str) and fact.strip().lower().startswith(WAIVER) for fact in facts or ())
 
 
@@ -243,17 +239,23 @@ def from_the_environment(found: dict) -> bool:
     return found.get("script_exit") not in (0, None) and bool(_PERMISSION.search(found.get("script_output") or ""))
 
 def waivable(found: dict) -> bool:
-    """Whether what the check found is something a recorded fact can answer for: a script the request names and the
-    project lacks (the request may say who supplies it), or a script the operating system refused. A package that
-    does not build, a script that hangs or installs nothing, and an import that fails are the project's own, whatever
-    was recorded: the first version of the waiver switched the whole check off for good, so a `pyproject.toml`
-    broken three sessions later was neither held nor said at the session's start."""
+    """Whether what the check found is something a recorded fact can answer for: only a script the operating
+    system refused, as the sandbox the check runs in does. A package that does not build, a script that hangs or
+    installs nothing, and an import that fails are the project's own, whatever was recorded: the first version of
+    the waiver switched the whole check off for good, so a `pyproject.toml` broken three sessions later was neither
+    held nor said at the session's start.
+
+    A script the request names and the project lacks is the project's own too. 11dc6c7 let a fact answer for it
+    ("the request may say who supplies it"). E2E-SWE thin14 run, fiddle (0 of 58, against 100 with 11dc6c7's own
+    build): the request said "its setup.sh is run there to install the project" and its SPEC.md said "do not write
+    any install or network steps yourself"; session 3 recorded the fact, `close` stopped waiting, and seven more
+    sessions read "the project has none" at their start and left it, one writing that it "is already recorded as
+    a fact". Nothing was installed where the work was used. Writing the script costs a few lines if another is
+    supplied as well; leaving it out costs everything if none is."""
     if (found.get("exit") not in (0, None) or found.get("import_error") or found.get("script_import_error")
-            or found.get("script_timeout")):
+            or found.get("script_timeout") or found.get("missing_scripts")):
         return False
-    if found.get("script_exit") not in (0, None):
-        return from_the_environment(found)
-    return bool(found.get("missing_scripts"))
+    return found.get("script_exit") not in (0, None) and from_the_environment(found)
 
 
 def check(state: dict, key: str | None) -> dict | None:
@@ -289,12 +291,21 @@ NOT_THE_ENVIRONMENT = ("this check runs in its own throwaway environment, which 
                        "interpreter's packages, offline, so your own environment lacking pip or a network is not the "
                        "cause: the fix is in the project's files")
 
+# Said wherever a missing script is reported (`close`, `check`, the session start), as part of the problem. thin6
+# fiddle stopped to ask a person which of the request's two sentences held; thin14 fiddle chose "the environment
+# supplies it", recorded that, and scored 0.
+WRITE_IT = ("write it, also when the request says something else runs it or that you install nothing yourself (a "
+            "script that installs the project from its own files, offline, fetches nothing and harms nothing if "
+            "another takes its place; without one nothing installs, and no recorded fact answers for a missing "
+            "file)")
+
 
 def problem(found: dict) -> str:
     """Everything that is wrong, in one line, so one round of work can fix it all."""
     problems = []
     if found.get("missing_scripts"):
-        problems.append(f"the request names {', '.join(found['missing_scripts'])}, and the project has none")
+        problems.append(f"the request names {', '.join(found['missing_scripts'])}, and the project has none: "
+                        + WRITE_IT)
     script_ok = bool(found.get("scripts")) and found.get("script_exit") == 0 and not found.get("script_import_error")
     if not found.get("pyproject", True) and not script_ok:
         problems.append("the project has no pyproject.toml, so pip cannot install it: add one with a [build-system] "
@@ -321,7 +332,7 @@ def problem(found: dict) -> str:
     if found.get("import_error"):
         names = ", ".join(found.get("imported") or [str(found.get("package"))])
         problems.append(f"it installs, but `import {names}` fails from another folder: {found['import_error']}")
-    if problems and from_the_environment(found):
+    if problems and waivable(found):
         # thin11 mpmath, session 6: the wheel built and installed, `mktemp` was refused, and the message said "the
         # fix is in the project's files"; the session rewrote a working setup.sh and the next one chased it again.
         problems.append("that output shows a permission error, which the sandbox this check runs in can cause as "
@@ -340,10 +351,4 @@ def message(found: dict) -> str:
             "it is), and make a setup script the request names run that install. Then run `check`: it repeats this "
             "install for you. Do not make an environment of your own for it: there is no network, and pip without "
             "--no-index retries it for minutes, past the session's end. `close` waits.")
-    if found.get("missing_scripts") and waivable(found):
-        # Said only where the fact would be taken: for a package that does not build it releases nothing.
-        text += (" A file the request names and the project lacks is missing for everyone who uses the project, so "
-                 "write it unless the request itself says who else supplies it; only then, record that with "
-                 "`note --fact \"" + WAIVER + " <the request's words>\"`, and `close` reports this without waiting "
-                 "for it.")
     return text + " Never stop to ask: decide and record it."

@@ -130,14 +130,43 @@ def outline(text: str, limit: int = 30) -> list[tuple[int, str]]:
         chosen = within
     return chosen[:limit]
 
+def join_short(parts: list[tuple[int, str]], last_line: int, floor: int,
+               alone=lambda heading: False) -> list[tuple[int, str]]:
+    """The outline with short neighbours joined: a heading starts a part only once the part before it has `floor`
+    lines, and a short last part joins the one before. A part keeps the heading it starts with and runs to the
+    next part's line. A heading `alone` is true for is joined to nothing, and nothing to it. A request too short
+    for two such parts is cut once, at the heading nearest its middle, so it is still gone through in parts.
+
+    E2E-SWE thin14 run: five requests of 199 to 357 lines (and one of 2,686) gave 17 to 22 parts, 12 lines at the
+    median, three of them an overview, a dependency list and an import list. With one part saved per `check`,
+    going through them took every session left after `close` asked (35 sessions over 5 builds, two parts a
+    session), one build used 19 of its 20 turns, and four had not finished at the last session. Of 215 saved
+    requests, 76 had 20 parts or more, as many as a goal has turns; joined at 40 lines, one has."""
+    kept = []
+    for number, heading in parts:
+        if kept and number - kept[-1][0] < floor and not alone(heading) and not alone(kept[-1][1]):
+            continue
+        kept.append((number, heading))
+    if (len(kept) > 1 and last_line + 1 - kept[-1][0] < floor
+            and not alone(kept[-1][1]) and not alone(kept[-2][1])):
+        kept.pop()
+    if len(kept) < 2 <= len(parts):
+        middle = (parts[0][0] + last_line) / 2
+        kept = [parts[0], min(parts[1:], key=lambda part: abs(part[0] - middle))]
+    return kept
+
 
 def request_parts(gate_path: str | None, root: str, at_start: dict | None = None,
-                  limit: int = 30) -> list[tuple[str, list[tuple[int, str]]]]:
+                  limit: int = 30, floor: int = 0,
+                  alone=lambda heading: False) -> list[tuple[str, list[tuple[int, str]]]]:
     """[(file name, its outline)] for the goal's request and each Markdown file it names, files without headings
-    left out."""
+    left out. With `floor`, a heading that would start a part before the one it follows has that many lines is
+    joined to it (`join_short`, which says what `alone` is)."""
     out = []
     for path, text in _goal_inputs(gate_path, root, at_start):
         parts = outline(text, limit)
+        if floor:
+            parts = join_short(parts, len(text.splitlines()), floor, alone)
         if parts:
             out.append((path.name, parts))
     return out

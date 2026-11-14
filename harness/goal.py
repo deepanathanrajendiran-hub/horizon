@@ -1008,15 +1008,20 @@ KEPT_BY_HORIZON = "(kept by Horizon)"  # how the heading over a carried-over req
 # One `check` saves this many parts of the request check at most. A pass that is really run saves as it goes; before
 # this, `check --parts 1-99` saved every part in one call, with nothing run (`close` then completed).
 PARTS_PER_CHECK = 8
+# A part of the request check has at least this many lines of the request: shorter sections in a row are one part
+# (`sections.join_short`, which has the numbers this comes from). A request of 200 to 360 lines is 4 to 7 parts.
+PART_LINES = 40
 
 # How one part is run. The `close` that asks says it, and so do `close` and `check` while the pass is under way and
 # each session's start. thin13 protobuf-to-pydantic (11dc6c7): asked in session 7, it read only the two shorter
 # forms in session 8, which left out "not a new set of tests"; it wrote a 648-line test file for the 19 parts and
 # spent sessions 9 and 10 on that file's fixture. No part was run.
-RUN_A_PART = ("Take the parts in order, one at a time. Read the part's own lines, run a short script or command that "
+RUN_A_PART = ("Take the parts in order, one at a time. Read the part's own lines (from its line to the next part's, "
+              "whatever headings lie between), run a short script or command that "
               "uses the work the way the part describes and prints what comes back, and read what it printed against "
               "the request's own words: names, arguments and their order, defaults, returned values, error types, "
-              "output format. Write no expected values into the script, and do not write the pass as a test file: "
+              "output format. One script covers a part: what its lines state, not cases they do not mention. "
+              "Write no expected values into the script, and do not write the pass as a test file: "
               "it is one pass through the request, not a new set of tests. Where the work differs, the request is "
               "right: change the code, never a test's expectation.")
 SAVE_PARTS = ("Save each part once it is run, with `check --parts NUMBERS` (such as `--parts 3` or `--parts 3-4`, "
@@ -1054,14 +1059,18 @@ def _parts_room(asked: dict) -> int:
     return max(0, min(PARTS_PER_CHECK, since))
 
 def _request_part_list(state: dict) -> list[dict]:
-    """The request's headed parts in order, each `{"file", "line", "heading"}`; [] when it has too few to walk.
-    The heading Horizon itself writes above a carried-over request (`cli.EARLIER_REQUEST`) is not a part of it."""
+    """The request's parts in order, each `{"file", "line", "heading"}`; [] when it has too few to walk. A part is
+    a headed section, or several short ones in a row (`PART_LINES`), and runs to the next part's line. The heading
+    Horizon itself writes above a carried-over request (`cli.EARLIER_REQUEST`) is not a part of it."""
+    def kept(heading: str) -> bool:
+        return heading.endswith(KEPT_BY_HORIZON)
     try:
-        found = sections.request_parts(state.get("gate_path"), state["cwd"], state.get("request_inputs"))
+        found = sections.request_parts(state.get("gate_path"), state["cwd"], state.get("request_inputs"),
+                                       floor=PART_LINES, alone=kept)
     except Exception:
         return []
     parts = [{"file": name, "line": number, "heading": heading} for name, listed in found for number, heading in listed
-             if not heading.endswith(KEPT_BY_HORIZON)]
+             if not kept(heading)]
     return parts if len(parts) >= REQUEST_CHECK_PARTS else []
 
 

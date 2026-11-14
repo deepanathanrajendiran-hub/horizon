@@ -134,7 +134,8 @@ def test_a_later_goal_takes_the_first_goals_baseline_not_the_tests_the_first_goa
 
 # --- 2. the install check ------------------------------------------------------------------------------------
 
-def test_an_install_fact_releases_the_install_hold(project):
+def test_an_install_fact_does_not_release_the_hold_for_a_missing_script(project):
+    # 11dc6c7 let the fact release it; thin14 fiddle recorded it in session 3, wrote no setup.sh and scored 0 of 58
     p, cli = project
     cli.new_session("s1")
     _thin(p, cli)
@@ -142,11 +143,13 @@ def test_an_install_fact_releases_the_install_hold(project):
     code, out = cli("close", SLUG)
     held = [m for m in out["missing"] if "does not install" in m]
     assert code == 1 and held and "setup.sh" in held[0], out
-    assert "install check:" in held[0], "the message says how a request that supplies the file is recorded"
+    assert "install check:" not in held[0], "no fact is offered for a file the project lacks"
+    assert "write it" in held[0] and "something else runs it" in held[0], held
     assert cli("note", SLUG, "--fact", "install check: SPEC line 3 says the environment supplies setup.sh")[0] == 0
     code, out = cli("close", SLUG)
-    assert not any("does not install" in m for m in out["missing"]), out
-    assert "install_problem" in out or "install_advisory" in out, "still reported, no longer held"
+    assert code == 1 and any("does not install" in m for m in out["missing"]), out
+    assert "A recorded fact answers" not in out.get("install_problem", ""), out
+    assert "does not install" in _context(cli.new_session("s2")), "and each session's start still says it"
 
 
 def test_a_fact_about_something_else_does_not_release_it(project):
@@ -348,7 +351,10 @@ def test_check_says_where_a_name_the_request_does_not_mean_is_deleted(project):
 
 # --- 7. the request check ------------------------------------------------------------------------------------
 
-LONG_SPEC = SPEC + "".join(f"\n## Part {i}\n\n`toolpkg.parse(line)` again.\n" for i in range(1, 13))
+# Twelve parts of the request check: each "## Part" section is longer than `goal.PART_LINES`, so none is joined to
+# its neighbour (the short sections of SPEC and "## Part 1" make the first part together).
+LONG_SPEC = SPEC + "".join(f"\n## Part {i}\n\n`toolpkg.parse(line)` again.\n" + "It reads one line at a time.\n" * 40
+                           for i in range(1, 13))
 
 
 def test_one_check_saves_a_few_parts_not_the_whole_list(project):
@@ -617,16 +623,19 @@ def test_the_restore_command_names_the_commit_the_goal_began_on(project):
 def test_an_install_fact_does_not_answer_for_a_package_that_does_not_build():
     missing = {"missing_scripts": ["setup.sh"], "scripts": [], "pyproject": True, "exit": 0}
     refused = {"scripts": ["setup.sh"], "script_exit": 1, "script_output": "mktemp: Operation not permitted"}
+    both = {**refused, "missing_scripts": ["install.sh"]}
     broken = {"scripts": [], "pyproject": True, "exit": 1, "output": "TOMLDecodeError"}
     unimportable = {"scripts": ["setup.sh"], "script_exit": 0, "import_error": "No module named toolpkg"}
     failed = {"scripts": ["setup.sh"], "script_exit": 2, "script_output": "error: no such option --frob"}
-    assert install_gate.waivable(missing) and install_gate.waivable(refused)
-    assert not any(install_gate.waivable(found) for found in (broken, unimportable, failed))
-    state = {"facts": [{"text": "install check: SPEC line 3 says the environment supplies setup.sh"}]}
-    assert goal.install_waived(state, missing) and not goal.install_waived(state, broken)
-    assert not goal.install_waived({"facts": []}, missing)
+    assert install_gate.waivable(refused)
+    assert not any(install_gate.waivable(found) for found in (missing, both, broken, unimportable, failed))
+    state = {"facts": [{"text": "install check: mktemp was refused by the sandbox"}]}
+    assert goal.install_waived(state, refused) and not goal.install_waived(state, broken)
+    assert not goal.install_waived(state, missing) and not goal.install_waived(state, both)
+    assert not goal.install_waived({"facts": []}, refused)
     # the way out is offered only where it would be taken
-    assert "install check:" in install_gate.message(missing) and "install check:" not in install_gate.message(broken)
+    assert "install check:" in install_gate.message(refused)
+    assert not any("install check:" in install_gate.message(found) for found in (missing, both, broken))
 
 
 def test_a_waived_install_problem_is_said_again_when_the_package_itself_breaks(project):

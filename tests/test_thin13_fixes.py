@@ -137,8 +137,8 @@ def test_the_session_start_sends_a_session_to_the_next_part_and_its_lines(projec
     _save(cli, "1-2")
     text = _context(cli.new_session("s2"))
     lines = LONG_SPEC.splitlines()
-    headings = [n for n, line in enumerate(lines, 1) if line.startswith("#")]
-    assert f"start with part 3 (SPEC.md lines {headings[2]} to {headings[3] - 1})" in text, text
+    third, fourth = (lines.index(f"## Part {n}") + 1 for n in (3, 4))  # part 1 is SPEC's sections and "## Part 1"
+    assert f"start with part 3 (SPEC.md lines {third} to {fourth - 1})" in text, text
     assert "not a new set of tests" in text and "do not write the pass as a test file" in text, text
     assert "no more parts than the tool calls made since the last save" in text, text
 

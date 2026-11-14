@@ -256,7 +256,10 @@ a `requirements.md` keeps needing it. Two more things hold for a thin goal:
 - **Request check.** The first `close` that would complete a thin goal does not:
   `missing` lists the parts of the request (the headings of `request.md` and of
   each Markdown file it names, at the deepest level that gives at most 30 per
-  file) and asks for one pass through them: run the work as each part describes,
+  file; sections shorter than 40 lines in a row are one part, which keeps its
+  first heading and runs to the next part's line, and a request too short for
+  two such parts is cut once near its middle) and asks for one pass through
+  them: run the work as each part describes,
   print what comes back, and read it against the request; where they differ the
   code changes, never a test's expectation. The parts are numbered, and the goal
   keeps the list: `check --parts 1-4,7` saves the parts that were run (ranges and
@@ -268,7 +271,11 @@ a `requirements.md` keeps needing it. Two more things hold for a thin goal:
   most; where no hook counts the session's calls, only the 8 applies. (thin13
   run: four of nine builds saved every part with `check --parts` calls made one
   after another, nothing run between them; sapp ran three scripts for 17 parts
-  and closed in session 3.) While the pass is under way the session-start
+  and closed in session 3. thin14 run, with that rule and a part for every
+  heading: 17 to 22 parts a request, 12 lines at the median; the pass took all
+  35 sessions left after the ask in 5 builds, 4 had not finished it, and one
+  used 19 of its 20 turns, which is why short sections are joined.) While the
+  pass is under way the session-start
   message names the next part with its lines and leaves out the Plateau line,
   the repeated-next-action line and "change a file of the work within your
   first 5 tool calls": the pass is the session's work, and it changes no file
@@ -895,10 +902,12 @@ changed nothing, so the message sends the agent back to running and building the
 
 - `note SLUG --fact "Not ours: NAME, NAME"`: the names are left out of `unbuilt_names` from then on (another
   library's name, an example's own, a name made at run time).
-- `note SLUG --fact "install check: <the request's words>"`: the request itself says who else supplies a file the
-  install check asks for, or the check's failure is a permission error of the sandbox it runs in. `close` then
-  reports the install problem without waiting for it. The fact answers only for those two: a package that does not
-  build, a script that hangs or installs nothing, and an import that fails are held whatever was recorded.
+- `note SLUG --fact "install check: <what was refused>"`: the install check's failure is a permission error of the
+  sandbox it runs in. `close` then reports the install problem without waiting for it. The fact answers only for
+  that: a package that does not build, a script that hangs or installs nothing, an import that fails, and a setup
+  script the request names and the project lacks are held whatever was recorded. A missing script is written even
+  where the request says something else runs it: a script that installs the project from its own files costs a
+  few lines if another takes its place, and without one nothing installs (thin14 fiddle: 0 of 58).
 - A later goal of the same project starts with the earlier goals' facts, except the ones that release a hold
   (`install check: ...` and `... by design`): those answer for one goal's request.
 - `check` on files that have not changed since the last gate run does not run the gate again (`gate_skipped`): the

@@ -86,7 +86,7 @@ What `check`, `close` and the session-start message report, and what to do:
 - `unbuilt_names`: names the request gives in code that no source file defines. Find each in the request and build
   the ones it asks for; another library's name, or an example's own, needs nothing: `note --fact "Not ours: NAME, NAME"`.
 - `install_problem`: the package does not install in a clean copy, offline. Fix the project's own files (its
-  `pyproject.toml`, the setup script the request names); never build an environment of your own for it. If the request says who else supplies a file: `note --fact "install check: <its words>"`.
+  `pyproject.toml`, the setup script the request names); never build an environment of your own for it. A setup script the request names is the project's own file: write it, also when the request says something else runs it.
 - `spec_examples`: which of the request's own examples disagree with the work. Fix the code when the request's
   prose agrees with the example; if the example itself is wrong, skip it with `waive-example`, citing the line.
 - `placeholders`: functions with no body yet; `close` waits for them. Fill each in. Only if the request says the
