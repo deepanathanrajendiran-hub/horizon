@@ -345,6 +345,27 @@ def _resume_line(state: dict) -> str:
     return out
 
 
+NOT_SAVED = (" No `check` has saved this goal yet: nothing but the files carries over to the next session, and none "
+             "of Horizon's checks has run on them. So run `check` as soon as something you built this session "
+             "runs, with `--next` naming the edit after it.")
+
+
+def _not_saved_line(state: dict) -> str:
+    """For a session that finds a goal no `check` has saved and no next action. Not while the request check is
+    under way: that pass is then the session's work, and its saves are `check`s.
+
+    E2E-SWE thin15 run, protobuf-to-pydantic: sessions 1 to 5 ran no `check`. Each of sessions 2 to 6 was told
+    "Next: not set." and no more, read the request and every source file again, and made its first edit at call
+    9 to 13 of 15 (session 4 made none); the install, import and example checks first ran in session 6. Over the
+    thin13 to thin15 runs 24 of the 64 building sessions after the first began with no next action, and their
+    first edit came at call 10 at the median, against 7 with one."""
+    if (state["status"] != "active" or state["checkpoints"] or goal.row(state)["next_action"]
+            or goal.execution_mode(state) != "conversation" or goal.budget_exhausted(state)
+            or goal.request_check_open(state)):
+        return ""
+    return NOT_SAVED
+
+
 def _placeholders(root: Path, limit: int = 10, facts=(), skip=()) -> str:
     """Source files with functions that are still placeholders (NL2Repo bench6 deepdiff: a green gate over five
     placeholder modules). What counts, and what is an interface or a deliberate raise, is in `stubs`; `skip` holds
@@ -385,6 +406,7 @@ def _goal_line(state: dict) -> str:
         budget += ", budget exhausted"
     line = (f"Horizon goal {row['slug']} ({row['status']}; {budget}; gate dir {row['gate_path'] or 'none'}): "
             f"{row['goal']} Next: {row['next_action'] or 'not set'}.")
+    line += _not_saved_line(state)
     if state["gate"]["kind"] == "command":
         line += f" Gate command: {state['gate']['value']}."
     observed = goal.latest_observation(state)

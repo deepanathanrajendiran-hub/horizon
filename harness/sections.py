@@ -155,21 +155,42 @@ def join_short(parts: list[tuple[int, str]], last_line: int, floor: int,
         kept = [parts[0], min(parts[1:], key=lambda part: abs(part[0] - middle))]
     return kept
 
+def part_ends(parts: list[tuple[int, str]], last_line: int) -> list[int]:
+    """The last line of each part of an outline: the line before the next part's, and the file's last line for the
+    last part.
+
+    E2E-SWE thin15 run: a part before the last was given with its lines and read to its end. The last was given as
+    "from line 158" under the name of the one heading it starts with, and in all three builds whose last part held
+    more than one section the pass read the first section and saved the part (websockets 6 lines of 42, huey 8 of
+    55, fiddle 14 of 76)."""
+    starts = [number for number, _ in parts]
+    return [max(start, end) for start, end in zip(starts, [later - 1 for later in starts[1:]] + [last_line])]
+
+
+def request_part_ranges(gate_path: str | None, root: str, at_start: dict | None = None,
+                        limit: int = 30, floor: int = 0,
+                        alone=lambda heading: False) -> list[tuple[str, list[tuple[int, int, str]]]]:
+    """[(file name, [(first line, last line, heading)])] for the goal's request and each Markdown file it names,
+    files without headings left out. With `floor`, a heading that would start a part before the one it follows has
+    that many lines is joined to it (`join_short`, which says what `alone` is); `part_ends` gives the last lines."""
+    out = []
+    for path, text in _goal_inputs(gate_path, root, at_start):
+        last_line = len(text.splitlines())
+        parts = outline(text, limit)
+        if floor:
+            parts = join_short(parts, last_line, floor, alone)
+        if parts:
+            out.append((path.name, [(number, end, heading)
+                                    for (number, heading), end in zip(parts, part_ends(parts, last_line))]))
+    return out
+
 
 def request_parts(gate_path: str | None, root: str, at_start: dict | None = None,
                   limit: int = 30, floor: int = 0,
                   alone=lambda heading: False) -> list[tuple[str, list[tuple[int, str]]]]:
-    """[(file name, its outline)] for the goal's request and each Markdown file it names, files without headings
-    left out. With `floor`, a heading that would start a part before the one it follows has that many lines is
-    joined to it (`join_short`, which says what `alone` is)."""
-    out = []
-    for path, text in _goal_inputs(gate_path, root, at_start):
-        parts = outline(text, limit)
-        if floor:
-            parts = join_short(parts, len(text.splitlines()), floor, alone)
-        if parts:
-            out.append((path.name, parts))
-    return out
+    """[(file name, its outline)]: `request_part_ranges` without the last lines."""
+    return [(name, [(number, heading) for number, _, heading in listed])
+            for name, listed in request_part_ranges(gate_path, root, at_start, limit, floor, alone)]
 
 
 def leaf_sections(text: str) -> list[tuple[int, str, str]]:

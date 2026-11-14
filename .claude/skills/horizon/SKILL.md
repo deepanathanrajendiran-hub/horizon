@@ -109,7 +109,7 @@ cut off, which no `check` saved: if it names a problem in the work, that problem
 
 When every part of the request is built and run, run `close`: `complete` and `missing` come first in its output,
 and `missing` says what to fix. The first `close` that passes every check does not complete the goal: it lists the
-request's parts by number. Take one part at a time: run the work as it describes, print the result and read it against
+request's parts by number, each with its lines (a part is often several sections: all of its lines, not only the heading it is named by). Take one part at a time: run the work as it describes, print the result and read it against
 the request; where they differ, change the code, not a test. The pass is not a new test file. Save each part once run, with `check --parts 3`: a `check` saves no more parts than the tool calls made since the last save (8 at most). `close`
 completes when none is left. If the gate ran too few tests (`small_gate`), add tests of the main use and of each
 part of the request. If a baseline test (one the project had before the goal, not one you wrote) changed, restore it, fix the code and put your tests in a new file, unless a person approves with `approve-test-change`.

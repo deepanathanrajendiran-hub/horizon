@@ -42,7 +42,7 @@ def test_the_first_passing_close_asks_for_the_request_to_be_gone_through(project
     code, out = cli("close", SLUG)
     assert code == 1 and not out["complete"], out
     asked = _asked(out)
-    assert asked and "SPEC.md: " in asked[0] and "Parsing (line " in asked[0], out
+    assert asked and "SPEC.md: " in asked[0] and "Parsing (lines " in asked[0], out
 
 
 def test_a_second_close_with_no_check_between_asks_again(project):
@@ -50,12 +50,13 @@ def test_a_second_close_with_no_check_between_asks_again(project):
     _ready(p, cli)
     assert cli("close", SLUG)[0] == 1
     code, out = cli("close", SLUG)
-    assert code == 1 and "still to run" in out["missing"][0] and "Parsing (line " in out["missing"][0], out
+    assert code == 1 and "still to run" in out["missing"][0] and "Parsing (lines " in out["missing"][0], out
 
 
 def _numbers(message):
-    """The part numbers a request-check message lists (`SPEC.md: 1 Build (line 1), 2 Parsing (line 5)`)."""
-    return [int(n) for n in re.findall(r"(?:: |, )(\d+) [^,;:]*?\(line \d+\)", message)]
+    """The part numbers a request-check message lists (`SPEC.md: 1 Build (lines 1 to 4), 2 Parsing (lines 5 to
+    9)`)."""
+    return [int(n) for n in re.findall(r"(?:: |, )(\d+) [^,;:]*?\(lines? \d+(?: to \d+)?\)", message)]
 
 
 def test_a_check_that_names_every_part_lets_close_complete(project):
@@ -181,7 +182,7 @@ def test_the_next_session_is_told_the_check_is_under_way(project):
     _ready(p, cli)
     assert cli("close", SLUG)[0] == 1
     context = _context(cli.new_session("s2"))
-    assert "gone through against the request" in context and "Parsing (line " in context, context
+    assert "gone through against the request" in context and "Parsing (lines " in context, context
 
 
 def test_the_session_is_not_told_once_a_check_answered(project):

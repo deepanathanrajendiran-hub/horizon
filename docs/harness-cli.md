@@ -74,6 +74,11 @@ is not a code bug; the session-start message shows both until `--clear-findings`
 message can list the files changed since it was recorded and say when a file it
 names changed afterwards ("may already be done"). A goal's
 `next_action` is the newest of the last checkpoint's, note's and observation's.
+A session that finds an active goal with no next action and no checkpoint is
+told so at its start ("No `check` has saved this goal yet"), and to run `check`
+as soon as something it built runs: until then nothing but the files carries
+over and none of Horizon's checks has run (thin15 protobuf-to-pydantic: five
+sessions without one, each reading the request and the source again).
 `status SLUG` also reports `last_observation` (the newest gate run, with the last
 600 characters of its output), and the Claude Code session-start message adds
 `Last gate run:` when that run is newer than the last checkpoint. `status SLUG`
@@ -258,7 +263,11 @@ a `requirements.md` keeps needing it. Two more things hold for a thin goal:
   each Markdown file it names, at the deepest level that gives at most 30 per
   file; sections shorter than 40 lines in a row are one part, which keeps its
   first heading and runs to the next part's line, and a request too short for
-  two such parts is cut once near its middle) and asks for one pass through
+  two such parts is cut once near its middle; each part is listed with its
+  first and last line, `4 Asyncio API (lines 158 to 199)`, the last part's last
+  line being the file's: in the thin15 run the last part was given as "from
+  line 158" and three builds read only the section it is named by) and asks
+  for one pass through
   them: run the work as each part describes,
   print what comes back, and read it against the request; where they differ the
   code changes, never a test's expectation. The parts are numbered, and the goal

@@ -131,8 +131,10 @@ MANY_SHORT = SPEC + "".join(f"\n## Step {i}\n\n`toolpkg.parse(line)` again.\n" +
 
 
 def _listed(message):
-    """[(number, line)] of the parts a request-check message lists (`SPEC.md: 1 Build (line 1), 2 Parsing (line 5)`)."""
-    return [(int(n), int(line)) for n, line in re.findall(r"(?:: |, )(\d+) [^,;:]*?\(line (\d+)\)", message)]
+    """[(number, line)] of the parts a request-check message lists (`SPEC.md: 1 Build (lines 1 to 44), 2 Parsing
+    (lines 45 to 90)`)."""
+    return [(int(n), int(line))
+            for n, line in re.findall(r"(?:: |, )(\d+) [^,;:]*?\(lines? (\d+)(?: to \d+)?\)", message)]
 
 
 def test_close_asks_for_parts_of_forty_lines_not_for_every_heading(project):

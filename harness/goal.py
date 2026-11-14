@@ -1015,9 +1015,11 @@ PART_LINES = 40
 # How one part is run. The `close` that asks says it, and so do `close` and `check` while the pass is under way and
 # each session's start. thin13 protobuf-to-pydantic (11dc6c7): asked in session 7, it read only the two shorter
 # forms in session 8, which left out "not a new set of tests"; it wrote a 648-line test file for the 19 parts and
-# spent sessions 9 and 10 on that file's fixture. No part was run.
-RUN_A_PART = ("Take the parts in order, one at a time. Read the part's own lines (from its line to the next part's, "
-              "whatever headings lie between), run a short script or command that "
+# spent sessions 9 and 10 on that file's fixture. No part was run. thin15 (a8c1a6e): a part of several sections was
+# taken for the one section it is named by wherever its last line was not given (`sections.part_ends`).
+RUN_A_PART = ("Take the parts in order, one at a time. Read the part's own lines, all of them (a part is named by "
+              "the heading it starts with and runs to its last line, whatever headings lie between), run a short "
+              "script or command that "
               "uses the work the way the part describes and prints what comes back, and read what it printed against "
               "the request's own words: names, arguments and their order, defaults, returned values, error types, "
               "output format. One script covers a part: what its lines state, not cases they do not mention. "
@@ -1059,29 +1061,37 @@ def _parts_room(asked: dict) -> int:
     return max(0, min(PARTS_PER_CHECK, since))
 
 def _request_part_list(state: dict) -> list[dict]:
-    """The request's parts in order, each `{"file", "line", "heading"}`; [] when it has too few to walk. A part is
-    a headed section, or several short ones in a row (`PART_LINES`), and runs to the next part's line. The heading
-    Horizon itself writes above a carried-over request (`cli.EARLIER_REQUEST`) is not a part of it."""
+    """The request's parts in order, each `{"file", "line", "end", "heading"}`; [] when it has too few to walk. A
+    part is a headed section, or several short ones in a row (`PART_LINES`), and runs from `line` to `end`, the
+    line before the next part's (`sections.part_ends`). The heading Horizon itself writes above a carried-over
+    request (`cli.EARLIER_REQUEST`) is not a part of it."""
     def kept(heading: str) -> bool:
         return heading.endswith(KEPT_BY_HORIZON)
     try:
-        found = sections.request_parts(state.get("gate_path"), state["cwd"], state.get("request_inputs"),
-                                       floor=PART_LINES, alone=kept)
+        found = sections.request_part_ranges(state.get("gate_path"), state["cwd"], state.get("request_inputs"),
+                                             floor=PART_LINES, alone=kept)
     except Exception:
         return []
-    parts = [{"file": name, "line": number, "heading": heading} for name, listed in found for number, heading in listed
-             if not kept(heading)]
+    parts = [{"file": name, "line": number, "end": end, "heading": heading}
+             for name, listed in found for number, end, heading in listed if not kept(heading)]
     return parts if len(parts) >= REQUEST_CHECK_PARTS else []
 
 
+def _part_lines(part: dict) -> str:
+    """`lines 40 to 87`: where a part is in its file. `line 40` for a part of one line, or one kept by a version
+    that did not keep the last line."""
+    end = part.get("end")
+    return f"lines {part['line']} to {end}" if isinstance(end, int) and end > part["line"] else f"line {part['line']}"
+
+
 def _numbered(parts: list[dict], only=None) -> str:
-    """`SPEC.md: 1 Parsing (line 40), 2 Errors (line 88); README.md: 3 Usage (line 5)`, the numbers being the ones
-    `check --parts` takes; `only` keeps those numbers."""
+    """`SPEC.md: 1 Parsing (lines 40 to 87), 2 Errors (lines 88 to 130); README.md: 3 Usage (lines 5 to 60)`, the
+    numbers being the ones `check --parts` takes; `only` keeps those numbers."""
     by_file = {}
     for number, part in enumerate(parts, 1):
         if only is None or number in only:
             by_file.setdefault(part["file"], []).append(
-                f"{number} {_clip(part['heading'], 60)} (line {part['line']})")
+                f"{number} {_clip(part['heading'], 60)} ({_part_lines(part)})")
     return "; ".join(f"{name}: " + ", ".join(listed) for name, listed in by_file.items())
 
 
@@ -1114,16 +1124,20 @@ def _request_parts_note(state: dict) -> str:
 def next_part(state: dict) -> str:
     """Where the request check goes on, with the lines to read: "part 6 (SPEC.md lines 57 to 93)"; "" when no
     part is left. thin13 protobuf-to-pydantic, session 8: shown 19 parts, it read the request from its first line
-    and then every module of the work, and had four calls left."""
+    and then every module of the work, and had four calls left. The last part has its last line too
+    (`sections.part_ends`); a goal asked before that was kept gets the line before the next part's, and "from
+    line N" for its last part."""
     asked = state.get("request_check") or {}
     parts, left = asked.get("parts") or [], request_parts_left(state)
     if not left:
         return ""
     number = left[0]
     part = parts[number - 1]
-    later = parts[number] if number < len(parts) and parts[number]["file"] == part["file"] else None
-    lines = (f"lines {part['line']} to {later['line'] - 1}" if later and later["line"] > part["line"]
-             else f"from line {part['line']}")
+    lines = _part_lines(part)
+    if not lines.startswith("lines "):
+        later = parts[number] if number < len(parts) and parts[number]["file"] == part["file"] else None
+        lines = (f"lines {part['line']} to {later['line'] - 1}" if later and later["line"] > part["line"]
+                 else f"from line {part['line']}")
     return f"part {number} ({part['file']} {lines})"
 
 
