@@ -167,15 +167,55 @@ def part_ends(parts: list[tuple[int, str]], last_line: int) -> list[int]:
     return [max(start, end) for start, end in zip(starts, [later - 1 for later in starts[1:]] + [last_line])]
 
 
+def without_copies(text: str, others: list[str]) -> str:
+    """`text` with each whole copy of one of `others` it holds replaced by blank lines, so the lines left keep
+    their numbers; `text` itself when it holds none. A copy is the other text's lines in a row (spaces at line
+    ends, and blank lines at its two ends, aside) followed by the end of `text`, a blank line or a heading: lines
+    that only begin like the other text are no copy of it.
+
+    E2E-SWE thin16 run: sapp's first session wrote the whole SPEC.md (357 lines) into request.md under one line of
+    its own, so the request check listed the same 7 parts twice and the pass ran all 14, over 8 sessions and 16 of
+    the goal's 20 turns (the thin15 build, with a one-line request.md: 7 parts, 6 sessions). 23 of the 735 requests
+    saved over all the runs hold such a copy, each of them the whole of the file."""
+    lines = text.splitlines()
+    bare = [line.rstrip() for line in lines]
+    found = False
+    for other in others:
+        copy = [line.rstrip() for line in other.splitlines()]
+        while copy and not copy[0]:
+            copy.pop(0)
+        while copy and not copy[-1]:
+            copy.pop()
+        at = 0
+        while copy and at + len(copy) <= len(bare):
+            end = at + len(copy)
+            after = bare[end] if end < len(bare) else ""
+            if bare[at:end] == copy and (not after or _HEADING.match(after)):
+                lines[at:end] = [""] * len(copy)
+                bare[at:end] = [""] * len(copy)
+                found, at = True, end
+            else:
+                at += 1
+    return "\n".join(lines) if found else text
+
+
+
 def request_part_ranges(gate_path: str | None, root: str, at_start: dict | None = None,
                         limit: int = 30, floor: int = 0,
                         alone=lambda heading: False) -> list[tuple[str, list[tuple[int, int, str]]]]:
     """[(file name, [(first line, last line, heading)])] for the goal's request and each Markdown file it names,
     files without headings left out. With `floor`, a heading that would start a part before the one it follows has
-    that many lines is joined to it (`join_short`, which says what `alone` is); `part_ends` gives the last lines."""
+    that many lines is joined to it (`join_short`, which says what `alone` is); `part_ends` gives the last lines.
+    A named file that request.md also holds a copy of is listed once, under the file (`without_copies`)."""
     out = []
-    for path, text in _goal_inputs(gate_path, root, at_start):
+    inputs = _goal_inputs(gate_path, root, at_start)
+    request = Path(gate_path) / "request.md" if gate_path else None
+    for path, text in inputs:
         last_line = len(text.splitlines())
+        if path == request:
+            own = without_copies(text, [other for named, other in inputs if named != path])
+            if own is not text:
+                text, last_line = own, len(own.rstrip().splitlines())
         parts = outline(text, limit)
         if floor:
             parts = join_short(parts, last_line, floor, alone)

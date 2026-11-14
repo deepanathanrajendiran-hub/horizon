@@ -266,7 +266,10 @@ a `requirements.md` keeps needing it. Two more things hold for a thin goal:
   two such parts is cut once near its middle; each part is listed with its
   first and last line, `4 Asyncio API (lines 158 to 199)`, the last part's last
   line being the file's: in the thin15 run the last part was given as "from
-  line 158" and three builds read only the section it is named by) and asks
+  line 158" and three builds read only the section it is named by; a named
+  file that `request.md` also holds a whole copy of is listed once, under the
+  file: in the thin16 run one session pasted its 357-line SPEC.md into
+  `request.md`, and the pass ran 14 parts for 7) and asks
   for one pass through
   them: run the work as each part describes,
   print what comes back, and read it against the request; where they differ the
