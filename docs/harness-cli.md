@@ -263,7 +263,16 @@ a `requirements.md` keeps needing it. Two more things hold for a thin goal:
   single numbers; a number past the end names nothing, anything else is an
   error). Until none is left, `check` reports the rest as `request_check`,
   `close` lists them in `missing`, and the session-start message shows them, so
-  the pass can span sessions. (Before the thin12 run any `check` after the ask
+  the pass can span sessions. One `check` saves no more parts than the tool
+  calls the session made since the last save (or since `close` asked), and 8 at
+  most; where no hook counts the session's calls, only the 8 applies. (thin13
+  run: four of nine builds saved every part with `check --parts` calls made one
+  after another, nothing run between them; sapp ran three scripts for 17 parts
+  and closed in session 3.) While the pass is under way the session-start
+  message names the next part with its lines and leaves out the Plateau line,
+  the repeated-next-action line and "change a file of the work within your
+  first 5 tool calls": the pass is the session's work, and it changes no file
+  unless it finds a difference. (Before the thin12 run any `check` after the ask
   released it: protobuf-to-pydantic saved an ordinary checkpoint and closed at 22
   of 42 hidden tests without the pass; of 44 builds asked, 9 ran the work at
   most once before the releasing `check`.) Not asked when the request has fewer than 2 headed
@@ -894,4 +903,7 @@ changed nothing, so the message sends the agent back to running and building the
   (`install check: ...` and `... by design`): those answer for one goal's request.
 - `check` on files that have not changed since the last gate run does not run the gate again (`gate_skipped`): the
   last result and its exit code stand.
-- One `check --parts` saves at most 8 parts of the request check.
+- One `check --parts` saves no more parts of the request check than the tool calls made since the last save, and
+  at most 8.
+- A name the request writes short after a full one (`` `pkg.protocol`, `.server`, `.client` ``) is on the surface
+  list as the full name's sibling (`pkg.server`, `pkg.client`).

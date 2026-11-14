@@ -472,9 +472,9 @@ def _request_check_line(state: dict) -> str:
             return ""
         left = f"the parts are {parts}"
     return (" The last `close` passed every check and asked for the work to be gone through against the request, "
-            f"part by part, before the goal completes: {left}. Run the work the way each part describes, print "
-            "what comes back, and read it against the request's own words. Where they differ, change the code, "
-            "never a test's expectation. Save the parts you ran with `check --parts NUMBERS`, then run `close`.")
+            f"part by part, before the goal completes: {left}. That pass is this session's work: start with "
+            f"{goal.next_part(state) or 'the first part left'}, and do not read the whole request or the whole of "
+            f"the work again first. {goal.RUN_A_PART} {goal.SAVE_PARTS} Run `close` when none is left.")
 
 def _unbuilt_line(state: dict) -> str:
     """Names the request gives in code that the work defines nowhere (read from the source; nothing is run). Not
@@ -931,9 +931,18 @@ def _session_start(session: str | None, source: str | None = None) -> dict | Non
                          + (_review_line(state) if fresh else ""))
             except Exception:
                 pass
+            # While a request check is under way it is the session's work, and the lines that send a session to
+            # build or to edit say the opposite. They are still computed, since each keeps its own record.
+            # thin13 protobuf-to-pydantic, session 9: "go through the request, part by part", then "Plateau ...
+            # Build this session; do not start a review. Make your first tool call this session an edit to the
+            # work", then "change a file of the work within your first 5 tool calls". pgqueuer, sessions 8 to 10:
+            # "This next action has now opened 3 sessions in a row ... pick the largest part of the request that
+            # is unbuilt", its next action being the `close` that lists the parts.
+            checking = goal.request_check_open(state)
             try:
+                repeat = _repeat_line(state, session) if startup else ""
                 line += (_unbuilt_line(state) + _unfinished_line(state) + _request_check_line(state)
-                         + (_repeat_line(state, session) if startup else ""))
+                         + ("" if checking else repeat))
             except Exception:
                 pass
             plateau = _plateau_line(state) if startup else ""
@@ -943,6 +952,8 @@ def _session_start(session: str | None, source: str | None = None) -> dict | Non
                 differ = ""
             known += [f["text"] for f in state.get("facts") or []]
             resume = RESUME if _worked_on(state) else ""
+            if checking:
+                plateau = resume = ""
             lines.append(f"{line}{plateau}{differ}{resume}{note}{_notes_line(state['slug'])} Run "
                          f"`close {state['slug']}` when you think it is done.")
         except Exception:

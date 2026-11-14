@@ -724,8 +724,11 @@ def _checkpoint_locked(slug, did, next_action, tree_hash_value,
         known = set(range(1, len(asked["parts"]) + 1))
         done = set(asked.get("done") or ())
         new = sorted((set(parts) & known) - done)
-        asked["done"] = sorted(done | set(new[:PARTS_PER_CHECK]))
-        state["checkpoints"][-1]["parts_left_over"] = len(new[PARTS_PER_CHECK:])
+        room = _parts_room(asked)
+        asked["done"] = sorted(done | set(new[:room]))
+        state["checkpoints"][-1]["parts_left_over"] = len(new[room:])
+        state["checkpoints"][-1]["parts_room"] = room
+        asked["mark"] = _calls_mark()
     state["used"]["turns"] += 1
     return _save(state)
 
@@ -1006,6 +1009,50 @@ KEPT_BY_HORIZON = "(kept by Horizon)"  # how the heading over a carried-over req
 # this, `check --parts 1-99` saved every part in one call, with nothing run (`close` then completed).
 PARTS_PER_CHECK = 8
 
+# How one part is run. The `close` that asks says it, and so do `close` and `check` while the pass is under way and
+# each session's start. thin13 protobuf-to-pydantic (11dc6c7): asked in session 7, it read only the two shorter
+# forms in session 8, which left out "not a new set of tests"; it wrote a 648-line test file for the 19 parts and
+# spent sessions 9 and 10 on that file's fixture. No part was run.
+RUN_A_PART = ("Take the parts in order, one at a time. Read the part's own lines, run a short script or command that "
+              "uses the work the way the part describes and prints what comes back, and read what it printed against "
+              "the request's own words: names, arguments and their order, defaults, returned values, error types, "
+              "output format. Write no expected values into the script, and do not write the pass as a test file: "
+              "it is one pass through the request, not a new set of tests. Where the work differs, the request is "
+              "right: change the code, never a test's expectation.")
+SAVE_PARTS = ("Save each part once it is run, with `check --parts NUMBERS` (such as `--parts 3` or `--parts 3-4`, "
+              "and `--did` saying what differed): one `check` saves no more parts than the tool calls made since "
+              f"the last save, and at most {PARTS_PER_CHECK}. A part with nothing to run is done once read.")
+
+
+def _calls_mark() -> dict | None:
+    """Where the session's count of tool calls stands, kept with the request check each time parts are saved."""
+    now = reviewing.session_calls()
+    return {"session": now[0], "calls": now[1]} if now else None
+
+
+def _parts_room(asked: dict) -> int:
+    """How many parts this `check` may save: one for each tool call made since the last save (or since `close`
+    asked), PARTS_PER_CHECK at most. Without a count of the session's calls (no hooks, or a session whose count is
+    still 0, which is what a runtime that sends no tool-call event looks like) only that cap applies.
+
+    thin13 (11dc6c7): four of the nine builds that were asked saved every part with `check --parts` calls made one
+    after another (`1-8`, `9-16`, `17-22`), nothing run between them. sapp ran three scripts for 17 parts and closed
+    in session 3; huey ran six commands for 22. fiddle ran three scripts and saved 20 parts, twice, and completed
+    twice; reopened each time, its later sessions took one or two parts each and changed the code six more times."""
+    now = reviewing.session_calls()
+    if now is None or now[1] <= 0:
+        return PARTS_PER_CHECK
+    session, calls = now
+    mark = asked.get("mark") if isinstance(asked.get("mark"), dict) else {}
+    marked = mark.get("calls")
+    if mark.get("session") == session and isinstance(marked, int) and calls > marked:
+        since = calls - marked - 1  # the call that saved (or asked) is itself counted by now
+    elif mark.get("session") == session and isinstance(marked, int) and calls == marked:
+        since = 0  # the same call: `check --parts 1-8; check --parts 9-16` on one command line
+    else:
+        since = calls  # a later session, or a resume, which counts from nothing again
+    return max(0, min(PARTS_PER_CHECK, since))
+
 def _request_part_list(state: dict) -> list[dict]:
     """The request's headed parts in order, each `{"file", "line", "heading"}`; [] when it has too few to walk.
     The heading Horizon itself writes above a carried-over request (`cli.EARLIER_REQUEST`) is not a part of it."""
@@ -1055,6 +1102,21 @@ def _request_parts_note(state: dict) -> str:
     return (f"{len(left)} of {len(asked.get('parts') or ())} parts of the request are still to run: "
             f"{_numbered(asked['parts'], set(left))}") if left else ""
 
+def next_part(state: dict) -> str:
+    """Where the request check goes on, with the lines to read: "part 6 (SPEC.md lines 57 to 93)"; "" when no
+    part is left. thin13 protobuf-to-pydantic, session 8: shown 19 parts, it read the request from its first line
+    and then every module of the work, and had four calls left."""
+    asked = state.get("request_check") or {}
+    parts, left = asked.get("parts") or [], request_parts_left(state)
+    if not left:
+        return ""
+    number = left[0]
+    part = parts[number - 1]
+    later = parts[number] if number < len(parts) and parts[number]["file"] == part["file"] else None
+    lines = (f"lines {part['line']} to {later['line'] - 1}" if later and later["line"] > part["line"]
+             else f"from line {part['line']}")
+    return f"part {number} ({part['file']} {lines})"
+
 
 def request_check_open(state: dict) -> bool:
     """True from the `close` that asked for the request check until `check --parts` has saved every part. (A goal
@@ -1094,27 +1156,17 @@ def request_check(state: dict, observed_hash: str | None = None) -> str | None:
     if observed_hash is not None and not carried_on and _unchanged_since_baseline(state, observed_hash):
         return None
     if asked and "parts" in asked:
-        return ("The request check is under way: " + _request_parts_note(state) + ". Run the work the way each "
-                "describes, print what comes back and read it against the request's own words; where they differ, "
-                "change the code, never a test's expectation. Save the ones you ran with `check --parts NUMBERS` "
-                f"(such as `--parts 3-6,9`; one `check` saves at most {PARTS_PER_CHECK}); a part with nothing to "
-                "run is done once read. `close` completes when none is left.")
+        return ("The request check is under way: " + _request_parts_note(state) + ". " + RUN_A_PART + " "
+                + SAVE_PARTS + " `close` completes when none is left.")
     parts = _request_part_list(state)
     if not parts:
         return None
     names = unbuilt_names(state)
     return ("The gate passes, and the gate is your own tests: they agree with your reading of the request, not "
             "with the request. Before this goal completes, go through the request once more, part by part: "
-            f"{_numbered(parts)}. This is one pass through the request, not a new set of tests. For each part, "
-            "read it, then run a short script or command that uses the work the way that part describes and "
-            "prints what comes back; write no expected values into it. Read what it printed against the "
-            "request's own words: names, arguments and their order, defaults, returned values, error types, "
-            "output format. Where they differ, the request is right: change the code, never a test's "
-            "expectation, and add one test for each difference you fixed, its value copied from the request. "
-            "Where the request does not settle a point, leave the code and record it with `note --finding`. "
-            "Save the parts you ran with `check --parts NUMBERS` (such as `--parts 1-4,7`, with `--did` saying "
-            f"what differed; one `check` saves at most {PARTS_PER_CHECK} parts, so save as you go); a part with "
-            "nothing to run is done once read. The pass need not fit in this "
+            f"{_numbered(parts)}. {RUN_A_PART} Add one test for each difference you fixed, its value copied from "
+            "the request. Where the request does not settle a point, leave the code and record it with "
+            f"`note --finding`. {SAVE_PARTS} The pass need not fit in this "
             "session: the next one is shown the parts still to run. When none is left, `close` completes."
             + (f" Start with these: {names}" if names else ""))
 
@@ -1132,7 +1184,7 @@ def _ask_request_check(slug: str) -> None:
         if state["status"] != "active" or state.get("request_check"):
             return
         state["request_check"] = {"at": _now(), "turn": state["used"]["turns"],
-                                  "parts": _request_part_list(state), "done": []}
+                                  "parts": _request_part_list(state), "done": [], "mark": _calls_mark()}
         _persist_mutation_locked(state)
 
 

@@ -393,11 +393,15 @@ def check(args) -> tuple[dict, int]:
         report["gate_skipped"] = (f"No file changed since the last gate run, so the gate was not run again: its "
                                   f"result ({stands}) stands. What you did and the next action are saved.")
     if goal.request_check_open(state) and goal._request_parts_note(state):
-        over = (state["checkpoints"][-1].get("parts_left_over") or 0) if args.parts else 0
-        report["request_check"] = (goal._request_parts_note(state) + ". Save the ones you run with "
+        last = state["checkpoints"][-1]
+        over = (last.get("parts_left_over") or 0) if args.parts else 0
+        room = last.get("parts_room", goal.PARTS_PER_CHECK)
+        report["request_check"] = (goal._request_parts_note(state) + ". Save each one you run with "
                                    "`check --parts NUMBERS`; `close` completes when none is left."
-                                   + (f" One `check` saves at most {goal.PARTS_PER_CHECK} parts: {over} more that "
-                                      "this one named are still to run. Run them, then save them." if over else ""))
+                                   + (f" This `check` saved {room} of the parts it named and left {over}: one "
+                                      "`check` saves no more parts than the tool calls made since the last save, "
+                                      f"and at most {goal.PARTS_PER_CHECK}. Run the next part, then save it."
+                                      if over else ""))
     elif was_open and args.parts:
         report["parts_saved"] = "Every part of the request check is saved: run `close` now."
     report["review_required"] = not error and (

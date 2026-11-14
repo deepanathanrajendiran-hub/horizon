@@ -492,6 +492,19 @@ def calls_used() -> int:
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return 0
 
+def session_calls() -> tuple[str, int] | None:
+    """The current session and the tool calls it has made so far, or None when no hook is counting them (the
+    hooks are not installed, or the count on disk is another session's)."""
+    import paths
+    session = paths.current_session()
+    try:
+        record = json.loads(_calls_path().read_text())
+        if session and record.get("session") == session:
+            return session, int(record["calls"])
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        pass
+    return None
+
 def session_started() -> float | None:
     """When the current session last (re)started (a resume keeps its session id); None when unknown."""
     import paths

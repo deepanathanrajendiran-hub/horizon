@@ -68,6 +68,32 @@ def _line_refs(line: str, package: str, pkg: str) -> set[str]:
             found.add(".".join([package, *segments]))
     return found
 
+def _short_refs(lines: list[str], package: str, pkg: str) -> set[str]:
+    """Names a line writes short after one it writes in full: "(`pkg.protocol`, `.server`, `.client`)" names
+    `pkg.server` and `pkg.client`, read the way a relative import is, from the module the full name is in.
+    Only a run of code spans is read this way: the full name, then a separator, then `.name`.
+
+    thin13 websockets (11dc6c7): the request's heading "Sans-I/O Protocol (`websockets.protocol`, `.server`,
+    `.client`)" put `websockets.protocol` on the surface list and neither of the others. Of twelve graded builds,
+    the ten with both modules passed 32 to 35 of 35 hidden tests, and the two without them passed 27. Over the 157
+    saved requests the notation occurs twice (pytermgui: `pytermgui.markup.tokens`, `.style_maps`, `.macros`,
+    `.aliases`, all four placed by other lines the same way)."""
+    found = set()
+    full = re.compile(rf"(?:\*\*|__)?`({pkg}(?:\.[A-Za-z_]\w*)*)`(?:\*\*|__)?")
+    for line in lines:
+        for first in full.finditer(line):
+            parent = [package, *first.group(1).split(".")[1:-1]]
+            span = _NEXT_SPAN.match(line, first.end())
+            while span:
+                short = re.fullmatch(r"\.([A-Za-z_]\w*)", span.group(1).strip())
+                if not short:
+                    break
+                name = short.group(1)
+                if name not in _FILE_SUFFIXES and _keep([name]):
+                    found.add(".".join([*parent, name]))
+                span = _NEXT_SPAN.match(line, span.end())
+    return found
+
 
 def _from_imports(lines: list[str], package: str, pkg: str) -> set[str]:
     """`from pkg.mod import a, b` anywhere in a line: code, prose in backticks, doctests or comments."""
@@ -430,6 +456,7 @@ def refs(text: str, package: str) -> list[str]:
         if any("AttributeError" in near for near in lines[i:i + 3]):
             continue
         dotted |= _line_refs(line, package, pkg)
+    dotted |= _short_refs(text.splitlines(), package, pkg)  # with its backticks: the run of code spans is the sign
     placed = set(modules)
     placed |= _from_imports(lines, package, pkg)
     placed |= _init_all(text.splitlines(), package)  # with its backticks: headings name the module in code
