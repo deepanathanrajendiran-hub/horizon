@@ -32,36 +32,70 @@ to 10 sessions per build. The plan was frozen before the first build.
 | Builds that scored zero | **2 of 62** | 10 of 62 | p = 0.015 |
 | Input tokens | **407M** | 496M | 18% fewer |
 
-Both primary measures favour Horizon, so by the plan's rule it beat the plain agent
-on this run. What the result does and does not show:
+Scope of the result:
 
-- **The gain comes from preventing total failures.** Six of the plain agent's ten
-  zeros were a missing or failing setup script, which the install check catches. On
-  the 22 tasks where neither arm had a zero, the two were level (+1.0, not
-  significant).
-- **The size of the gain depends on the day.** The plain agent scored 6.7 points
-  lower than in an earlier run of the same tasks. Against that earlier run the lead
-  would be about +3.5.
-- **These are the tasks Horizon was developed on.** On the 10 tasks not studied
-  since the previous run, the lead was +3.5 and not significant. A held-out
-  benchmark is the next step.
+- **The gain comes from preventing total failures,** such as a package that does not
+  install or a module that does not import. On the 22 tasks where neither arm had a
+  zero, the two were level (+1.0, not significant).
+- **These are the tasks Horizon was developed on.** A held-out benchmark is the
+  next step.
 - **Only Claude Code was measured.** The Codex skill has not been through this
   benchmark.
 
 The full record, with every task's score, is in
 [docs/evaluations/e2eswe-big2.md](docs/evaluations/e2eswe-big2.md).
 
-### How it got here
+## Architecture
 
-| Date | Version | Tasks | Horizon − plain | What followed |
-| --- | --- | --- | --- | --- |
-| 2026-11-02 | Original design (requirement lists, reviewer agents) | 94 | **−1.7** (p = 0.034), at half the tokens | It led for five sessions, then closed goals early with gaps. The design was cut down to a thin core. |
-| 2026-11-10 | Thin, version 3 | 31 × 2 | +3.7 (p = 0.20), 41% fewer tokens | Not significant, so no win was claimed. Fourteen more versions followed. |
-| 2026-11-14 | Thin, version 17 (this code) | 31 × 2 | **+10.2** (p = 0.013) | Described above. |
+```mermaid
+flowchart TB
+    subgraph Session["Agent session (Claude Code or Codex)"]
+        SK["Skill: SKILL.md"]
+    end
+    HK["Hooks: SessionStart, PostToolUse, Stop"]
+    SK -- "start, check, note, close" --> CLI["CLI: harness/cli.py"]
+    CLI --> GOAL["Goal lifecycle: goal.py"]
+    GOAL --> GATE["Gate runner: gate.py"]
+    GOAL --> CHK["Checks from the request: surface, install, placeholders, unbuilt names, examples, request parts"]
+    GOAL --> EV["Evidence rules: evidence.py, tree_hash.py"]
+    GOAL --> STATE[("State on disk: PROJECT/.claude/harness")]
+    HK -- "saved results only" --> STATE
+    HK -- "what the next session is told" --> Session
+```
 
-Earlier designs also showed no gain on EvoCode-Bench and NL2Repo.
+Horizon has four layers:
 
-## How it works
+1. **The skill** is a 130-line instruction file. It tells the agent when to save,
+   what each report means and what to do about it.
+2. **The CLI** is one Python entry point that both runtimes call. Its commands
+   print JSON.
+3. **The core** holds the goal's lifecycle, the gate runner, the checks and the
+   rules that decide whether a goal may complete.
+4. **The state** is plain files in the project being worked on.
+
+Hooks sit beside the session. They read the state and tell each new session where
+the job stands.
+
+### Design principles
+
+- **Nothing lives in the conversation.** A session can end at any call, so every
+  command reads the state from disk and writes it back. The next session needs no
+  memory of the last one.
+- **The checks come from the request.** They are written by `start`, before any
+  code exists, from the request's own text. The agent's tests show that its code
+  does what the agent expected. These checks show whether it does what was asked.
+- **A result counts only for the files it ran on.** Every test result is saved with
+  a fingerprint of the project's files. A pass on older files cannot complete a
+  goal.
+- **Completion is decided by the harness.** The agent asks with `close`. The
+  harness answers "complete" or lists what is missing.
+- **Hooks never run the project's code.** Claude Code runs hooks outside the
+  sandbox it gives the agent's commands, so hooks read saved results only.
+- **The skill stays general.** It carries no rule fitted to one benchmark or one
+  kind of task, and a test guards that.
+- **No dependencies.** The runtime is the Python standard library.
+
+### The goal lifecycle
 
 ```mermaid
 flowchart LR
@@ -89,30 +123,53 @@ optional time limit, checkpoints, notes and the next action.
 
 ### Checks taken from the request
 
-`start` reads the request, and the Markdown files it names, and writes these checks
-before any code exists.
+`start` reads the request, and the Markdown files it names, and writes these
+checks.
 
-| Check | What it does | Effect on `close` |
-| --- | --- | --- |
-| Surface | Imports every module and public name the request gives. | Blocks |
-| Install | Copies the project, installs it offline in a throwaway environment the way the request says (a package install or the setup script it names), then imports it from another folder. | Blocks |
-| Placeholders | Finds functions with no body, and functions that hand out stubs. | Blocks |
-| Baseline tests | Detects a change to a test the project had before the goal. | Blocks until a person approves |
-| Unbuilt names | Lists names the request gives in code that no source file defines. | Reported |
-| Spec examples | Runs the request's own code examples and compares the results it states. | Reported |
+| Check | What it does | Effect on `close` | Module |
+| --- | --- | --- | --- |
+| Surface | Imports every module and public name the request gives. | Blocks | `surface.py` |
+| Install | Copies the project, installs it offline in a throwaway environment the way the request says (a package install or the setup script it names), then imports it from another folder. | Blocks | `install_gate.py` |
+| Placeholders | Reads the source for functions with no body, and for functions that hand out stubs. | Blocks | `stubs.py` |
+| Baseline tests | Detects a change to a test the project had before the goal. | Blocks until a person approves | `evidence.py` |
+| Unbuilt names | Lists names the request gives in code that no source file defines. | Reported | `unbuilt.py` |
+| Spec examples | Runs the request's own code examples and compares the results it states. | Reported | `examples.py` |
 
-Spec examples are reported and never block: on real libraries about a quarter of a
-specification's examples disagree with the released code, so a blocking check would
-push correct code toward a wrong example.
+Spec examples are reported and never block: a specification's examples are
+sometimes wrong, and a blocking check would push correct code toward a wrong
+example.
 
 ### The request check
 
 A passing test suite means the agent's tests pass, not that the request is met. So
-the first `close` that passes every check does not complete the goal. It lists the
-request's parts by number, each with its lines. The agent runs the work the way each
-part describes, reads the result against the request, and saves the parts it ran
-with `check --parts`. `close` completes when no part is left. The list is kept on
-disk, so the pass can span sessions.
+the first `close` that passes every check does not complete the goal.
+
+1. `close` splits the request into numbered parts by its headings, and joins short
+   sections so that a part is worth a pass. Each part is listed with its lines.
+2. The agent runs the work the way each part describes and reads the result against
+   the request's own words.
+3. `check --parts` saves the parts that were run. One `check` saves no more parts
+   than the tool calls made since the last save, so a part cannot be saved without
+   work.
+4. `close` completes when no part is left.
+
+The list is kept in the goal's state, so the pass can span sessions.
+
+### Evidence
+
+`close` completes a goal only on recorded evidence, and `evidence.py` holds the
+rules:
+
+- **Fingerprint.** `tree_hash.py` hashes the content and mode of every file Git can
+  see, tracked or not. Git's own state is left out, so a commit that changes no
+  file changes nothing.
+- **Coverage.** A gate result covers the current files only when its fingerprint
+  matches theirs. `check` skips the gate when the files have not changed since the
+  last run.
+- **Baseline.** `start` records the project's test files. A goal cannot pass by
+  editing a test it did not write.
+- **Budget.** Each `check` uses one turn. When the budget is spent, `close` records
+  the goal as finalized, not as complete.
 
 ### Hooks (Claude Code)
 
@@ -127,11 +184,68 @@ The first `start` in a project installs three hooks in the project's
 - **Stop** completes a goal whose saved results already allow it. Otherwise it sends
   the session back to work once while the goal is active and has budget left.
 
-**No hook runs the project's code.** Claude Code runs hooks outside the sandbox it
-gives the agent's commands, so hooks read saved results only. The gate, the install
-check and the examples run through commands the agent starts.
+A guard (`hookguard.py`) refuses to run the gate, the install check or the examples
+while a hook is active. Those run only through commands the agent starts, inside
+its sandbox.
 
 Codex has no hooks. Its skill runs `status` at the start of a session instead.
+
+### State on disk
+
+All state belongs to the project being worked on, never to the checkout Horizon is
+installed in. Several projects can share one installation.
+
+```text
+PROJECT/.claude/harness/            (.codex/harness for Codex)
+├── goals/SLUG.json                 the goal: request, gate, budget, checkpoints, next action
+├── gates/NAME/
+│   ├── request.md                  the request, verbatim
+│   ├── test_surface.py             one import test per name the request gives
+│   ├── spec_examples.py            the request's own examples
+│   └── examples_waived.json        examples skipped, each with the request line that says why
+└── notes/
+    ├── SLUG.md                     what the agent learned, part by part
+    ├── surface-SLUG.json           the surface check's last result
+    ├── install-SLUG.json           the install check's last result
+    └── last-call.json              where the last session stopped
+```
+
+Each read-modify-write of a goal holds a file lock, and each write replaces the
+file whole, so two sessions in one project do not lose each other's checkpoints.
+
+### Modules
+
+| Module | Role |
+| --- | --- |
+| [`cli.py`](harness/cli.py) | The entry point both runtimes call. |
+| [`goal.py`](harness/goal.py) | The goal's lifecycle: start, check, note, close, reopen, and the request check. |
+| [`gate.py`](harness/gate.py) | Runs the gate command with a timeout and records the result. |
+| [`evidence.py`](harness/evidence.py) | Decides which result covers the current files and what still blocks completion. |
+| [`tree_hash.py`](harness/tree_hash.py) | Fingerprints the project's files. |
+| [`surface.py`](harness/surface.py) | Reads the names a request gives and writes the import test. |
+| [`install_gate.py`](harness/install_gate.py) | The offline install check in a clean copy. |
+| [`examples.py`](harness/examples.py) | Extracts and runs the request's code examples and signatures. |
+| [`stubs.py`](harness/stubs.py) | Finds placeholder functions by reading the source. |
+| [`unbuilt.py`](harness/unbuilt.py) | Finds names the request gives that no source file defines. |
+| [`sections.py`](harness/sections.py) | Splits a request into the parts of the request check. |
+| [`hooks.py`](harness/hooks.py), [`hookguard.py`](harness/hookguard.py) | The Claude Code hooks, and the guard that keeps them from running project code. |
+| [`paths.py`](harness/paths.py), [`filelock.py`](harness/filelock.py) | Where the state lives, and safe concurrent writes. |
+| [`reviewing.py`](harness/reviewing.py) | Requirement lines and reviewer verdicts (optional mode). |
+| [`steps.py`](harness/steps.py), [`task_state.py`](harness/task_state.py), [`leases.py`](harness/leases.py) | State mode (optional, experimental). |
+
+### Two runtimes, one implementation
+
+Claude Code and Codex have separate skill instructions and separate state, backed
+by the same Python code. Each skill's `scripts/harness.py` is a symlink to
+`harness/cli.py`, and the skill passes its own `--runtime`.
+
+| | Claude Code | Codex |
+| --- | --- | --- |
+| Skill in this checkout | [.claude/skills/horizon](.claude/skills/horizon) | [.agents/skills/horizon](.agents/skills/horizon) |
+| Invocation | `/horizon` | `$horizon` |
+| Project state | `.claude/harness` | `.codex/harness` |
+| Hooks | SessionStart, PostToolUse, Stop | None |
+| Measured on E2E-SWE | Yes | No |
 
 ## Use it
 
@@ -153,14 +267,6 @@ python3 .agents/skills/horizon/scripts/harness.py --runtime codex doctor
 For another project, pass `--project "/absolute/project/path"` before the
 subcommand. The skill's location decides the implementation, and the working
 project decides where the state lives.
-
-| | Claude Code | Codex |
-| --- | --- | --- |
-| Skill in this checkout | [.claude/skills/horizon](.claude/skills/horizon) | [.agents/skills/horizon](.agents/skills/horizon) |
-| Invocation | `/horizon` | `$horizon` |
-| Project state | `.claude/harness` | `.codex/harness` |
-| Hooks | SessionStart, PostToolUse, Stop | None |
-| Measured on E2E-SWE | Yes | No |
 
 In an unattended run, set `HORIZON_UNATTENDED=1` in the environment the agent
 starts with. The Stop hook then sends an active goal back to work up to five times
@@ -219,45 +325,25 @@ The [CLI reference](docs/harness-cli.md) covers all three.
   killed while a worker holds an attempt, the next session must establish that the
   worker stopped before it runs `step-recover`.
 
-## Repository layout
-
-| Path | What it holds |
-| --- | --- |
-| [harness/](harness) | The implementation. `cli.py` is the entry point, `goal.py` the goal's lifecycle and `hooks.py` the Claude Code hooks. `surface.py`, `install_gate.py`, `examples.py`, `stubs.py`, `unbuilt.py` and `sections.py` are the checks. |
-| [.claude/skills/horizon](.claude/skills/horizon) | The Claude Code skill: a 130-line `SKILL.md` and a full guide. |
-| [.agents/skills/horizon](.agents/skills/horizon) | The Codex skill. |
-| [docs/harness-cli.md](docs/harness-cli.md) | Every command, check and rule, each with the run that led to it. |
-| [docs/evaluations](docs/evaluations) | The benchmark record. |
-| [tests/](tests) | 1,180 tests. |
-
 ## Development
 
 ```bash
 python3 -m pytest -q
 ```
 
-The tests need pytest, and the runtime has no third-party dependencies. The full
-suite takes about seven minutes.
-
-The fixes behind this version follow the same steps:
-
-1. Find the root cause in a build that went wrong.
-2. Write a regression test, and prove that it fails on the commit before the fix.
-3. Replay a change to a check offline over the saved builds and requests, to see
-   what else it would have flagged.
-4. Run the full suite.
-
-The skill text carries no rule fitted to one benchmark, and a test guards that.
+The suite has 1,180 tests and takes about seven minutes. The tests need pytest, and
+the runtime has no third-party dependencies. They cover the goal's lifecycle, each
+check, the evidence rules, the hooks, both runtime entry points and whole CLI
+workflows.
 
 More to read:
 
-- [CLI reference](docs/harness-cli.md)
+- [CLI reference](docs/harness-cli.md): every command, check and rule
 - [Runtime separation results](docs/runtime-separation-results.md)
-- Design history: [specs](docs/superpowers/specs) and [plans](docs/superpowers/plans)
+- Design documents: [specs](docs/superpowers/specs) and [plans](docs/superpowers/plans)
 
 ## Provenance
 
 Horizon was split, with its filtered commit history, from
 [continual-harness](https://github.com/deepanathanrajendiran-hub/continual-harness)
-(archived), which held this skill and a companion skill together. That repository
-keeps the earlier evaluation records.
+(archived), which held this skill and a companion skill together.
